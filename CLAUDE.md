@@ -26,6 +26,7 @@ uv run mypy                                              # strict typecheck (pac
 - `pytest` runs with `asyncio_mode = "auto"` — do **not** decorate new async tests with `@pytest.mark.asyncio`.
 - `mypy` is `strict = true` and excludes `tests/.*`. If a new untyped third-party dep is added, extend the `[[tool.mypy.overrides]]` block in `pyproject.toml` with `ignore_missing_imports = true`.
 - No Makefile, pre-commit hook, or CI config exists — all QA is run manually via the commands above.
+- **macOS editable-install gotcha**: `uv` sets the BSD `UF_HIDDEN` flag on `.venv/lib/.../_editable_impl_wolfbot.pth` (sometimes on every sync, including no-op audits), and Python 3.11.9+ `site.py` silently skips `.pth` files with that flag. The editable install then drops out of `sys.path` and `uv run wolfbot` dies with `ModuleNotFoundError: No module named 'wolfbot'`. **Fix committed to the venv**: `.venv/lib/python3.11/site-packages/sitecustomize.py` inserts `src/` into `sys.path` via normal module import, which is not subject to the `UF_HIDDEN` filter. If `.venv` is ever rebuilt from scratch (`rm -rf .venv && uv sync`), recreate that file with the same content, or one-shot unblock with `chflags -R nohidden .venv` (may need two passes). `pytest` and `mypy` both set their own `pythonpath` / `mypy_path`, so they pass even when the editable install is broken — don't rely on them to catch this.
 
 ## Required environment variables
 
