@@ -1,0 +1,195 @@
+"""Pure rules for 9-player werewolf.
+
+No I/O, no global clocks. Random.Random is always an explicit parameter so tests can seed it.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Sequence
+from random import Random
+
+from wolfbot.domain.enums import (
+    FACTION_OF_ROLE,
+    ROLE_DISTRIBUTION,
+    VILLAGE_SIZE,
+    Faction,
+    Role,
+)
+from wolfbot.domain.models import AttackResult, NightAction, Player, Seat, Vote, VoteOutcome
+
+
+def assign_roles(seats: Sequence[Seat], rng: Random) -> dict[int, Role]:
+    """Shuffle the 9 roles (2/1/1/1/1/3) and bind them to seats by seat_no.
+
+    Raises ValueError if len(seats) != 9.
+    """
+    if len(seats) != VILLAGE_SIZE:
+        raise ValueError(f"Village size must be {VILLAGE_SIZE}; got {len(seats)}")
+    pool: list[Role] = []
+    for role, count in ROLE_DISTRIBUTION.items():
+        pool.extend([role] * count)
+    assert len(pool) == VILLAGE_SIZE, "ROLE_DISTRIBUTION must sum to 9"
+    rng.shuffle(pool)
+    return {seat.seat_no: pool[i] for i, seat in enumerate(seats)}
+
+
+def day_discussion_duration(day_number: int) -> int:
+    """Seconds for the discussion phase. Day 1: 300, day 2: 240, day 3+: 180."""
+    if day_number <= 0:
+        raise ValueError("day_number must be >= 1 for discussion")
+    if day_number == 1:
+        return 300
+    if day_number == 2:
+        return 240
+    return 180
+
+
+def legal_attack_targets(players: Sequence[Player], actor_seat: int) -> list[int]:
+    return [
+        p.seat_no
+        for p in players
+        if p.alive and p.seat_no != actor_seat and p.role is not Role.WEREWOLF
+    ]
+
+
+def legal_divine_targets(players: Sequence[Player], seer_seat: int) -> list[int]:
+    return [p.seat_no for p in players if p.alive and p.seat_no != seer_seat]
+
+
+def legal_guard_targets(
+    players: Sequence[Player],
+    knight_seat: int,
+    previous_guard_seat: int | None,
+) -> list[int]:
+    return [
+        p.seat_no
+        for p in players
+        if p.alive and p.seat_no != knight_seat and p.seat_no != previous_guard_seat
+    ]
+
+
+def random_white_target(players: Sequence[Player], seer_seat: int, rng: Random) -> int:
+    """Pick a NIGHT_0 random-white target: alive, not seer, not a werewolf."""
+    pool = [
+        p.seat_no
+        for p in players
+        if p.alive and p.seat_no != seer_seat and p.role is not Role.WEREWOLF
+    ]
+    if not pool:
+        raise RuntimeError("No legal NIGHT_0 white target available")
+    return rng.choice(pool)
+
+
+def compute_vote_result(
+    votes: Sequence[Vote],
+    alive_seats: set[int],
+    candidate_seats: set[int] | None = None,
+) -> VoteOutcome:
+    """Count submitted votes (target_seat is None means abstention).
+
+    - Only voters in `alive_seats` count.
+    - If `candidate_seats` is provided (runoff), only votes whose target is in it count.
+    - If no valid votes at all → VoteOutcome(executed=None, tied=()).
+    - Single-max → executed.
+    - Multi-max → tied=tuple(sorted(tied_seats)).
+    """
+    tallies: Counter[int] = Counter()
+    for v in votes:
+        if v.voter_seat not in alive_seats:
+            continue
+        if v.target_seat is None:
+            continue
+        if v.target_seat == v.voter_seat:  # self-vote is illegal, silently skip
+            continue
+        if candidate_seats is not None and v.target_seat not in candidate_seats:
+            continue
+        tallies[v.target_seat] += 1
+
+    if not tallies:
+        return VoteOutcome(executed=None, tied=())
+    top = max(tallies.values())
+    tied = sorted(s for s, c in tallies.items() if c == top)
+    if len(tied) == 1:
+        return VoteOutcome(executed=tied[0], tied=())
+    return VoteOutcome(executed=None, tied=tuple(tied))
+
+
+def resolve_wolf_attack(
+    actions: Sequence[NightAction],
+    alive_wolf_seats: Sequence[int],
+    force_skip: bool,
+) -> AttackResult:
+    """Determine the night's attack target per spec.
+
+    - Solo wolf: their pick (or None if missing).
+    - Two wolves: both submit same target → attack; otherwise split.
+    - With force_skip=False, any missing wolf → AttackResult.missing populated so the
+      caller can pause into WAITING_HOST_DECISION without committing a target.
+    - The `missing` tuple is always reported (even with force_skip) so logs can name
+      who didn't submit.
+    """
+    alive = list(alive_wolf_seats)
+    if not alive:
+        return AttackResult()
+
+    picks: dict[int, int | None] = {
+        a.actor_seat: a.target_seat for a in actions if a.actor_seat in alive
+    }
+    missing = tuple(seat for seat in alive if seat not in picks)
+
+    if missing and not force_skip:
+        return AttackResult(missing=missing)
+
+    if len(alive) == 1:
+        wolf = alive[0]
+        return AttackResult(target_seat=picks.get(wolf), missing=missing)
+
+    targets = [picks.get(w) for w in alive]
+    if targets[0] is not None and targets[0] == targets[1]:
+        return AttackResult(target_seat=targets[0], missing=missing)
+    return AttackResult(split=True, missing=missing)
+
+
+def medium_result(executed_player: Player | None) -> Faction | None:
+    """Medium sees only the executed player's faction — or None if no execution."""
+    if executed_player is None or executed_player.role is None:
+        return None
+    return FACTION_OF_ROLE[executed_player.role]
+
+
+def check_victory(players: Sequence[Player]) -> Faction | None:
+    """Spec win rules.
+
+    - Village wins: alive werewolves == 0.
+    - Werewolves win: alive werewolves >= alive non-werewolves.
+      (Madman is counted as non-werewolf for this arithmetic per spec "生存非人狼人数".)
+    - Otherwise None.
+    """
+    alive = [p for p in players if p.alive]
+    alive_wolves = sum(1 for p in alive if p.role is Role.WEREWOLF)
+    alive_non_wolves = len(alive) - alive_wolves
+    if alive_wolves == 0:
+        return Faction.VILLAGE
+    if alive_wolves >= alive_non_wolves:
+        return Faction.WEREWOLVES
+    return None
+
+
+def alive_werewolves(players: Sequence[Player]) -> list[int]:
+    return [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+
+
+def seat_of_role(players: Sequence[Player], role: Role) -> int | None:
+    """Find the (unique) seat assigned to role. Returns None if dead/missing."""
+    for p in players:
+        if p.role is role:
+            return p.seat_no
+    return None
+
+
+def alive_seat_of_role(players: Sequence[Player], role: Role) -> int | None:
+    for p in players:
+        if p.role is role and p.alive:
+            return p.seat_no
+    return None
