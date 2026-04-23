@@ -19,9 +19,15 @@ from wolfbot.domain.rules import (
 
 def _players() -> list[Player]:
     roles = [
-        Role.WEREWOLF, Role.WEREWOLF, Role.MADMAN,
-        Role.SEER, Role.MEDIUM, Role.KNIGHT,
-        Role.VILLAGER, Role.VILLAGER, Role.VILLAGER,
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.MADMAN,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
     ]
     return [Player(seat_no=i + 1, role=r, alive=True) for i, r in enumerate(roles)]
 

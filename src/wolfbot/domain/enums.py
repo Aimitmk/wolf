@@ -70,6 +70,24 @@ class SubmissionType(StrEnum):
     KNIGHT_GUARD = "KNIGHT_GUARD"
 
 
+class SubmitResult(StrEnum):
+    """Outcome of GameService.submit_vote / submit_night_action.
+
+    UI layers branch on this to tell the user whether a click was accepted
+    vs silently dropped because the DM is stale/invalid.
+    """
+
+    ACCEPTED = "ACCEPTED"
+    STALE_PHASE = "STALE_PHASE"
+    GAME_NOT_FOUND = "GAME_NOT_FOUND"
+    VOTER_DEAD = "VOTER_DEAD"
+    TARGET_DEAD = "TARGET_DEAD"
+    SELF_VOTE = "SELF_VOTE"
+    ACTOR_DEAD = "ACTOR_DEAD"
+    ROLE_MISMATCH = "ROLE_MISMATCH"
+    ILLEGAL_TARGET = "ILLEGAL_TARGET"
+
+
 FACTION_OF_ROLE: dict[Role, Faction] = {
     Role.WEREWOLF: Faction.WEREWOLVES,
     Role.MADMAN: Faction.WEREWOLVES,

@@ -39,9 +39,7 @@ class FakeDiscordAdapter:
     async def kill_permissions(
         self, game: Game, seats: Sequence[Seat], seat_no: int, was_wolf: bool
     ) -> None:
-        self._record(
-            "kill_permissions", game_id=game.id, seat=seat_no, was_wolf=was_wolf
-        )
+        self._record("kill_permissions", game_id=game.id, seat=seat_no, was_wolf=was_wolf)
 
     async def reconcile(
         self, game: Game, seats: Sequence[Seat], players: Sequence[Player] | None = None
@@ -57,12 +55,13 @@ class FakeDiscordAdapter:
     async def post_morning(self, game: Game, text: str) -> None:
         self._record("post_morning", game_id=game.id, text=text)
 
-    async def send_private(
-        self, game: Game, audience_seat: int, text: str, kind: str
-    ) -> None:
+    async def send_private(self, game: Game, audience_seat: int, text: str, kind: str) -> None:
         self._record(
-            "send_private", game_id=game.id, audience=audience_seat,
-            text=text, kind=kind,
+            "send_private",
+            game_id=game.id,
+            audience=audience_seat,
+            text=text,
+            kind=kind,
         )
 
     async def send_vote_dms(
@@ -102,9 +101,7 @@ class FakeDiscordAdapter:
             missing=pending.missing_seats,
         )
 
-    async def announce_recovery(
-        self, game: Game, pending: PendingDecision | None
-    ) -> None:
+    async def announce_recovery(self, game: Game, pending: PendingDecision | None) -> None:
         self._record(
             "announce_recovery",
             game_id=game.id,

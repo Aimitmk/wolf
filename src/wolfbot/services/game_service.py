@@ -19,7 +19,7 @@ from collections.abc import Callable, Sequence
 from random import Random
 from typing import Protocol, runtime_checkable
 
-from wolfbot.domain.enums import Phase, Role, SubmissionType
+from wolfbot.domain.enums import Phase, Role, SubmissionType, SubmitResult
 from wolfbot.domain.models import (
     Game,
     NightAction,
@@ -66,9 +66,7 @@ class DiscordAdapter(Protocol):
 
     async def post_public(self, game: Game, text: str, kind: str) -> None: ...
     async def post_morning(self, game: Game, text: str) -> None: ...
-    async def send_private(
-        self, game: Game, audience_seat: int, text: str, kind: str
-    ) -> None: ...
+    async def send_private(self, game: Game, audience_seat: int, text: str, kind: str) -> None: ...
 
     async def send_vote_dms(
         self,
@@ -165,14 +163,14 @@ class GameService:
 
         # 1. Discord permissions first — any failure aborts the advance (we'll retry).
         try:
-            projected_game = game.model_copy(update={
-                "phase": transition.next_phase,
-                "day_number": transition.next_day,
-            })
-            projected_players = _project_players(players, transition)
-            await self.discord.apply_permissions(
-                projected_game, seats, projected_players
+            projected_game = game.model_copy(
+                update={
+                    "phase": transition.next_phase,
+                    "day_number": transition.next_day,
+                }
             )
+            projected_players = _project_players(players, transition)
+            await self.discord.apply_permissions(projected_game, seats, projected_players)
             for seat_no in transition.newly_dead_seats:
                 was_wolf = any(
                     p.seat_no == seat_no and p.role is not None and p.role.name == "WEREWOLF"
@@ -184,9 +182,7 @@ class GameService:
             return
 
         # 2. Commit transition (optimistic lock on expected_phase).
-        ok = await self.repo.apply_transition(
-            game_id, transition, expected_phase=game.phase
-        )
+        ok = await self.repo.apply_transition(game_id, transition, expected_phase=game.phase)
         if not ok:
             log.info("optimistic lock miss on game %s; another advance ran", game_id)
             return
@@ -205,9 +201,7 @@ class GameService:
         for entry in transition.private_logs:
             if entry.audience_seat is None:
                 continue
-            await self._safe_send_private(
-                new_game, entry.audience_seat, entry.text, entry.kind
-            )
+            await self._safe_send_private(new_game, entry.audience_seat, entry.text, entry.kind)
         if transition.morning_text is not None:
             await self._safe_post_morning(new_game, transition.morning_text)
 
@@ -246,34 +240,34 @@ class GameService:
         if game.phase is Phase.DAY_DISCUSSION:
             return plan_day_discussion_to_vote(game, now)
         if game.phase is Phase.DAY_VOTE:
-            votes = await self.repo.load_votes(
-                game.id, day=game.day_number, round_=0
-            )
-            return plan_day_vote_resolve(
-                game, players, seats, votes, game.force_skip_pending, now
-            )
+            votes = await self.repo.load_votes(game.id, day=game.day_number, round_=0)
+            return plan_day_vote_resolve(game, players, seats, votes, game.force_skip_pending, now)
         if game.phase is Phase.DAY_RUNOFF:
-            round0 = await self.repo.load_votes(
-                game.id, day=game.day_number, round_=0
-            )
+            round0 = await self.repo.load_votes(game.id, day=game.day_number, round_=0)
             alive = {p.seat_no for p in players if p.alive}
             tied = compute_vote_result(round0, alive).tied
-            round1 = await self.repo.load_votes(
-                game.id, day=game.day_number, round_=1
-            )
+            round1 = await self.repo.load_votes(game.id, day=game.day_number, round_=1)
             return plan_day_runoff_resolve(
-                game, players, seats, round1, tied,
-                game.force_skip_pending, now,
+                game,
+                players,
+                seats,
+                round1,
+                tied,
+                game.force_skip_pending,
+                now,
             )
         if game.phase is Phase.NIGHT:
-            actions = await self.repo.load_night_actions(
-                game.id, day=game.day_number
-            )
+            actions = await self.repo.load_night_actions(game.id, day=game.day_number)
             prev = await self.repo.load_previous_guard(game.id)
             prev_seat = prev[1] if prev else None
             return plan_night_resolve(
-                game, players, seats, actions, prev_seat,
-                game.force_skip_pending, now,
+                game,
+                players,
+                seats,
+                actions,
+                prev_seat,
+                game.force_skip_pending,
+                now,
             )
         return None
 
@@ -291,9 +285,7 @@ class GameService:
         ]
         if transition.next_phase is Phase.DAY_VOTE:
             alive_voters = [p for p in players_after if p.alive]
-            alive_candidates = [
-                s for s, p in zip(seats, players_after, strict=True) if p.alive
-            ]
+            alive_candidates = [s for s, p in zip(seats, players_after, strict=True) if p.alive]
             try:
                 await self.discord.send_vote_dms(new_game, alive_voters, alive_candidates, round_=0)
             except Exception:
@@ -308,9 +300,7 @@ class GameService:
             alive_voters = [p for p in players_after if p.alive]
             # Candidates come from tied set — derived in _plan_next on the next advance;
             # for the DMs we need them now.
-            round0 = await self.repo.load_votes(
-                new_game.id, day=new_game.day_number, round_=0
-            )
+            round0 = await self.repo.load_votes(new_game.id, day=new_game.day_number, round_=0)
             alive_set = {p.seat_no for p in alive_voters}
             outcome = compute_vote_result(round0, alive_set)
             cand_seats = [s for s in seats if s.seat_no in outcome.tied]
@@ -320,8 +310,11 @@ class GameService:
                 log.exception("send_vote_dms (runoff) failed for %s", new_game.id)
             try:
                 await self.llm.submit_llm_votes(
-                    new_game, alive_voters, seats,
-                    candidates=list(outcome.tied), round_=1,
+                    new_game,
+                    alive_voters,
+                    seats,
+                    candidates=list(outcome.tied),
+                    round_=1,
                 )
             except Exception:
                 log.exception("llm runoff vote submission failed")
@@ -354,9 +347,7 @@ class GameService:
         except Exception:
             log.exception("post_morning failed for %s", game.id)
 
-    async def _safe_send_private(
-        self, game: Game, audience: int, text: str, kind: str
-    ) -> None:
+    async def _safe_send_private(self, game: Game, audience: int, text: str, kind: str) -> None:
         try:
             await self.discord.send_private(game, audience, text, kind)
         except Exception:
@@ -369,43 +360,47 @@ class GameService:
         voter_seat: int,
         target_seat: int | None,
         round_: int,
-    ) -> None:
+    ) -> SubmitResult:
         game = await self.repo.load_game(game_id)
         if game is None:
-            return
+            return SubmitResult.GAME_NOT_FOUND
         expected_phase = Phase.DAY_VOTE if round_ == 0 else Phase.DAY_RUNOFF
         if game.phase is not expected_phase:
             log.info(
                 "stale vote ignored: game=%s phase=%s expected=%s round=%s",
-                game_id, game.phase, expected_phase, round_,
+                game_id,
+                game.phase,
+                expected_phase,
+                round_,
             )
-            return
+            return SubmitResult.STALE_PHASE
         players = await self.repo.load_players(game_id)
         alive = {p.seat_no for p in players if p.alive}
         if voter_seat not in alive:
             log.info("vote from dead/unknown seat %s ignored (game=%s)", voter_seat, game_id)
-            return
+            return SubmitResult.VOTER_DEAD
         if target_seat is not None:
             if target_seat not in alive:
                 log.info(
                     "vote targeting dead/unknown seat %s ignored (game=%s)",
-                    target_seat, game_id,
+                    target_seat,
+                    game_id,
                 )
-                return
+                return SubmitResult.TARGET_DEAD
             if target_seat == voter_seat:
                 log.info("self-vote seat=%s ignored (game=%s)", voter_seat, game_id)
-                return
+                return SubmitResult.SELF_VOTE
             if round_ == 1:
-                round0 = await self.repo.load_votes(
-                    game_id, day=game.day_number, round_=0
-                )
+                round0 = await self.repo.load_votes(game_id, day=game.day_number, round_=0)
                 tied = set(compute_vote_result(round0, alive).tied)
                 if target_seat not in tied:
                     log.info(
                         "runoff vote for non-tied target %s ignored (tied=%s game=%s)",
-                        target_seat, sorted(tied), game_id,
+                        target_seat,
+                        sorted(tied),
+                        game_id,
                     )
-                    return
+                    return SubmitResult.ILLEGAL_TARGET
         await self.repo.insert_vote(
             Vote(
                 game_id=game_id,
@@ -418,6 +413,7 @@ class GameService:
         )
         if await self._all_votes_in(game, round_):
             self.wake.wake(game_id)
+        return SubmitResult.ACCEPTED
 
     async def submit_night_action(
         self,
@@ -425,24 +421,27 @@ class GameService:
         actor_seat: int,
         kind: SubmissionType,
         target_seat: int | None,
-    ) -> None:
+    ) -> SubmitResult:
         game = await self.repo.load_game(game_id)
         if game is None:
-            return
+            return SubmitResult.GAME_NOT_FOUND
         if game.phase not in (Phase.NIGHT, Phase.NIGHT_0):
             log.info(
                 "stale night action ignored: game=%s phase=%s kind=%s",
-                game_id, game.phase, kind,
+                game_id,
+                game.phase,
+                kind,
             )
-            return
+            return SubmitResult.STALE_PHASE
         players = await self.repo.load_players(game_id)
         actor = next((p for p in players if p.seat_no == actor_seat), None)
         if actor is None or not actor.alive:
             log.info(
                 "night action from dead/unknown seat %s ignored (game=%s)",
-                actor_seat, game_id,
+                actor_seat,
+                game_id,
             )
-            return
+            return SubmitResult.ACTOR_DEAD
         role_for_kind = {
             SubmissionType.WOLF_ATTACK: Role.WEREWOLF,
             SubmissionType.SEER_DIVINE: Role.SEER,
@@ -451,9 +450,12 @@ class GameService:
         if role_for_kind is None or actor.role is not role_for_kind:
             log.info(
                 "night action role mismatch: seat=%s role=%s kind=%s ignored (game=%s)",
-                actor_seat, actor.role, kind, game_id,
+                actor_seat,
+                actor.role,
+                kind,
+                game_id,
             )
-            return
+            return SubmitResult.ROLE_MISMATCH
         if target_seat is not None:
             if kind is SubmissionType.WOLF_ATTACK:
                 legal = legal_attack_targets(players, actor_seat)
@@ -466,9 +468,13 @@ class GameService:
             if target_seat not in legal:
                 log.info(
                     "illegal night target seat=%s kind=%s target=%s legal=%s ignored (game=%s)",
-                    actor_seat, kind, target_seat, legal, game_id,
+                    actor_seat,
+                    kind,
+                    target_seat,
+                    legal,
+                    game_id,
                 )
-                return
+                return SubmitResult.ILLEGAL_TARGET
         await self.repo.insert_night_action(
             NightAction(
                 game_id=game_id,
@@ -481,6 +487,67 @@ class GameService:
         )
         if await self._all_night_actions_in(game):
             self.wake.wake(game_id)
+        return SubmitResult.ACCEPTED
+
+    async def resend_pending_dms(self, game_id: str) -> None:
+        """Re-send DM UIs to humans whose submission we're still waiting on.
+
+        Called from recovery after engine reattach, and from `host_extend` when
+        a WAITING phase is resumed. Needed because VoteView/NightActionView
+        hold their submit callback in an in-memory closure that does not
+        survive a bot restart, and because `/wolf extend` does not trigger a
+        phase-entry Transition (so `_dispatch_submissions` never re-fires).
+
+        No-ops for phases that never had DM UIs (LOBBY/SETUP/NIGHT_0/
+        DAY_DISCUSSION/WAITING_HOST_DECISION/GAME_OVER). `send_vote_dms` /
+        `send_night_action_dms` already filter LLM seats internally, so only
+        human players receive the resend.
+        """
+        from wolfbot.services.submission_snapshot import missing_submitters
+
+        game = await self.repo.load_game(game_id)
+        if game is None:
+            return
+        if game.phase not in (Phase.DAY_VOTE, Phase.DAY_RUNOFF, Phase.NIGHT):
+            return
+
+        seats = await self.repo.load_seats(game_id)
+        players = await self.repo.load_players(game_id)
+        missing_by_kind = await missing_submitters(self.repo, game, players)
+
+        if game.phase in (Phase.DAY_VOTE, Phase.DAY_RUNOFF):
+            kind = (
+                SubmissionType.VOTE if game.phase is Phase.DAY_VOTE else SubmissionType.RUNOFF_VOTE
+            )
+            missing = set(missing_by_kind.get(kind, ()))
+            if not missing:
+                return
+            voters = [p for p in players if p.seat_no in missing]
+            round_ = 0 if game.phase is Phase.DAY_VOTE else 1
+            alive_seats = {p.seat_no for p in players if p.alive}
+            if game.phase is Phase.DAY_VOTE:
+                candidates = [s for s in seats if s.seat_no in alive_seats]
+            else:
+                round0 = await self.repo.load_votes(game_id, day=game.day_number, round_=0)
+                tied = set(compute_vote_result(round0, alive_seats).tied)
+                candidates = [s for s in seats if s.seat_no in tied]
+            try:
+                await self.discord.send_vote_dms(game, voters, candidates, round_=round_)
+            except Exception:
+                log.exception("resend_pending_dms vote failed for %s", game_id)
+            return
+
+        # NIGHT
+        missing_seats: set[int] = set()
+        for seats_tuple in missing_by_kind.values():
+            missing_seats.update(seats_tuple)
+        if not missing_seats:
+            return
+        actors = [p for p in players if p.seat_no in missing_seats]
+        try:
+            await self.discord.send_night_action_dms(game, actors, seats)
+        except Exception:
+            log.exception("resend_pending_dms night failed for %s", game_id)
 
     async def _all_votes_in(self, game: Game, round_: int) -> bool:
         players = await self.repo.load_players(game.id)
@@ -491,11 +558,10 @@ class GameService:
 
     async def _all_night_actions_in(self, game: Game) -> bool:
         players = await self.repo.load_players(game.id)
-        actions = await self.repo.load_night_actions(
-            game.id, day=game.day_number
-        )
+        actions = await self.repo.load_night_actions(game.id, day=game.day_number)
         expected: set[tuple[int, SubmissionType]] = set()
         from wolfbot.domain.enums import Role
+
         for p in players:
             if not p.alive or p.role is None:
                 continue
@@ -526,6 +592,7 @@ class GameService:
         )
         if ok:
             await self.repo.clear_pending_decision(game_id)
+            await self.resend_pending_dms(game_id)
             self.wake.wake(game_id)
         return ok
 
@@ -574,9 +641,7 @@ def new_game_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def _project_players(
-    players: Sequence[Player], transition: Transition
-) -> list[Player]:
+def _project_players(players: Sequence[Player], transition: Transition) -> list[Player]:
     """Apply a Transition's player_updates to a copy of `players`."""
     updates_by_seat = {u.seat_no: u for u in transition.player_updates}
     projected: list[Player] = []

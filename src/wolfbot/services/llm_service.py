@@ -53,6 +53,7 @@ class MessagePoster(Protocol):
 
     async def post_public(self, game: Game, text: str, kind: str) -> None: ...
 
+
 log = logging.getLogger(__name__)
 
 
@@ -102,9 +103,7 @@ class LLMActionDecider(Protocol):
 class XAILLMActionDecider:
     """Calls xAI's OpenAI-compatible chat completions endpoint."""
 
-    def __init__(
-        self, client: AsyncOpenAI, model: str, timeout: float = 30.0
-    ) -> None:
+    def __init__(self, client: AsyncOpenAI, model: str, timeout: float = 30.0) -> None:
         self.client = client
         self.model = model
         self.timeout = timeout
@@ -143,9 +142,7 @@ class FakeLLMActionDecider:
         default: LLMAction | None = None,
     ) -> None:
         self._scripted: list[LLMAction] = list(scripted or [])
-        self._default = default or LLMAction(
-            intent="skip", reason_summary="fake-default"
-        )
+        self._default = default or LLMAction(intent="skip", reason_summary="fake-default")
         self.call_count = 0
 
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
@@ -179,6 +176,7 @@ class LLMAdapter:
         clock: Callable[[], int] | None = None,
     ) -> None:
         import time as _time
+
         self.repo = repo
         self.decider = decider
         self.message_poster = message_poster
@@ -203,10 +201,9 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         llm_players = [
-            p for p in players
-            if p.alive
-            and seats_by_no.get(p.seat_no) is not None
-            and seats_by_no[p.seat_no].is_llm
+            p
+            for p in players
+            if p.alive and seats_by_no.get(p.seat_no) is not None and seats_by_no[p.seat_no].is_llm
         ]
         prev = await self.repo.load_previous_guard(game.id)
         prev_guard_seat = prev[1] if prev else None
@@ -220,12 +217,14 @@ class LLMAdapter:
                 continue
             candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
             action = await self._ask(
-                game, player, seat, players, seats,
+                game,
+                player,
+                seat,
+                players,
+                seats,
                 task_text=task_night_action(kind, [c.display_name for c in candidates]),
             )
-            target_seat = self._resolve_target(
-                action.target_name, candidates, allow_none=False
-            )
+            target_seat = self._resolve_target(action.target_name, candidates, allow_none=False)
             await self.gs.submit_night_action(game.id, player.seat_no, kind, target_seat)
 
     # ------------------------------------------------------ votes
@@ -239,10 +238,9 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         llm_voters = [
-            p for p in players
-            if p.alive
-            and p.seat_no in seats_by_no
-            and seats_by_no[p.seat_no].is_llm
+            p
+            for p in players
+            if p.alive and p.seat_no in seats_by_no and seats_by_no[p.seat_no].is_llm
         ]
         for voter in llm_voters:
             seat = seats_by_no[voter.seat_no]
@@ -250,32 +248,30 @@ class LLMAdapter:
                 continue
             if candidates is None:
                 cand_seats = [
-                    s for s in seats
+                    s
+                    for s in seats
                     if s.seat_no != voter.seat_no
                     and any(p.seat_no == s.seat_no and p.alive for p in players)
                 ]
             else:
                 cand_seats = [
-                    s for s in seats
-                    if s.seat_no in set(candidates) and s.seat_no != voter.seat_no
+                    s for s in seats if s.seat_no in set(candidates) and s.seat_no != voter.seat_no
                 ]
             if not cand_seats:
-                await self.gs.submit_vote(
-                    game.id, voter.seat_no, target_seat=None, round_=round_
-                )
+                await self.gs.submit_vote(game.id, voter.seat_no, target_seat=None, round_=round_)
                 continue
             action = await self._ask(
-                game, voter, seat, players, seats,
-                task_text=task_vote(
-                    [c.display_name for c in cand_seats], runoff=round_ == 1
-                ),
+                game,
+                voter,
+                seat,
+                players,
+                seats,
+                task_text=task_vote([c.display_name for c in cand_seats], runoff=round_ == 1),
             )
             target = self._resolve_target(
                 action.target_name, cand_seats, allow_none=action.intent == "skip"
             )
-            await self.gs.submit_vote(
-                game.id, voter.seat_no, target_seat=target, round_=round_
-            )
+            await self.gs.submit_vote(game.id, voter.seat_no, target_seat=target, round_=round_)
 
     # --------------------------------------------------- daytime speeches
     async def submit_llm_daystart_speeches(
@@ -287,10 +283,9 @@ class LLMAdapter:
         """
         seats_by_no = {s.seat_no: s for s in seats}
         llm_players = [
-            p for p in players
-            if p.alive
-            and p.seat_no in seats_by_no
-            and seats_by_no[p.seat_no].is_llm
+            p
+            for p in players
+            if p.alive and p.seat_no in seats_by_no and seats_by_no[p.seat_no].is_llm
         ]
         if not llm_players:
             return
@@ -309,10 +304,21 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         for llm in llm_players:
+            # Re-read the live phase before each speech. The loop sleeps up to
+            # 10s between LLM turns; by the time we get here the game may have
+            # moved on (discussion ended, recovery swapped phases, etc.) and
+            # posting a "daystart" line would be noise.
+            fresh = await self.repo.load_game(game.id)
+            if (
+                fresh is None
+                or fresh.phase is not Phase.DAY_DISCUSSION
+                or fresh.day_number != game.day_number
+            ):
+                return
             seat = seats_by_no.get(llm.seat_no)
             if seat is None:
                 continue
-            await self._maybe_speak(game, llm, seat, seats)
+            await self._maybe_speak(fresh, llm, seat, seats)
             try:
                 await asyncio.sleep(self.rng.uniform(3, 10))
             except asyncio.CancelledError:
@@ -341,9 +347,7 @@ class LLMAdapter:
             if not self._is_triggered(seat, text):
                 continue
             # Check cap + cooldown before even calling the LLM
-            count, _, last = await self.repo.load_llm_speech(
-                game.id, game.day_number, llm.seat_no
-            )
+            count, _, last = await self.repo.load_llm_speech(game.id, game.day_number, llm.seat_no)
             now = self._clock()
             if count >= self.NORMAL_SPEECH_CAP:
                 continue
@@ -366,9 +370,7 @@ class LLMAdapter:
         seats: Sequence[Seat],
     ) -> None:
         """Ask the LLM; if intent=speak, post to main and increment the count."""
-        count, _, last = await self.repo.load_llm_speech(
-            game.id, game.day_number, player.seat_no
-        )
+        count, _, last = await self.repo.load_llm_speech(game.id, game.day_number, player.seat_no)
         if count >= self.NORMAL_SPEECH_CAP:
             return
         now = self._clock()
@@ -376,7 +378,11 @@ class LLMAdapter:
             return
         players = await self.repo.load_players(game.id)
         action = await self._ask(
-            game, player, seat, players, seats,
+            game,
+            player,
+            seat,
+            players,
+            seats,
             task_text=task_daytime_speech(game.day_number),
         )
         if action.intent != "speak":
@@ -384,16 +390,24 @@ class LLMAdapter:
         message = action.public_message.strip()
         if not message:
             return
+        # Belt-and-suspenders: the LLM call itself can take seconds. Re-check
+        # phase right before posting so we don't dump a stale speech into a
+        # channel that has already moved on to voting or night.
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.phase is not Phase.DAY_DISCUSSION
+            or fresh.day_number != game.day_number
+        ):
+            return
         if self.message_poster is not None:
             try:
                 await self.message_poster.post_public(
-                    game, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
+                    fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
                 )
             except Exception:
                 log.exception("post_public for LLM speech failed")
-        await self.repo.increment_llm_normal_speech(
-            game.id, game.day_number, player.seat_no, now
-        )
+        await self.repo.increment_llm_normal_speech(game.id, game.day_number, player.seat_no, now)
 
     # ------------------------------------------------------ helpers
     async def _ask(
@@ -421,16 +435,18 @@ class LLMAdapter:
             task_text=task_text,
         )
         user = build_user_context(
-            game=game, me=player, my_seat=seat,
-            seats=seats, players=players,
-            public_logs=public_logs, private_logs=private_logs,
+            game=game,
+            me=player,
+            my_seat=seat,
+            seats=seats,
+            players=players,
+            public_logs=public_logs,
+            private_logs=private_logs,
         )
         try:
             return await self.decider.decide(system, user)
         except Exception:
-            log.exception(
-                "LLM decide failed for seat %s game %s", player.seat_no, game.id
-            )
+            log.exception("LLM decide failed for seat %s game %s", player.seat_no, game.id)
             return LLMAction(intent="skip", reason_summary="decider error")
 
     def _resolve_target(
@@ -477,9 +493,7 @@ class LLMAdapter:
 
 
 # ------------------------------------------------------------- factory
-def make_xai_decider(
-    api_key: str, model: str, timeout: float = 30.0
-) -> XAILLMActionDecider:
+def make_xai_decider(api_key: str, model: str, timeout: float = 30.0) -> XAILLMActionDecider:
     """Build an xAI-backed decider. Imports openai lazily so tests can skip it."""
     from openai import AsyncOpenAI
 

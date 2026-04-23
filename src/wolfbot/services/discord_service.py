@@ -639,9 +639,20 @@ class WolfCog(commands.Cog):
     async def _create_private_channel(
         self, guild: discord.Guild, name: str
     ) -> discord.TextChannel | None:
+        # Paranoia layer for secrecy: if a same-named channel lingers (previous
+        # game's on_game_end failed, or it was created manually), delete it so we
+        # never reuse history across games. Refuse to fall back to reuse on
+        # failure — secrecy trumps availability.
         existing = discord.utils.get(guild.text_channels, name=name)
         if existing is not None:
-            return existing
+            try:
+                await existing.delete(reason="wolfbot: purge stale private channel from prior game")
+            except discord.DiscordException:
+                log.exception(
+                    "cleanup of stale private channel %s failed — refusing to reuse",
+                    getattr(existing, "id", "?"),
+                )
+                return None
         overwrites: dict[
             discord.Role | discord.Member | discord.Object, discord.PermissionOverwrite
         ] = {

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 import pytest_asyncio
 
 from tests.fakes import FakeClock, FakeDiscordAdapter, FakeLLMAdapter
-from wolfbot.domain.enums import Phase, Role, SubmissionType
+from wolfbot.domain.enums import Phase, Role, SubmissionType, SubmitResult
 from wolfbot.domain.models import Game, Seat
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.game_service import GameService, new_game_id
@@ -19,11 +19,25 @@ def _nine_seats() -> list[Seat]:
     out: list[Seat] = []
     for i in range(1, 10):
         if i <= 5:
-            out.append(Seat(seat_no=i, display_name=f"H{i}", discord_user_id=f"u{i}",
-                            is_llm=False, persona_key=None))
+            out.append(
+                Seat(
+                    seat_no=i,
+                    display_name=f"H{i}",
+                    discord_user_id=f"u{i}",
+                    is_llm=False,
+                    persona_key=None,
+                )
+            )
         else:
-            out.append(Seat(seat_no=i, display_name=f"LLM{i}", discord_user_id=None,
-                            is_llm=True, persona_key=f"p{i}"))
+            out.append(
+                Seat(
+                    seat_no=i,
+                    display_name=f"LLM{i}",
+                    discord_user_id=None,
+                    is_llm=True,
+                    persona_key=f"p{i}",
+                )
+            )
     return out
 
 
@@ -47,14 +61,22 @@ async def _make_game_in_setup(repo: SqliteRepo) -> Game:
 
 
 @pytest_asyncio.fixture
-async def svc(repo: SqliteRepo) -> AsyncIterator[tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock]]:
+async def svc(
+    repo: SqliteRepo,
+) -> AsyncIterator[
+    tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock]
+]:
     disc = FakeDiscordAdapter()
     llm = FakeLLMAdapter()
     reg = EngineRegistry()
     clock = FakeClock(now=1000)
     service = GameService(
-        repo=repo, discord=disc, llm=llm, wake=reg,
-        clock=clock, rng=random.Random(0),
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        clock=clock,
+        rng=random.Random(0),
     )
     yield service, disc, llm, reg, clock
 
@@ -323,7 +345,8 @@ async def test_submit_vote_rejected_when_phase_not_day_vote(
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION (not DAY_VOTE!)
 
-    await service.submit_vote(game.id, voter_seat=1, target_seat=2, round_=0)
+    result = await service.submit_vote(game.id, voter_seat=1, target_seat=2, round_=0)
+    assert result is SubmitResult.STALE_PHASE
 
     votes = await repo.load_votes(game.id, day=1, round_=0)
     assert votes == [], "vote during DAY_DISCUSSION must be dropped"
@@ -344,13 +367,16 @@ async def test_submit_vote_rejected_when_voter_dead(
     from wolfbot.domain.enums import DeathCause
     from wolfbot.domain.models import PlayerUpdate
     from wolfbot.persistence.sqlite_repo import _apply_player_update
+
     async with repo._tx() as db:
         await _apply_player_update(
-            db, game.id,
+            db,
+            game.id,
             PlayerUpdate(seat_no=5, alive=False, death_cause=DeathCause.ATTACK, death_day=1),
         )
 
-    await service.submit_vote(game.id, voter_seat=5, target_seat=1, round_=0)
+    result = await service.submit_vote(game.id, voter_seat=5, target_seat=1, round_=0)
+    assert result is SubmitResult.VOTER_DEAD
     votes = await repo.load_votes(game.id, day=1, round_=0)
     assert all(v.voter_seat != 5 for v in votes), "dead voter submission must be dropped"
 
@@ -369,13 +395,16 @@ async def test_submit_vote_rejected_when_target_dead(
     from wolfbot.domain.enums import DeathCause
     from wolfbot.domain.models import PlayerUpdate
     from wolfbot.persistence.sqlite_repo import _apply_player_update
+
     async with repo._tx() as db:
         await _apply_player_update(
-            db, game.id,
+            db,
+            game.id,
             PlayerUpdate(seat_no=7, alive=False, death_cause=DeathCause.ATTACK, death_day=1),
         )
 
-    await service.submit_vote(game.id, voter_seat=1, target_seat=7, round_=0)
+    result = await service.submit_vote(game.id, voter_seat=1, target_seat=7, round_=0)
+    assert result is SubmitResult.TARGET_DEAD
     votes = await repo.load_votes(game.id, day=1, round_=0)
     assert votes == [], "vote targeting a dead seat must be dropped"
 
@@ -391,7 +420,8 @@ async def test_submit_vote_self_vote_rejected(
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
-    await service.submit_vote(game.id, voter_seat=3, target_seat=3, round_=0)
+    result = await service.submit_vote(game.id, voter_seat=3, target_seat=3, round_=0)
+    assert result is SubmitResult.SELF_VOTE
     votes = await repo.load_votes(game.id, day=1, round_=0)
     assert votes == [], "self-vote must be dropped"
 
@@ -424,14 +454,16 @@ async def test_submit_vote_runoff_rejects_target_outside_tied_set(
     )
 
     # Illegal runoff target (seat 7, not in tied {1, 5}) must be dropped.
-    await service.submit_vote(game.id, voter_seat=3, target_seat=7, round_=1)
+    illegal = await service.submit_vote(game.id, voter_seat=3, target_seat=7, round_=1)
+    assert illegal is SubmitResult.ILLEGAL_TARGET
     runoff_votes = await repo.load_votes(game.id, day=1, round_=1)
     assert all(v.target_seat != 7 for v in runoff_votes), (
         "runoff vote for non-tied target must be dropped"
     )
 
     # Legal runoff target (seat 1, in tied set) must be accepted.
-    await service.submit_vote(game.id, voter_seat=3, target_seat=1, round_=1)
+    accepted = await service.submit_vote(game.id, voter_seat=3, target_seat=1, round_=1)
+    assert accepted is SubmitResult.ACCEPTED
     runoff_votes = await repo.load_votes(game.id, day=1, round_=1)
     assert any(v.voter_seat == 3 and v.target_seat == 1 for v in runoff_votes)
 
@@ -447,9 +479,10 @@ async def test_submit_night_action_rejected_when_phase_not_night(
 
     players = await repo.load_players(game.id)
     wolf = next(p.seat_no for p in players if p.role is Role.WEREWOLF)
-    await service.submit_night_action(
+    result = await service.submit_night_action(
         game.id, wolf, SubmissionType.WOLF_ATTACK, target_seat=1
     )
+    assert result is SubmitResult.STALE_PHASE
     actions = await repo.load_night_actions(game.id, day=1)
     assert actions == [], "night action during DAY_DISCUSSION must be dropped"
 
@@ -476,12 +509,11 @@ async def test_submit_night_action_rejected_when_role_mismatch(
         return
 
     players = await repo.load_players(game.id)
-    villager = next(
-        p.seat_no for p in players if p.alive and p.role is Role.VILLAGER
-    )
-    await service.submit_night_action(
+    villager = next(p.seat_no for p in players if p.alive and p.role is Role.VILLAGER)
+    result = await service.submit_night_action(
         game.id, villager, SubmissionType.SEER_DIVINE, target_seat=2
     )
+    assert result is SubmitResult.ROLE_MISMATCH
     # Only true SEER submissions should land in the DB
     actions = await repo.load_night_actions(game.id, day=loaded.day_number)
     assert all(a.actor_seat != villager for a in actions), (
@@ -515,9 +547,10 @@ async def test_submit_night_action_rejected_when_target_illegal(
     if len(wolves) < 2:
         return  # need 2 wolves to test wolf-on-wolf attack
 
-    await service.submit_night_action(
+    result = await service.submit_night_action(
         game.id, wolves[0], SubmissionType.WOLF_ATTACK, target_seat=wolves[1]
     )
+    assert result is SubmitResult.ILLEGAL_TARGET
     actions = await repo.load_night_actions(game.id, day=loaded.day_number)
     assert not any(
         a.actor_seat == wolves[0]
@@ -611,3 +644,177 @@ async def test_full_game_one_day_happy_path(
         assert loaded is not None
         # Should move on to day 2 (or GAME_OVER if seer attack shifted victory)
         assert loaded.phase in (Phase.DAY_DISCUSSION, Phase.GAME_OVER)
+
+
+async def test_submit_vote_returns_accepted_on_legal_vote(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Success path returns SubmitResult.ACCEPTED."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    result = await service.submit_vote(game.id, voter_seat=1, target_seat=2, round_=0)
+    assert result is SubmitResult.ACCEPTED
+
+
+async def test_submit_vote_returns_game_not_found_for_unknown_id(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    service, _, _, _, _ = svc
+    result = await service.submit_vote("does-not-exist", voter_seat=1, target_seat=2, round_=0)
+    assert result is SubmitResult.GAME_NOT_FOUND
+
+
+async def test_submit_night_action_returns_accepted_for_seer(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for v in range(1, 10):
+        target = 1 if v != 1 else 2
+        await service.submit_vote(game.id, v, target, round_=0)
+    await service.advance(game.id)  # -> NIGHT (seat 1 executed)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return
+    players = await repo.load_players(game.id)
+    seer = next(p.seat_no for p in players if p.alive and p.role is Role.SEER)
+    wolf = next(p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF)
+
+    result = await service.submit_night_action(
+        game.id, seer, SubmissionType.SEER_DIVINE, target_seat=wolf
+    )
+    assert result is SubmitResult.ACCEPTED
+
+
+async def test_resend_pending_dms_day_vote_sends_only_to_missing(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """After some voters submit, resend should DM only the ones still missing."""
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    # Seats 1, 2, 3 vote; seats 4-9 haven't.
+    for v in (1, 2, 3):
+        await service.submit_vote(game.id, v, target_seat=5, round_=0)
+
+    disc.reset()
+    await service.resend_pending_dms(game.id)
+
+    sent = [c for c in disc.calls if c.name == "send_vote_dms"]
+    assert len(sent) == 1
+    assert sorted(sent[0].kwargs["voters"]) == [4, 5, 6, 7, 8, 9]
+    assert sent[0].kwargs["round_"] == 0
+
+
+async def test_resend_pending_dms_noop_in_day_discussion(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Non-submission phases must not trigger DM resends."""
+    service, disc, _, _, _ = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # -> NIGHT_0
+    await service.advance(game.id)  # -> DAY_DISCUSSION
+
+    disc.reset()
+    await service.resend_pending_dms(game.id)
+
+    assert not any(c.name == "send_vote_dms" for c in disc.calls)
+    assert not any(c.name == "send_night_action_dms" for c in disc.calls)
+
+
+async def test_resend_pending_dms_night_passes_only_missing_actors(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """At NIGHT, only the actors whose role-specific submission is missing get DMed."""
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for v in range(1, 10):
+        target = 1 if v != 1 else 2
+        await service.submit_vote(game.id, v, target, round_=0)
+    await service.advance(game.id)  # -> NIGHT
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return
+
+    players = await repo.load_players(game.id)
+    wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+    seer = next(p.seat_no for p in players if p.alive and p.role is Role.SEER)
+    knight = next(p.seat_no for p in players if p.alive and p.role is Role.KNIGHT)
+
+    # All wolves submit, seer + knight still pending.
+    for w in wolves:
+        await service.submit_night_action(game.id, w, SubmissionType.WOLF_ATTACK, 4)
+
+    disc.reset()
+    await service.resend_pending_dms(game.id)
+
+    sent = [c for c in disc.calls if c.name == "send_night_action_dms"]
+    assert len(sent) == 1
+    dmed = set(sent[0].kwargs["players"])
+    assert seer in dmed
+    assert knight in dmed
+    for w in wolves:
+        assert w not in dmed, "wolves already submitted — must not be re-DMed"
+
+
+async def test_host_extend_resends_dms_before_waking(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Resuming from WAITING via /wolf extend must re-send DMs to the still-missing voters."""
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    # Two voters submit, the rest don't.
+    await service.submit_vote(game.id, 1, target_seat=5, round_=0)
+    await service.submit_vote(game.id, 2, target_seat=5, round_=0)
+
+    # Expire the vote deadline and advance → parks into WAITING_HOST_DECISION.
+    clock.tick(120)
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.WAITING_HOST_DECISION
+
+    disc.reset()
+    ok = await service.host_extend(game.id, extra_seconds=60)
+    assert ok
+
+    sent = [c for c in disc.calls if c.name == "send_vote_dms"]
+    assert len(sent) == 1
+    # Seats 1 and 2 already voted, so they must not be re-DMed.
+    dmed = set(sent[0].kwargs["voters"])
+    assert 1 not in dmed
+    assert 2 not in dmed
+    assert dmed == {3, 4, 5, 6, 7, 8, 9}

@@ -118,28 +118,43 @@ class PermissionManager:
                 )
 
     async def on_game_end(self, game: Game, seats: Sequence[Seat]) -> None:
-        """Best-effort clear of per-member overwrites on the tracked channels."""
+        """Clean up channel state at game end.
+
+        main text channel: this is a configured, persistent channel — only clear
+        per-member overwrites so dead players don't retain read-only access for
+        the next game.
+
+        heaven / wolves channels: these carry secret history (dead-player chat,
+        werewolf night chat). Delete them outright so the next game cannot read
+        the previous game's messages, even if a new channel happens to get the
+        same name later.
+        """
         guild = self._guild(game)
         if guild is None:
             return
-        for channel_id in filter(
-            None,
-            [
-                game.main_text_channel_id,
-                game.heaven_channel_id,
-                game.wolves_channel_id,
-            ],
-        ):
-            channel = guild.get_channel(int(channel_id))
-            if channel is None:
-                continue
+
+        main = guild.get_channel(int(game.main_text_channel_id))
+        if main is not None:
             for s in seats:
                 if s.discord_user_id is None:
                     continue
                 member = guild.get_member(int(s.discord_user_id))
                 if member is None:
                     continue
-                await self._clear_perms(channel, member)
+                await self._clear_perms(main, member)
+
+        for channel_id in filter(None, [game.heaven_channel_id, game.wolves_channel_id]):
+            channel = guild.get_channel(int(channel_id))
+            if channel is None:
+                continue
+            try:
+                await channel.delete(reason="wolfbot: game end — prevent history leak")
+            except Exception:
+                log.exception(
+                    "on_game_end: delete private channel %s failed (game %s)",
+                    channel_id,
+                    game.id,
+                )
 
     # ---------------------------------------------------------- internals
     async def _apply_main_text(

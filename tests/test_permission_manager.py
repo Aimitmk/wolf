@@ -26,6 +26,8 @@ class FakeChannel:
     guild: Any
     _perm_calls: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
     _overwrites: dict[int, discord.PermissionOverwrite] = field(default_factory=dict)
+    _delete_calls: list[str] = field(default_factory=list)
+    _delete_error: Exception | None = None
 
     def overwrites_for(self, target: Any) -> discord.PermissionOverwrite:
         return self._overwrites.get(target.id, discord.PermissionOverwrite())
@@ -40,6 +42,12 @@ class FakeChannel:
                 self._overwrites[member.id] = ov
         else:
             self._overwrites[member.id] = discord.PermissionOverwrite(**overrides)
+
+    async def delete(self, reason: str | None = None) -> None:
+        self._delete_calls.append(reason or "")
+        if self._delete_error is not None:
+            raise self._delete_error
+        self.guild._channels.pop(self.id, None)
 
 
 @dataclass
@@ -294,12 +302,17 @@ async def test_apply_only_touches_changed_member() -> None:
     assert wolves_targets == set()
 
 
-async def test_on_game_end_clears_overwrites_with_none() -> None:
-    bot, _, ch, game = _setup_world()
+async def test_on_game_end_clears_main_overwrites_and_deletes_privates() -> None:
+    """Game end: clear per-member overwrites on main text, delete heaven/wolves.
+
+    Secret channels carry werewolf and heaven chat history that MUST NOT leak
+    across games. Main text is a persistent configured channel, so only its
+    per-member overwrites get cleared.
+    """
+    bot, guild, ch, game = _setup_world()
     pm = PermissionManager(bot=bot)
     seats = _nine_seats()
-    # Apply first so there are overwrites to clear — otherwise the diff check
-    # correctly short-circuits (nothing to clear on an untouched channel).
+    # Apply first so there are overwrites to clear.
     players = _players(ROLES)
     await pm.apply(game, seats, players)
     for key in ["main", "heaven", "wolves"]:
@@ -307,20 +320,47 @@ async def test_on_game_end_clears_overwrites_with_none() -> None:
 
     await pm.on_game_end(game, seats)
 
-    for key in ["main", "heaven", "wolves"]:
-        calls = ch[key]._perm_calls
-        # Every call should have `overwrite=None`
-        for _member_id, kwargs in calls:
-            assert kwargs.get("overwrite") is None
-        # Every human seat should have been touched (9 seats on 3 channels)
-        assert len({mid for mid, _ in calls}) == 9
+    # Main channel: all 9 seats cleared with overwrite=None
+    main_calls = ch["main"]._perm_calls
+    for _member_id, kwargs in main_calls:
+        assert kwargs.get("overwrite") is None
+    assert len({mid for mid, _ in main_calls}) == 9
 
-    # Second on_game_end is a no-op — overwrites are already cleared.
-    for key in ["main", "heaven", "wolves"]:
-        ch[key]._perm_calls.clear()
+    # Private channels are gone from the guild
+    assert 1002 not in guild._channels
+    assert 1003 not in guild._channels
+    assert ch["heaven"]._delete_calls, "heaven.delete() should have been invoked"
+    assert ch["wolves"]._delete_calls, "wolves.delete() should have been invoked"
+
+
+async def test_on_game_end_tolerates_missing_private_channel() -> None:
+    """If heaven/wolves were already deleted externally, on_game_end must not blow up."""
+    bot, guild, ch, game = _setup_world()
+    # Simulate heaven already gone (e.g. admin deleted it manually)
+    guild._channels.pop(1002, None)
+    pm = PermissionManager(bot=bot)
+    seats = _nine_seats()
+
+    # Should not raise
     await pm.on_game_end(game, seats)
-    for key in ["main", "heaven", "wolves"]:
-        assert ch[key]._perm_calls == []
+
+    # Wolves was still there and must still be deleted
+    assert 1003 not in guild._channels
+    assert ch["wolves"]._delete_calls
+
+
+async def test_on_game_end_tolerates_delete_failure() -> None:
+    """If channel.delete() raises (API error, missing perms), other channels still delete."""
+    bot, guild, ch, game = _setup_world()
+    ch["heaven"]._delete_error = RuntimeError("boom")
+    pm = PermissionManager(bot=bot)
+    seats = _nine_seats()
+
+    await pm.on_game_end(game, seats)
+
+    # heaven still present (delete failed) but wolves was cleaned up
+    assert 1002 in guild._channels
+    assert 1003 not in guild._channels
 
 
 async def test_apply_is_no_op_when_guild_missing() -> None:

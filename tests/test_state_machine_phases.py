@@ -43,10 +43,7 @@ def _nine_seats() -> list[Seat]:
 
 
 def _players_from(seats: list[Seat], role_updates: dict[int, Role]) -> list[Player]:
-    return [
-        Player(seat_no=s.seat_no, role=role_updates.get(s.seat_no), alive=True)
-        for s in seats
-    ]
+    return [Player(seat_no=s.seat_no, role=role_updates.get(s.seat_no), alive=True) for s in seats]
 
 
 def test_plan_setup_transitions_to_night0_with_roles() -> None:
@@ -69,9 +66,15 @@ def test_plan_night0_transitions_to_day1_with_deadline() -> None:
     rng = random.Random(0)
     # Explicit role layout for determinism
     roles = {
-        1: Role.WEREWOLF, 2: Role.WEREWOLF, 3: Role.MADMAN,
-        4: Role.SEER, 5: Role.MEDIUM, 6: Role.KNIGHT,
-        7: Role.VILLAGER, 8: Role.VILLAGER, 9: Role.VILLAGER,
+        1: Role.WEREWOLF,
+        2: Role.WEREWOLF,
+        3: Role.MADMAN,
+        4: Role.SEER,
+        5: Role.MEDIUM,
+        6: Role.KNIGHT,
+        7: Role.VILLAGER,
+        8: Role.VILLAGER,
+        9: Role.VILLAGER,
     }
     players = _players_from(seats, roles)
     t = plan_night0(game, players, seats, rng, now_epoch=2000)
@@ -90,9 +93,15 @@ def test_plan_night0_random_white_is_non_wolf_non_self() -> None:
     game = _game(phase=Phase.NIGHT_0)
     seats = _nine_seats()
     roles = {
-        1: Role.WEREWOLF, 2: Role.WEREWOLF, 3: Role.MADMAN,
-        4: Role.SEER, 5: Role.MEDIUM, 6: Role.KNIGHT,
-        7: Role.VILLAGER, 8: Role.VILLAGER, 9: Role.VILLAGER,
+        1: Role.WEREWOLF,
+        2: Role.WEREWOLF,
+        3: Role.MADMAN,
+        4: Role.SEER,
+        5: Role.MEDIUM,
+        6: Role.KNIGHT,
+        7: Role.VILLAGER,
+        8: Role.VILLAGER,
+        9: Role.VILLAGER,
     }
     players = _players_from(seats, roles)
     for seed in range(50):
@@ -120,9 +129,15 @@ def test_plan_night0_madman_does_not_learn_partner() -> None:
     game = _game(phase=Phase.NIGHT_0)
     seats = _nine_seats()
     roles = {
-        1: Role.WEREWOLF, 2: Role.WEREWOLF, 3: Role.MADMAN,
-        4: Role.SEER, 5: Role.MEDIUM, 6: Role.KNIGHT,
-        7: Role.VILLAGER, 8: Role.VILLAGER, 9: Role.VILLAGER,
+        1: Role.WEREWOLF,
+        2: Role.WEREWOLF,
+        3: Role.MADMAN,
+        4: Role.SEER,
+        5: Role.MEDIUM,
+        6: Role.KNIGHT,
+        7: Role.VILLAGER,
+        8: Role.VILLAGER,
+        9: Role.VILLAGER,
     }
     players = _players_from(seats, roles)
     rng = random.Random(0)

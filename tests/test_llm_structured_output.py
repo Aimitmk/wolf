@@ -19,13 +19,15 @@ from wolfbot.services.llm_service import (
 
 
 def test_action_parses_valid_json() -> None:
-    raw = json.dumps({
-        "intent": "speak",
-        "public_message": "私は占い師です。対抗はいますか。",
-        "target_name": None,
-        "reason_summary": "CO を明かしたい",
-        "confidence": 0.7,
-    })
+    raw = json.dumps(
+        {
+            "intent": "speak",
+            "public_message": "私は占い師です。対抗はいますか。",
+            "target_name": None,
+            "reason_summary": "CO を明かしたい",
+            "confidence": 0.7,
+        }
+    )
     action = LLMAction.model_validate_json(raw)
     assert action.intent == "speak"
     assert action.target_name is None
@@ -34,11 +36,15 @@ def test_action_parses_valid_json() -> None:
 def test_action_rejects_unknown_intent() -> None:
     from pydantic import ValidationError
 
-    raw = json.dumps({
-        "intent": "sing",
-        "public_message": "", "target_name": None,
-        "reason_summary": "", "confidence": 0.5,
-    })
+    raw = json.dumps(
+        {
+            "intent": "sing",
+            "public_message": "",
+            "target_name": None,
+            "reason_summary": "",
+            "confidence": 0.5,
+        }
+    )
     with pytest.raises(ValidationError):
         LLMAction.model_validate_json(raw)
 
@@ -47,7 +53,11 @@ def test_response_schema_has_required_fields() -> None:
     schema = RESPONSE_SCHEMA["schema"]
     assert isinstance(schema, dict)
     assert set(schema["required"]) == {
-        "intent", "public_message", "target_name", "reason_summary", "confidence",
+        "intent",
+        "public_message",
+        "target_name",
+        "reason_summary",
+        "confidence",
     }
     assert schema["additionalProperties"] is False
 
@@ -90,16 +100,25 @@ class FakeGameService:
 
 async def _seed_game(repo):
     game = Game(
-        id="g", guild_id="gu", host_user_id="h",
-        phase=Phase.NIGHT, day_number=1,
-        main_text_channel_id="c1", main_vc_channel_id="c2",
-        heaven_channel_id="h1", wolves_channel_id="w1",
+        id="g",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
         created_at=0,
     )
     await repo.create_game(game)
     seats = [
-        Seat(seat_no=1, display_name="Human1", discord_user_id="u1", is_llm=False, persona_key=None),
-        Seat(seat_no=2, display_name="Setsu", discord_user_id=None, is_llm=True, persona_key="setsu"),
+        Seat(
+            seat_no=1, display_name="Human1", discord_user_id="u1", is_llm=False, persona_key=None
+        ),
+        Seat(
+            seat_no=2, display_name="Setsu", discord_user_id=None, is_llm=True, persona_key="setsu"
+        ),
         Seat(seat_no=3, display_name="Gina", discord_user_id=None, is_llm=True, persona_key="gina"),
     ]
     for s in seats:
@@ -114,11 +133,20 @@ async def test_llm_adapter_submits_night_action_for_seer(repo) -> None:
     """Only the seer LLM (seat 2) should fire a NIGHT action (seat 3 villager: nothing)."""
     game, seats = await _seed_game(repo)
     gs = FakeGameService()
-    decider = FakeLLMActionDecider(scripted=[
-        LLMAction(intent="night_action", target_name="Human1", reason_summary="hunt wolves", confidence=0.9),
-    ])
+    decider = FakeLLMActionDecider(
+        scripted=[
+            LLMAction(
+                intent="night_action",
+                target_name="Human1",
+                reason_summary="hunt wolves",
+                confidence=0.9,
+            ),
+        ]
+    )
     adapter = LLMAdapter(
-        repo=repo, decider=decider, rng=random.Random(0),
+        repo=repo,
+        decider=decider,
+        rng=random.Random(0),
     )
     adapter.set_game_service(gs)  # type: ignore[arg-type]
 
@@ -135,11 +163,17 @@ async def test_llm_adapter_submits_night_action_for_seer(repo) -> None:
 async def test_llm_adapter_falls_back_on_invalid_target_name(repo) -> None:
     game, seats = await _seed_game(repo)
     gs = FakeGameService()
-    decider = FakeLLMActionDecider(scripted=[
-        LLMAction(intent="night_action", target_name="NotAnyone", reason_summary="", confidence=0.5),
-    ])
+    decider = FakeLLMActionDecider(
+        scripted=[
+            LLMAction(
+                intent="night_action", target_name="NotAnyone", reason_summary="", confidence=0.5
+            ),
+        ]
+    )
     adapter = LLMAdapter(
-        repo=repo, decider=decider, rng=random.Random(0),
+        repo=repo,
+        decider=decider,
+        rng=random.Random(0),
     )
     adapter.set_game_service(gs)  # type: ignore[arg-type]
 
@@ -156,19 +190,21 @@ async def test_llm_adapter_votes_with_name_resolution(repo) -> None:
     game, seats = await _seed_game(repo)
     game.phase = Phase.DAY_VOTE
     gs = FakeGameService()
-    decider = FakeLLMActionDecider(scripted=[
-        LLMAction(intent="vote", target_name="Human1", reason_summary="疑う", confidence=0.6),
-        LLMAction(intent="vote", target_name="Gina", reason_summary="怪しい", confidence=0.5),
-    ])
+    decider = FakeLLMActionDecider(
+        scripted=[
+            LLMAction(intent="vote", target_name="Human1", reason_summary="疑う", confidence=0.6),
+            LLMAction(intent="vote", target_name="Gina", reason_summary="怪しい", confidence=0.5),
+        ]
+    )
     adapter = LLMAdapter(
-        repo=repo, decider=decider, rng=random.Random(0),
+        repo=repo,
+        decider=decider,
+        rng=random.Random(0),
     )
     adapter.set_game_service(gs)  # type: ignore[arg-type]
 
     players = await repo.load_players(game.id)
-    await adapter.submit_llm_votes(
-        game, players, seats, candidates=None, round_=0
-    )
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
 
     # 2 LLMs alive (seats 2, 3) → 2 vote submissions
     assert len(gs.votes) == 2
@@ -184,18 +220,20 @@ async def test_llm_adapter_skip_intent_abstains_on_vote(repo) -> None:
     game, seats = await _seed_game(repo)
     game.phase = Phase.DAY_VOTE
     gs = FakeGameService()
-    decider = FakeLLMActionDecider(scripted=[
-        LLMAction(intent="skip", target_name=None, reason_summary="判断保留", confidence=0.2),
-        LLMAction(intent="skip", target_name=None, reason_summary="判断保留", confidence=0.2),
-    ])
+    decider = FakeLLMActionDecider(
+        scripted=[
+            LLMAction(intent="skip", target_name=None, reason_summary="判断保留", confidence=0.2),
+            LLMAction(intent="skip", target_name=None, reason_summary="判断保留", confidence=0.2),
+        ]
+    )
     adapter = LLMAdapter(
-        repo=repo, decider=decider, rng=random.Random(0),
+        repo=repo,
+        decider=decider,
+        rng=random.Random(0),
     )
     adapter.set_game_service(gs)  # type: ignore[arg-type]
 
     players = await repo.load_players(game.id)
-    await adapter.submit_llm_votes(
-        game, players, seats, candidates=None, round_=0
-    )
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
     # Both LLMs abstained → target None preserved
     assert all(v[2] is None for v in gs.votes)

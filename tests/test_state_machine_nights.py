@@ -15,15 +15,27 @@ from wolfbot.domain.state_machine import plan_night_resolve
 
 def _game(phase: Phase = Phase.NIGHT, day: int = 1) -> Game:
     return Game(
-        id="g1", guild_id="gu1", host_user_id="h1", phase=phase, day_number=day,
-        main_text_channel_id="c1", main_vc_channel_id="c2", created_at=0,
+        id="g1",
+        guild_id="gu1",
+        host_user_id="h1",
+        phase=phase,
+        day_number=day,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
     )
 
 
 STANDARD_ROLES = [
-    Role.WEREWOLF, Role.WEREWOLF, Role.MADMAN,
-    Role.SEER, Role.MEDIUM, Role.KNIGHT,
-    Role.VILLAGER, Role.VILLAGER, Role.VILLAGER,
+    Role.WEREWOLF,
+    Role.WEREWOLF,
+    Role.MADMAN,
+    Role.SEER,
+    Role.MEDIUM,
+    Role.KNIGHT,
+    Role.VILLAGER,
+    Role.VILLAGER,
+    Role.VILLAGER,
 ]
 
 
@@ -46,16 +58,21 @@ def _players(
 
 def _seats() -> list[Seat]:
     return [
-        Seat(seat_no=i, display_name=f"P{i}", discord_user_id=f"u{i}",
-             is_llm=False, persona_key=None)
+        Seat(
+            seat_no=i, display_name=f"P{i}", discord_user_id=f"u{i}", is_llm=False, persona_key=None
+        )
         for i in range(1, 10)
     ]
 
 
 def _act(seat: int, kind: SubmissionType, target: int | None, day: int = 1) -> NightAction:
     return NightAction(
-        game_id="g1", day=day, actor_seat=seat, kind=kind,
-        target_seat=target, submitted_at=0,
+        game_id="g1",
+        day=day,
+        actor_seat=seat,
+        kind=kind,
+        target_seat=target,
+        submitted_at=0,
     )
 
 
@@ -71,8 +88,13 @@ def test_guard_equals_attack_results_in_no_death() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 7),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.player_updates == ()
     assert t.newly_dead_seats == ()
@@ -93,8 +115,13 @@ def test_attack_succeeds_when_guard_differs() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.newly_dead_seats == (7,)
     upd = next(u for u in t.player_updates if u.seat_no == 7)
@@ -116,8 +143,13 @@ def test_plan_night_resolve_skips_dead_attack_target() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8, day=2),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     # No new death, no player_update for dead seat — death_day of seat 7 preserved (=1)
     assert t.newly_dead_seats == ()
@@ -137,8 +169,13 @@ def test_morning_announce_does_not_reveal_role() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 3),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.newly_dead_seats == (4,)
     assert t.morning_text is not None
@@ -161,8 +198,13 @@ def test_medium_private_log_returns_faction_not_role() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 7),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     medium_logs = [lg for lg in t.private_logs if lg.kind == "MEDIUM_RESULT"]
     assert len(medium_logs) == 1
@@ -185,8 +227,13 @@ def test_medium_no_execution_reports_none() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     medium_logs = [lg for lg in t.private_logs if lg.kind == "MEDIUM_RESULT"]
     assert len(medium_logs) == 1
@@ -205,8 +252,13 @@ def test_seer_gets_result_even_if_target_dies_tonight() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 3),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     seer_logs = [lg for lg in t.private_logs if lg.kind == "SEER_RESULT"]
     assert len(seer_logs) == 1
@@ -225,8 +277,13 @@ def test_seer_on_wolf_returns_wolf_faction() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 3),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     seer_logs = [lg for lg in t.private_logs if lg.kind == "SEER_RESULT"]
     assert "人狼陣営" in seer_logs[0].text
@@ -249,8 +306,13 @@ def test_wolf_split_without_force_skip_pauses() -> None:
     # With force_skip=False and both wolves submitted different targets, attack.split=True
     # but attack.missing=(). plan_night_resolve will NOT pause. Let's check the logic.
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     # Per spec: "1 対 1 で割れた場合、締切時点では未確定のままとし、WAITING_HOST_DECISION に遷移"
     # So split WITHOUT force_skip must pause.
@@ -269,8 +331,13 @@ def test_wolf_missing_submission_pauses() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.next_phase is Phase.WAITING_HOST_DECISION
     assert t.pending is not None
@@ -287,8 +354,13 @@ def test_wolf_missing_with_force_skip_fails_attack() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=True, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=True,
+        now_epoch=1000,
     )
     # force_skip makes missing treat wolf 2 as no-action → split → failed attack
     assert t.newly_dead_seats == ()
@@ -306,8 +378,13 @@ def test_seer_missing_pauses() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.next_phase is Phase.WAITING_HOST_DECISION
     assert 4 in (t.pending.missing_seats if t.pending else ())
@@ -323,8 +400,13 @@ def test_knight_missing_pauses() -> None:
         _act(4, SubmissionType.SEER_DIVINE, 3),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.next_phase is Phase.WAITING_HOST_DECISION
     assert 6 in (t.pending.missing_seats if t.pending else ())
@@ -345,8 +427,13 @@ def test_attack_killing_enough_non_wolves_triggers_wolf_victory() -> None:
         # knight is dead; no knight action expected
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.next_phase is Phase.GAME_OVER
     assert t.victory is Faction.WEREWOLVES
@@ -364,8 +451,13 @@ def test_record_guard_persists_knight_choice() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     assert t.record_guard == (6, 8)
 
@@ -382,8 +474,13 @@ def test_resolve_night_strict_order_medium_then_seer_then_morning() -> None:
         _act(6, SubmissionType.KNIGHT_GUARD, 8),
     ]
     t = plan_night_resolve(
-        game, players, seats, actions,
-        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
     )
     # Private logs should include both MEDIUM_RESULT and SEER_RESULT,
     # with MEDIUM coming BEFORE SEER (step 1 before step 2).
@@ -398,6 +495,7 @@ def test_llm_shortfall_padding_count() -> None:
     import random as _r
 
     from wolfbot.llm.personas import pick_personas
+
     rng = _r.Random(0)
     for n in range(0, 10):
         picks = pick_personas(9 - n, rng)

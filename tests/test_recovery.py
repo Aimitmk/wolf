@@ -131,6 +131,55 @@ async def test_restart_before_deadline_keeps_phase_and_schedules_timer(
     assert g.id in reg._engines  # type: ignore[attr-defined]
 
 
+async def test_restart_before_deadline_resends_pending_dms(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Live DAY_VOTE phase post-restart must re-send DMs to still-missing voters."""
+    from wolfbot.domain.models import Vote
+
+    rec, _, disc, _, clock = rec_bundle
+    game = await _seed_game_at_night_vote(
+        repo, deadline_epoch=clock.now + 300, now=clock.now, phase=Phase.DAY_VOTE
+    )
+    # Seats 1 and 2 already voted before the crash.
+    for seat in (1, 2):
+        await repo.insert_vote(
+            Vote(
+                game_id=game.id,
+                day=1,
+                round=0,
+                voter_seat=seat,
+                target_seat=5,
+                submitted_at=clock.now - 60,
+            )
+        )
+
+    await rec.recover_all()
+
+    sent = [c for c in disc.calls if c.name == "send_vote_dms"]
+    assert len(sent) == 1
+    dmed = set(sent[0].kwargs["voters"])
+    # Seats 1 and 2 already submitted, so they must not be re-DMed.
+    assert dmed == {3, 4, 5, 6, 7, 8, 9}
+
+
+async def test_restart_waiting_phase_does_not_resend(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """If the deadline had already expired, we go into WAITING and the host must
+    drive the resume via /wolf extend — recovery itself should not resend DMs."""
+    rec, _, disc, _, clock = rec_bundle
+    await _seed_game_at_night_vote(
+        repo, deadline_epoch=clock.now - 60, now=clock.now, phase=Phase.DAY_VOTE
+    )
+
+    await rec.recover_all()
+
+    assert not any(c.name == "send_vote_dms" for c in disc.calls)
+
+
 async def test_restart_of_waiting_game_just_reconciles(
     repo: SqliteRepo,
     rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],

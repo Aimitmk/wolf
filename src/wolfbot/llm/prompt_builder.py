@@ -40,13 +40,11 @@ def build_system_prompt(
         "この人格を口調と判断傾向で表現してください。"
     )
     role_block = (
-        f"あなたの役職は『{ROLE_JA[role]}』です。"
-        f" 役職に見える情報だけを根拠にしてください。"
+        f"あなたの役職は『{ROLE_JA[role]}』です。 役職に見える情報だけを根拠にしてください。"
     )
     phase_block = f"`{phase.value}` / day {day_number}"
     return (
-        template
-        .replace("{persona_block}", persona_block)
+        template.replace("{persona_block}", persona_block)
         .replace("{role_block}", role_block)
         .replace("{phase_block}", phase_block)
         .replace("{task_block}", task_text)
@@ -66,12 +64,8 @@ def build_user_context(
     seats_by_no = {s.seat_no: s for s in seats}
     alive_players = [p for p in players if p.alive]
     dead_players = [p for p in players if not p.alive]
-    alive_names = "、".join(
-        seats_by_no[p.seat_no].display_name for p in alive_players
-    ) or "(なし)"
-    dead_names = "、".join(
-        seats_by_no[p.seat_no].display_name for p in dead_players
-    ) or "(なし)"
+    alive_names = "、".join(seats_by_no[p.seat_no].display_name for p in alive_players) or "(なし)"
+    dead_names = "、".join(seats_by_no[p.seat_no].display_name for p in dead_players) or "(なし)"
 
     priv_lines: list[str] = []
     for log in private_logs[-20:]:
@@ -123,9 +117,7 @@ def task_vote(candidate_names: Sequence[str], runoff: bool) -> str:
     )
 
 
-def task_night_action(
-    kind: SubmissionType, candidate_names: Sequence[str]
-) -> str:
+def task_night_action(kind: SubmissionType, candidate_names: Sequence[str]) -> str:
     names = "、".join(candidate_names)
     label = {
         SubmissionType.WOLF_ATTACK: "襲撃",

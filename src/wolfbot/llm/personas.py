@@ -32,8 +32,7 @@ PERSONAS: tuple[Persona, ...] = (
         key="gina",
         display_name="Gina",
         style_guide=(
-            "物静かで誠実。直感と共感を重視し、嘘を嫌う。"
-            "控えめな言葉遣いで率直に疑問を口にする。"
+            "物静かで誠実。直感と共感を重視し、嘘を嫌う。控えめな言葉遣いで率直に疑問を口にする。"
         ),
     ),
     Persona(
@@ -48,8 +47,7 @@ PERSONAS: tuple[Persona, ...] = (
         key="raqio",
         display_name="Raqio",
         style_guide=(
-            "論理偏重で挑発的。矛盾追及が鋭い。"
-            "断定口調、相手の論理的綻びを即座に指摘する。"
+            "論理偏重で挑発的。矛盾追及が鋭い。断定口調、相手の論理的綻びを即座に指摘する。"
         ),
     ),
     Persona(
@@ -104,8 +102,7 @@ PERSONAS: tuple[Persona, ...] = (
         key="otome",
         display_name="Otome",
         style_guide=(
-            "事務的で面倒見がよい。状況整理と段取りが得意。"
-            "手短で淡々とした口調、要点中心。"
+            "事務的で面倒見がよい。状況整理と段取りが得意。手短で淡々とした口調、要点中心。"
         ),
     ),
     Persona(
@@ -144,9 +141,7 @@ def pick_personas(count: int, rng: Random) -> list[Persona]:
     return rng.sample(list(PERSONAS), count)
 
 
-def pick_personas_excluding(
-    count: int, exclude_keys: Sequence[str], rng: Random
-) -> list[Persona]:
+def pick_personas_excluding(count: int, exclude_keys: Sequence[str], rng: Random) -> list[Persona]:
     """Pick from the pool minus `exclude_keys` — useful if you somehow need to extend."""
     pool = [p for p in PERSONAS if p.key not in set(exclude_keys)]
     if count > len(pool):
