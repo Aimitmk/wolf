@@ -69,7 +69,19 @@ LOG_LEVEL=INFO
 6. サーバー ID をコピーして `DISCORD_GUILD_ID` に入れます。
 7. メイン text チャンネルの ID をコピーして `MAIN_TEXT_CHANNEL_ID` に入れます。
 8. メイン VC の ID をコピーして `MAIN_VOICE_CHANNEL_ID` に入れます。
-9. bot に少なくとも、テキストチャンネル作成/削除、チャンネル権限変更、メッセージ送信、チャンネル閲覧に必要な権限を付与します。
+9. bot に次の権限を付与します。
+
+| 権限名 | 必須 / 補足 | 用途 |
+| --- | --- | --- |
+| `View Channels` | 必須 | メイン text、`wolf-heaven`、`wolf-wolves` を閲覧するため |
+| `Send Messages` | 必須 | 進行案内、朝の通知、ホスト待ち通知、復旧通知を送るため |
+| `Manage Channels` | 必須 | `wolf-heaven` と `wolf-wolves` を作成・削除するため |
+| `Manage Roles` | 必須 | チャンネルごとの permission overwrite を更新するため |
+| `Administrator` | 補足 | 初回の動作確認や切り分けには使えますが、常用は推奨しません |
+
+`Manage Roles` は Discord の画面によって `Manage Permissions` のように表示されることがあります。`Send Messages` がなければ公開チャンネルへの進行通知ができず、`View Channels` がなければチャンネル自体にアクセスできません。
+
+この bot は VC に参加したり発話したりしないため、音声系の権限は不要です。DM 送信は guild 権限ではなく各プレイヤーの DM 受信設定に依存します。
 10. プレイヤーが bot から DM を受け取れる状態か確認します。`/wolf start` 実行時に DM を開けない参加者がいると開始できません。
 11. `wolf-heaven` と `wolf-wolves` はゲーム作成時に bot が自動で作成し、ゲーム終了時に削除するため、管理者が事前に作る必要はありません。
 
@@ -99,7 +111,7 @@ uv run wolfbot
 - メイン text チャンネルとメイン VC は、bot が新規作成するのではなく既存チャンネルを使います。
 - slash command は `/wolf` グループで提供され、設定された 1 つの guild に同期されます。
 - bot はゲーム作成時に秘密 text チャンネル `wolf-heaven` と `wolf-wolves` を自動作成し、ゲーム終了時に削除します。
-- bot は進行に応じてチャンネル権限の上書きを更新します。
+- bot は進行に応じてチャンネル権限の上書きを更新します。必要な権限はセットアップ手順 3 の表を参照してください。
 - メイン text チャンネルの基底権限と、プレイヤーの DM 受信設定は事前に管理者が確認してください。
 
 ## 使い方
