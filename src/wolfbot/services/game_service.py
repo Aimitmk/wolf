@@ -360,6 +360,7 @@ class GameService:
         voter_seat: int,
         target_seat: int | None,
         round_: int,
+        day: int,
     ) -> SubmitResult:
         game = await self.repo.load_game(game_id)
         if game is None:
@@ -372,6 +373,14 @@ class GameService:
                 game.phase,
                 expected_phase,
                 round_,
+            )
+            return SubmitResult.STALE_PHASE
+        if game.day_number != day:
+            log.info(
+                "stale vote ignored (day mismatch): game=%s current_day=%s dm_day=%s",
+                game_id,
+                game.day_number,
+                day,
             )
             return SubmitResult.STALE_PHASE
         players = await self.repo.load_players(game_id)
@@ -421,6 +430,7 @@ class GameService:
         actor_seat: int,
         kind: SubmissionType,
         target_seat: int | None,
+        day: int,
     ) -> SubmitResult:
         game = await self.repo.load_game(game_id)
         if game is None:
@@ -430,6 +440,15 @@ class GameService:
                 "stale night action ignored: game=%s phase=%s kind=%s",
                 game_id,
                 game.phase,
+                kind,
+            )
+            return SubmitResult.STALE_PHASE
+        if game.day_number != day:
+            log.info(
+                "stale night action ignored (day mismatch): game=%s current_day=%s dm_day=%s kind=%s",
+                game_id,
+                game.day_number,
+                day,
                 kind,
             )
             return SubmitResult.STALE_PHASE
@@ -502,8 +521,15 @@ class GameService:
         DAY_DISCUSSION/WAITING_HOST_DECISION/GAME_OVER). `send_vote_dms` /
         `send_night_action_dms` already filter LLM seats internally, so only
         human players receive the resend.
+
+        At NIGHT, we union "missing" (never submitted) with "unresolved"
+        (submitted but split) so wolves who picked different targets also get
+        re-DMed — otherwise a split lockout could only be broken by force-skip.
         """
-        from wolfbot.services.submission_snapshot import missing_submitters
+        from wolfbot.services.submission_snapshot import (
+            missing_submitters,
+            unresolved_submitters,
+        )
 
         game = await self.repo.load_game(game_id)
         if game is None:
@@ -538,12 +564,15 @@ class GameService:
             return
 
         # NIGHT
-        missing_seats: set[int] = set()
+        unresolved_by_kind = await unresolved_submitters(self.repo, game, players)
+        seats_to_dm: set[int] = set()
         for seats_tuple in missing_by_kind.values():
-            missing_seats.update(seats_tuple)
-        if not missing_seats:
+            seats_to_dm.update(seats_tuple)
+        for seats_tuple in unresolved_by_kind.values():
+            seats_to_dm.update(seats_tuple)
+        if not seats_to_dm:
             return
-        actors = [p for p in players if p.seat_no in missing_seats]
+        actors = [p for p in players if p.seat_no in seats_to_dm]
         try:
             await self.discord.send_night_action_dms(game, actors, seats)
         except Exception:

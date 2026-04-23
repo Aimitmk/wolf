@@ -265,6 +265,69 @@ async def test_daystart_skipped_when_phase_changed_midway(repo) -> None:
     assert poster.messages == []
 
 
+async def test_concurrent_reactions_on_same_seat_are_serialized(repo) -> None:
+    """Two reactive triggers arriving simultaneously for the same LLM must not
+    both pass the cap/cooldown check and double-post. With per-seat locking,
+    only the first trigger should post; the second sees cooldown and bails."""
+    game, seats = await _seed(repo)
+    poster = FakePoster()
+    decider = FakeLLMActionDecider(
+        default=LLMAction(intent="speak", public_message="同時反応", reason_summary="reactive")
+    )
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=decider,
+        message_poster=poster,
+        rng=random.Random(0),
+        clock=lambda: 8000,
+    )
+    adapter.set_game_service(FakeGS())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    # Two reactions concurrently, same seat (Setsu). Before the fix this produced
+    # two posts and a speech count of 2 (read-check-write race).
+    await asyncio.gather(
+        adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="Setsu 反応して"),
+        adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="Setsu どう思う"),
+    )
+
+    assert len(poster.messages) == 1
+    count, _, _ = await repo.load_llm_speech(game.id, day=1, seat_no=2)
+    assert count == 1
+
+
+async def test_concurrent_reactions_on_different_seats_both_post(repo) -> None:
+    """The per-seat lock is keyed on (game_id, seat_no), so two independent
+    LLM seats must still be able to speak in parallel."""
+    game, seats = await _seed(repo)
+    poster = FakePoster()
+    decider = FakeLLMActionDecider(
+        default=LLMAction(intent="speak", public_message="並行発言", reason_summary="reactive")
+    )
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=decider,
+        message_poster=poster,
+        rng=random.Random(0),
+        clock=lambda: 8500,
+    )
+    adapter.set_game_service(FakeGS())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    # Trigger text contains both LLM names → each reacts for itself only.
+    await asyncio.gather(
+        adapter.maybe_react_to_message(
+            game, players, seats, author_seat=1, text="Setsu と Gina に呼びかけ"
+        ),
+    )
+
+    assert len(poster.messages) == 2
+    count_setsu, _, _ = await repo.load_llm_speech(game.id, day=1, seat_no=2)
+    count_gina, _, _ = await repo.load_llm_speech(game.id, day=1, seat_no=3)
+    assert count_setsu == 1
+    assert count_gina == 1
+
+
 async def test_skip_intent_means_no_post(repo) -> None:
     game, seats = await _seed(repo)
     poster = FakePoster()

@@ -56,12 +56,14 @@ class VoteView(discord.ui.View):
         voter_seat: int,
         candidates: Sequence[Seat],
         round_: int,
-        on_submit: Callable[[str, int, int, int], Awaitable[SubmitResult]],
+        day: int,
+        on_submit: Callable[[str, int, int, int, int], Awaitable[SubmitResult]],
     ) -> None:
         super().__init__(timeout=None)
         self.game_id = game_id
         self.voter_seat = voter_seat
         self.round_ = round_
+        self.day = day
         self._on_submit = on_submit
 
         options = [
@@ -79,7 +81,9 @@ class VoteView(discord.ui.View):
     async def _on_pick(self, interaction: discord.Interaction) -> None:
         target_seat = int(self.select_target.values[0])
         try:
-            result = await self._on_submit(self.game_id, self.voter_seat, target_seat, self.round_)
+            result = await self._on_submit(
+                self.game_id, self.voter_seat, target_seat, self.round_, self.day
+            )
         except Exception:
             log.exception("vote submission callback failed")
             await _send_ephemeral(interaction, "投票処理中にエラーが発生しました。")
@@ -105,12 +109,14 @@ class NightActionView(discord.ui.View):
         actor_seat: int,
         kind: SubmissionType,
         candidates: Sequence[Seat],
-        on_submit: Callable[[str, int, SubmissionType, int], Awaitable[SubmitResult]],
+        day: int,
+        on_submit: Callable[[str, int, SubmissionType, int, int], Awaitable[SubmitResult]],
     ) -> None:
         super().__init__(timeout=None)
         self.game_id = game_id
         self.actor_seat = actor_seat
         self.kind = kind
+        self.day = day
         self._on_submit = on_submit
 
         placeholders = {
@@ -131,7 +137,9 @@ class NightActionView(discord.ui.View):
     async def _on_pick(self, interaction: discord.Interaction) -> None:
         target_seat = int(self.select_target.values[0])
         try:
-            result = await self._on_submit(self.game_id, self.actor_seat, self.kind, target_seat)
+            result = await self._on_submit(
+                self.game_id, self.actor_seat, self.kind, target_seat, self.day
+            )
         except Exception:
             log.exception("night action submission callback failed")
             await _send_ephemeral(interaction, "行動の提出中にエラーが発生しました。")

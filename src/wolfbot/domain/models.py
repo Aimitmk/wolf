@@ -94,12 +94,19 @@ class PendingSubmission(BaseModel):
 
     NIGHT typically carries up to three of these (wolf attack, seer divine, knight
     guard). DAY_VOTE / DAY_RUNOFF carry exactly one.
+
+    `missing_seats` lists seats that have not submitted anything yet. `unresolved_seats`
+    lists seats that already submitted but whose collective result cannot be settled
+    without another round of input — today the only case is two werewolves picking
+    different attack targets (split). Both sets need their DMs re-sent when recovering
+    from WAITING_HOST_DECISION via `/wolf extend`.
     """
 
     model_config = ConfigDict(frozen=True)
 
     submission_type: SubmissionType
     missing_seats: tuple[int, ...]
+    unresolved_seats: tuple[int, ...] = ()
 
 
 class PendingDecision(BaseModel):

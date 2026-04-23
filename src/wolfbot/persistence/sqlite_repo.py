@@ -101,6 +101,8 @@ def _row_to_pending(row: aiosqlite.Row) -> PendingDecision:
             PendingSubmission(
                 submission_type=SubmissionType(item["submission_type"]),
                 missing_seats=tuple(item["missing_seats"]),
+                # unresolved_seats was added post-M5; old rows lack the key.
+                unresolved_seats=tuple(item.get("unresolved_seats", ())),
             )
             for item in parsed
         )
@@ -123,6 +125,7 @@ def _submissions_json(pending: PendingDecision) -> str:
             {
                 "submission_type": s.submission_type.value,
                 "missing_seats": list(s.missing_seats),
+                "unresolved_seats": list(s.unresolved_seats),
             }
             for s in items
         ]

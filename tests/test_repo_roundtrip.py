@@ -111,6 +111,38 @@ async def test_pending_decision_roundtrip(repo: SqliteRepo, seats: list[Seat]) -
     assert await repo.load_pending_decision(g.id) is None
 
 
+async def test_pending_decision_roundtrip_preserves_unresolved_seats(
+    repo: SqliteRepo, seats: list[Seat]
+) -> None:
+    """Wolves in a split state are serialized as `unresolved_seats`, distinct from
+    truly `missing_seats`. The round-trip must preserve both fields so recovery
+    across a restart sees the same shape the advance loop wrote."""
+    from wolfbot.domain.models import PendingSubmission
+
+    g = await _base_game(repo, seats)
+    pd = PendingDecision(
+        game_id=g.id,
+        phase=Phase.NIGHT,
+        day=1,
+        required_submission=SubmissionType.WOLF_ATTACK,
+        missing_seats=(1, 2),
+        submissions=(
+            PendingSubmission(
+                submission_type=SubmissionType.WOLF_ATTACK,
+                missing_seats=(),
+                unresolved_seats=(1, 2),
+            ),
+        ),
+        created_at=30,
+    )
+    await repo.upsert_pending_decision(pd)
+    loaded = await repo.load_pending_decision(g.id)
+    assert loaded is not None
+    assert len(loaded.submissions) == 1
+    assert loaded.submissions[0].missing_seats == ()
+    assert loaded.submissions[0].unresolved_seats == (1, 2)
+
+
 async def test_previous_guard_roundtrip(repo: SqliteRepo, seats: list[Seat]) -> None:
     g = await _base_game(repo, seats)
     await repo.upsert_previous_guard(g.id, knight_seat=6, last_guard_seat=None, last_guard_day=0)

@@ -184,6 +184,10 @@ class LLMAdapter:
         self.rng = rng or random.Random()
         self._clock: Callable[[], int] = clock or (lambda: int(_time.time()))
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Per-seat speech lock. Serializes read→check→write for daily cap and
+        # cooldown so concurrent triggers (multiple reactive calls, or a
+        # daystart racing with a reactive) can't both post past the cap.
+        self._speech_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
     def set_game_service(self, gs: GameService) -> None:
         self._gs_slot["gs"] = gs
@@ -225,7 +229,9 @@ class LLMAdapter:
                 task_text=task_night_action(kind, [c.display_name for c in candidates]),
             )
             target_seat = self._resolve_target(action.target_name, candidates, allow_none=False)
-            await self.gs.submit_night_action(game.id, player.seat_no, kind, target_seat)
+            await self.gs.submit_night_action(
+                game.id, player.seat_no, kind, target_seat, game.day_number
+            )
 
     # ------------------------------------------------------ votes
     async def submit_llm_votes(
@@ -258,7 +264,13 @@ class LLMAdapter:
                     s for s in seats if s.seat_no in set(candidates) and s.seat_no != voter.seat_no
                 ]
             if not cand_seats:
-                await self.gs.submit_vote(game.id, voter.seat_no, target_seat=None, round_=round_)
+                await self.gs.submit_vote(
+                    game.id,
+                    voter.seat_no,
+                    target_seat=None,
+                    round_=round_,
+                    day=game.day_number,
+                )
                 continue
             action = await self._ask(
                 game,
@@ -271,7 +283,13 @@ class LLMAdapter:
             target = self._resolve_target(
                 action.target_name, cand_seats, allow_none=action.intent == "skip"
             )
-            await self.gs.submit_vote(game.id, voter.seat_no, target_seat=target, round_=round_)
+            await self.gs.submit_vote(
+                game.id,
+                voter.seat_no,
+                target_seat=target,
+                round_=round_,
+                day=game.day_number,
+            )
 
     # --------------------------------------------------- daytime speeches
     async def submit_llm_daystart_speeches(
@@ -362,6 +380,14 @@ class LLMAdapter:
             return True
         return any(kw in text for kw in self.REACTION_KEYWORDS)
 
+    def _speech_lock(self, game_id: str, seat_no: int) -> asyncio.Lock:
+        key = (game_id, seat_no)
+        lock = self._speech_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._speech_locks[key] = lock
+        return lock
+
     async def _maybe_speak(
         self,
         game: Game,
@@ -369,45 +395,55 @@ class LLMAdapter:
         seat: Seat,
         seats: Sequence[Seat],
     ) -> None:
-        """Ask the LLM; if intent=speak, post to main and increment the count."""
-        count, _, last = await self.repo.load_llm_speech(game.id, game.day_number, player.seat_no)
-        if count >= self.NORMAL_SPEECH_CAP:
-            return
-        now = self._clock()
-        if last is not None and now - last < self.COOLDOWN_SECONDS:
-            return
-        players = await self.repo.load_players(game.id)
-        action = await self._ask(
-            game,
-            player,
-            seat,
-            players,
-            seats,
-            task_text=task_daytime_speech(game.day_number),
-        )
-        if action.intent != "speak":
-            return
-        message = action.public_message.strip()
-        if not message:
-            return
-        # Belt-and-suspenders: the LLM call itself can take seconds. Re-check
-        # phase right before posting so we don't dump a stale speech into a
-        # channel that has already moved on to voting or night.
-        fresh = await self.repo.load_game(game.id)
-        if (
-            fresh is None
-            or fresh.phase is not Phase.DAY_DISCUSSION
-            or fresh.day_number != game.day_number
-        ):
-            return
-        if self.message_poster is not None:
-            try:
-                await self.message_poster.post_public(
-                    fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
-                )
-            except Exception:
-                log.exception("post_public for LLM speech failed")
-        await self.repo.increment_llm_normal_speech(game.id, game.day_number, player.seat_no, now)
+        """Ask the LLM; if intent=speak, post to main and increment the count.
+
+        The entire read(cap/cooldown) → LLM call → post → increment pipeline is
+        serialized per (game, seat) so two concurrent triggers can't both pass
+        the cap check and double-post.
+        """
+        async with self._speech_lock(game.id, player.seat_no):
+            count, _, last = await self.repo.load_llm_speech(
+                game.id, game.day_number, player.seat_no
+            )
+            if count >= self.NORMAL_SPEECH_CAP:
+                return
+            now = self._clock()
+            if last is not None and now - last < self.COOLDOWN_SECONDS:
+                return
+            players = await self.repo.load_players(game.id)
+            action = await self._ask(
+                game,
+                player,
+                seat,
+                players,
+                seats,
+                task_text=task_daytime_speech(game.day_number),
+            )
+            if action.intent != "speak":
+                return
+            message = action.public_message.strip()
+            if not message:
+                return
+            # Belt-and-suspenders: the LLM call itself can take seconds. Re-check
+            # phase right before posting so we don't dump a stale speech into a
+            # channel that has already moved on to voting or night.
+            fresh = await self.repo.load_game(game.id)
+            if (
+                fresh is None
+                or fresh.phase is not Phase.DAY_DISCUSSION
+                or fresh.day_number != game.day_number
+            ):
+                return
+            if self.message_poster is not None:
+                try:
+                    await self.message_poster.post_public(
+                        fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
+                    )
+                except Exception:
+                    log.exception("post_public for LLM speech failed")
+            await self.repo.increment_llm_normal_speech(
+                game.id, game.day_number, player.seat_no, now
+            )
 
     # ------------------------------------------------------ helpers
     async def _ask(

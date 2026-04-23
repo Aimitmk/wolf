@@ -51,7 +51,9 @@ def _seat(seat_no: int) -> Seat:
 
 
 async def test_vote_view_on_accepted_shows_success() -> None:
-    async def on_submit(game_id: str, voter: int, target: int, round_: int) -> SubmitResult:
+    async def on_submit(
+        game_id: str, voter: int, target: int, round_: int, day: int
+    ) -> SubmitResult:
         return SubmitResult.ACCEPTED
 
     view = VoteView(
@@ -59,6 +61,7 @@ async def test_vote_view_on_accepted_shows_success() -> None:
         voter_seat=1,
         candidates=[_seat(2), _seat(3)],
         round_=0,
+        day=1,
         on_submit=on_submit,
     )
     view.select_target._values = ["2"]  # type: ignore[attr-defined]
@@ -72,7 +75,9 @@ async def test_vote_view_on_accepted_shows_success() -> None:
 
 
 async def test_vote_view_on_stale_phase_shows_reject() -> None:
-    async def on_submit(game_id: str, voter: int, target: int, round_: int) -> SubmitResult:
+    async def on_submit(
+        game_id: str, voter: int, target: int, round_: int, day: int
+    ) -> SubmitResult:
         return SubmitResult.STALE_PHASE
 
     view = VoteView(
@@ -80,6 +85,7 @@ async def test_vote_view_on_stale_phase_shows_reject() -> None:
         voter_seat=1,
         candidates=[_seat(2), _seat(3)],
         round_=0,
+        day=1,
         on_submit=on_submit,
     )
     view.select_target._values = ["2"]  # type: ignore[attr-defined]
@@ -97,7 +103,9 @@ async def test_vote_view_on_stale_phase_shows_reject() -> None:
 
 
 async def test_vote_view_on_target_dead_says_target_dead() -> None:
-    async def on_submit(game_id: str, voter: int, target: int, round_: int) -> SubmitResult:
+    async def on_submit(
+        game_id: str, voter: int, target: int, round_: int, day: int
+    ) -> SubmitResult:
         return SubmitResult.TARGET_DEAD
 
     view = VoteView(
@@ -105,6 +113,7 @@ async def test_vote_view_on_target_dead_says_target_dead() -> None:
         voter_seat=1,
         candidates=[_seat(2), _seat(3)],
         round_=0,
+        day=1,
         on_submit=on_submit,
     )
     view.select_target._values = ["3"]  # type: ignore[attr-defined]
@@ -117,7 +126,7 @@ async def test_vote_view_on_target_dead_says_target_dead() -> None:
 
 async def test_night_view_on_accepted_shows_success() -> None:
     async def on_submit(
-        game_id: str, actor: int, kind: SubmissionType, target: int
+        game_id: str, actor: int, kind: SubmissionType, target: int, day: int
     ) -> SubmitResult:
         return SubmitResult.ACCEPTED
 
@@ -126,6 +135,7 @@ async def test_night_view_on_accepted_shows_success() -> None:
         actor_seat=2,
         kind=SubmissionType.SEER_DIVINE,
         candidates=[_seat(3), _seat(4)],
+        day=1,
         on_submit=on_submit,
     )
     view.select_target._values = ["3"]  # type: ignore[attr-defined]
@@ -139,7 +149,7 @@ async def test_night_view_on_accepted_shows_success() -> None:
 
 async def test_night_view_on_role_mismatch_shows_reject() -> None:
     async def on_submit(
-        game_id: str, actor: int, kind: SubmissionType, target: int
+        game_id: str, actor: int, kind: SubmissionType, target: int, day: int
     ) -> SubmitResult:
         return SubmitResult.ROLE_MISMATCH
 
@@ -148,6 +158,7 @@ async def test_night_view_on_role_mismatch_shows_reject() -> None:
         actor_seat=2,
         kind=SubmissionType.SEER_DIVINE,
         candidates=[_seat(3), _seat(4)],
+        day=1,
         on_submit=on_submit,
     )
     view.select_target._values = ["3"]  # type: ignore[attr-defined]

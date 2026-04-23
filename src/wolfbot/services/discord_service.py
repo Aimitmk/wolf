@@ -145,6 +145,7 @@ class DiscordBotAdapter:
                 voter_seat=voter.seat_no,
                 candidates=candidates,
                 round_=round_,
+                day=game.day_number,
                 on_submit=self.gs.submit_vote,
             )
             title = "投票" if round_ == 0 else "決選投票"
@@ -192,6 +193,7 @@ class DiscordBotAdapter:
                 actor_seat=p.seat_no,
                 kind=kind,
                 candidates=candidates,
+                day=game.day_number,
                 on_submit=self.gs.submit_night_action,
             )
             prompts = {
@@ -215,9 +217,21 @@ class DiscordBotAdapter:
             f"フェイズ: `{pending.phase.value}` (day {pending.day})",
         ]
         for sub in pending.effective_submissions():
-            names = [seats_by_no[sn].display_name for sn in sub.missing_seats if sn in seats_by_no]
-            missing_str = "、".join(names) if names else "(なし)"
-            lines.append(f"`{sub.submission_type.value}` 未提出: {missing_str}")
+            if sub.missing_seats:
+                names = [
+                    seats_by_no[sn].display_name for sn in sub.missing_seats if sn in seats_by_no
+                ]
+                lines.append(
+                    f"`{sub.submission_type.value}` 未提出: {'、'.join(names) or '(なし)'}"
+                )
+            if sub.unresolved_seats:
+                names = [
+                    seats_by_no[sn].display_name for sn in sub.unresolved_seats if sn in seats_by_no
+                ]
+                lines.append(
+                    f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
+                    f"{'、'.join(names) or '(なし)'}"
+                )
         lines.append(
             "`/wolf extend <秒>` で延長、または `/wolf force-skip` で未提出を確定処理します。"
         )
@@ -236,7 +250,7 @@ class DiscordBotAdapter:
         lines = [f"♻️ 復帰しました。現在フェイズ: `{game.phase.value}` / day {game.day_number}"]
         if pending:
             for sub in pending.effective_submissions():
-                count = len(sub.missing_seats)
+                count = len(set(sub.missing_seats) | set(sub.unresolved_seats))
                 lines.append(f"未提出あり: `{sub.submission_type.value}` → {count} 件未確定")
         try:
             await channel.send("\n".join(lines))
@@ -462,19 +476,7 @@ class WolfCog(commands.Cog):
 
         shortfall = 9 - len(humans)
         if shortfall > 0:
-            picks = pick_personas(shortfall, self.rng)
-            for i, persona in enumerate(picks):
-                seat_no = _next_seat_no(seats) + i
-                llm_seat = Seat(
-                    seat_no=seat_no,
-                    display_name=persona.display_name,
-                    discord_user_id=None,
-                    is_llm=True,
-                    persona_key=persona.key,
-                )
-                await self.repo.insert_seat(game.id, llm_seat)
-                await self.repo.insert_persona_assignment(game.id, seat_no, persona.key)
-                seats = await self.repo.load_seats(game.id)
+            await _backfill_llm_seats(self.repo, game.id, shortfall, self.rng)
 
         # Move to SETUP; engine picks it up
         from wolfbot.domain.models import Transition
@@ -676,3 +678,33 @@ def _next_seat_no(existing: Sequence[Seat]) -> int:
         if i not in used:
             return i
     return 9
+
+
+async def _backfill_llm_seats(
+    repo: SqliteRepo,
+    game_id: str,
+    shortfall: int,
+    rng: Random,
+) -> None:
+    """Insert `shortfall` LLM seats into the game using the next free seat numbers.
+
+    Factored out of /wolf start so the seat-number assignment can be unit tested
+    without a Discord interaction. Re-reads seats between inserts so the next
+    free seat (1..9) is always correct even when starting from a partial lineup.
+    """
+    if shortfall <= 0:
+        return
+    picks = pick_personas(shortfall, rng)
+    seats = await repo.load_seats(game_id)
+    for persona in picks:
+        seat_no = _next_seat_no(seats)
+        llm_seat = Seat(
+            seat_no=seat_no,
+            display_name=persona.display_name,
+            discord_user_id=None,
+            is_llm=True,
+            persona_key=persona.key,
+        )
+        await repo.insert_seat(game_id, llm_seat)
+        await repo.insert_persona_assignment(game_id, seat_no, persona.key)
+        seats = await repo.load_seats(game_id)

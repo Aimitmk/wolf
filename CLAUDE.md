@@ -81,6 +81,8 @@ See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` a
 - **Mutable live state** rehydrated from DB per operation: `Player`, `Game`, `Vote`, `NightAction`.
 - Atomic replacement is via `apply_transition`. Never mutate a model after it's been committed.
 - `submit_vote` / `submit_night_action` return `SubmitResult` (`src/wolfbot/domain/enums.py`) — a StrEnum of specific rejection reasons the UI surfaces back to the player. New submission endpoints should return `SubmitResult`, not a bool.
+- Both submission endpoints require a `day: int` argument that must match `game.day_number`; otherwise they return `SubmitResult.STALE_PHASE`. `VoteView` / `NightActionView` capture the current `day` at DM-send time so a player clicking yesterday's DM today is rejected even when the phase happens to match.
+- `PendingSubmission` has two parallel seat lists: `missing_seats` (never submitted) and `unresolved_seats` (submitted but unsettled — currently only wolf attack splits). `resend_pending_dms` re-sends DMs to the union of both, so `/wolf extend` can break a split lockout without needing `/wolf force-skip`.
 
 ### Recovery on startup
 

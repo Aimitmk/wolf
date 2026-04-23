@@ -80,13 +80,18 @@ class FakeGameService:
     """Just captures submit_* calls."""
 
     def __init__(self) -> None:
-        self.votes: list[tuple[str, int, int | None, int]] = []
-        self.nights: list[tuple[str, int, SubmissionType, int | None]] = []
+        self.votes: list[tuple[str, int, int | None, int, int]] = []
+        self.nights: list[tuple[str, int, SubmissionType, int | None, int]] = []
 
     async def submit_vote(
-        self, game_id: str, voter_seat: int, target_seat: int | None, round_: int
+        self,
+        game_id: str,
+        voter_seat: int,
+        target_seat: int | None,
+        round_: int,
+        day: int,
     ) -> None:
-        self.votes.append((game_id, voter_seat, target_seat, round_))
+        self.votes.append((game_id, voter_seat, target_seat, round_, day))
 
     async def submit_night_action(
         self,
@@ -94,8 +99,9 @@ class FakeGameService:
         actor_seat: int,
         kind: SubmissionType,
         target_seat: int | None,
+        day: int,
     ) -> None:
-        self.nights.append((game_id, actor_seat, kind, target_seat))
+        self.nights.append((game_id, actor_seat, kind, target_seat, day))
 
 
 async def _seed_game(repo):
@@ -154,10 +160,11 @@ async def test_llm_adapter_submits_night_action_for_seer(repo) -> None:
     await adapter.submit_llm_night_actions(game, players, seats)
 
     assert len(gs.nights) == 1
-    _, actor_seat, kind, target_seat = gs.nights[0]
+    _, actor_seat, kind, target_seat, day = gs.nights[0]
     assert actor_seat == 2
     assert kind is SubmissionType.SEER_DIVINE
     assert target_seat == 1  # "Human1" resolved to seat 1
+    assert day == game.day_number
 
 
 async def test_llm_adapter_falls_back_on_invalid_target_name(repo) -> None:

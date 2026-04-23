@@ -405,6 +405,176 @@ async def test_recovery_pending_night_primary_is_first_outstanding(
     assert knight_sub.missing_seats == (6,)
 
 
+async def test_recovery_pending_night_split_wolves_are_unresolved(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Wolves who submitted different attack targets must be captured as
+    `unresolved_seats` (not left with empty missing/unresolved like the old
+    snapshot that only looked at who had a row in night_actions)."""
+    from wolfbot.domain.enums import SubmissionType
+    from wolfbot.domain.models import NightAction
+
+    rec, _, _, _, clock = rec_bundle
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=1,
+        deadline_epoch=clock.now - 60,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    for s in _seats():
+        await repo.insert_seat(game.id, s)
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.MADMAN,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    for idx, role in enumerate(roles, start=1):
+        await repo.set_player_role(game.id, idx, role)
+    # Split: wolf 1 targets seat 7, wolf 2 targets seat 8. Seer and knight submit.
+    await repo.insert_night_action(
+        NightAction(
+            game_id=game.id,
+            day=1,
+            actor_seat=1,
+            kind=SubmissionType.WOLF_ATTACK,
+            target_seat=7,
+            submitted_at=clock.now - 120,
+        )
+    )
+    await repo.insert_night_action(
+        NightAction(
+            game_id=game.id,
+            day=1,
+            actor_seat=2,
+            kind=SubmissionType.WOLF_ATTACK,
+            target_seat=8,
+            submitted_at=clock.now - 120,
+        )
+    )
+    await repo.insert_night_action(
+        NightAction(
+            game_id=game.id,
+            day=1,
+            actor_seat=4,
+            kind=SubmissionType.SEER_DIVINE,
+            target_seat=3,
+            submitted_at=clock.now - 120,
+        )
+    )
+    await repo.insert_night_action(
+        NightAction(
+            game_id=game.id,
+            day=1,
+            actor_seat=6,
+            kind=SubmissionType.KNIGHT_GUARD,
+            target_seat=3,
+            submitted_at=clock.now - 120,
+        )
+    )
+
+    await rec.recover_all()
+
+    pending = await repo.load_pending_decision(game.id)
+    assert pending is not None
+    assert pending.required_submission is SubmissionType.WOLF_ATTACK
+    wolf_sub = next(
+        s for s in pending.submissions if s.submission_type is SubmissionType.WOLF_ATTACK
+    )
+    assert wolf_sub.missing_seats == ()
+    assert wolf_sub.unresolved_seats == (1, 2)
+    # `missing_seats` on the legacy summary surfaces both wolves as needing action.
+    assert set(pending.missing_seats) == {1, 2}
+
+
+async def test_host_extend_resends_dms_to_split_wolves(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """After a split has parked the game in WAITING_HOST_DECISION, `/wolf extend`
+    must re-send night action DMs to the split wolves so they can converge on a
+    common target."""
+    from wolfbot.domain.enums import SubmissionType
+    from wolfbot.domain.models import NightAction
+
+    rec, gs, disc, _, clock = rec_bundle
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=1,
+        deadline_epoch=clock.now - 60,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    for s in _seats():
+        await repo.insert_seat(game.id, s)
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.MADMAN,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    for idx, role in enumerate(roles, start=1):
+        await repo.set_player_role(game.id, idx, role)
+    # Split: wolf 1 → 7, wolf 2 → 8. Seer + knight submitted too.
+    submissions = [
+        (1, SubmissionType.WOLF_ATTACK, 7),
+        (2, SubmissionType.WOLF_ATTACK, 8),
+        (4, SubmissionType.SEER_DIVINE, 3),
+        (6, SubmissionType.KNIGHT_GUARD, 3),
+    ]
+    for actor, kind, target in submissions:
+        await repo.insert_night_action(
+            NightAction(
+                game_id=game.id,
+                day=1,
+                actor_seat=actor,
+                kind=kind,
+                target_seat=target,
+                submitted_at=clock.now - 120,
+            )
+        )
+
+    await rec.recover_all()  # parks WAITING with unresolved wolves
+    disc.reset()
+
+    ok = await gs.host_extend(game.id, extra_seconds=60)
+    assert ok
+
+    sent = [c for c in disc.calls if c.name == "send_night_action_dms"]
+    assert len(sent) == 1
+    dmed = set(sent[0].kwargs["players"])
+    # Both wolves are re-DMed so they can reselect a target
+    assert 1 in dmed and 2 in dmed
+    # Seer and knight already submitted — not in the resend
+    assert 4 not in dmed and 6 not in dmed
+
+
 async def test_pending_decision_backward_compat_synthesizes_submissions() -> None:
     """Old DB rows (no submissions_json) should still yield a single-entry breakdown."""
     from wolfbot.domain.enums import SubmissionType

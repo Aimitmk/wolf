@@ -491,6 +491,10 @@ def plan_night_resolve(
     wolves_split_pauses = attack.split and not force_skip
 
     if (missing or wolves_split_pauses) and not force_skip:
+        wolf_missing_seats = tuple(sorted(set(missing) & set(wolves)))
+        wolf_unresolved_seats = tuple(sorted(wolves)) if wolves_split_pauses else ()
+        # `missing_seats` is the legacy primary summary (union of all seats that
+        # need action — real no-submit plus split wolves that must re-pick).
         pending_missing = set(missing)
         if wolves_split_pauses:
             pending_missing.update(wolves)
@@ -504,14 +508,12 @@ def plan_night_resolve(
         # Build the per-kind breakdown so the host UI can show every outstanding
         # action at once. Order matches role priority (wolf > seer > knight).
         per_kind: list[PendingSubmission] = []
-        wolf_missing = tuple(
-            sorted(set(wolves) if wolves_split_pauses else set(missing) & set(wolves))
-        )
-        if wolf_missing:
+        if wolf_missing_seats or wolf_unresolved_seats:
             per_kind.append(
                 PendingSubmission(
                     submission_type=SubmissionType.WOLF_ATTACK,
-                    missing_seats=wolf_missing,
+                    missing_seats=wolf_missing_seats,
+                    unresolved_seats=wolf_unresolved_seats,
                 )
             )
         if seer_seat is not None and seer_seat in missing:

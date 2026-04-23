@@ -320,6 +320,32 @@ def test_wolf_split_without_force_skip_pauses() -> None:
     assert t.requires_host_decision is True
 
 
+def test_wolf_split_records_unresolved_seats_not_missing() -> None:
+    """Split wolves have submitted — they must be classified as `unresolved_seats`
+    (so recovery and /wolf extend can distinguish them from truly missing players)."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 8),  # split
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 3),
+    ]
+    t = plan_night_resolve(
+        game, players, seats, actions, previous_guard_seat=None, force_skip=False, now_epoch=1000
+    )
+    assert t.pending is not None
+    wolf_sub = next(
+        s for s in t.pending.submissions if s.submission_type is SubmissionType.WOLF_ATTACK
+    )
+    assert wolf_sub.missing_seats == ()
+    assert wolf_sub.unresolved_seats == (1, 2)
+    # The legacy summary `missing_seats` still lists the wolves so existing UI surfaces
+    # continue to report "wolves need action" in a single field.
+    assert set(t.pending.missing_seats) == {1, 2}
+
+
 def test_wolf_missing_submission_pauses() -> None:
     game = _game(day=1)
     players = _players()
