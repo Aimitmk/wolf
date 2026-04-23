@@ -16,9 +16,14 @@ from wolfbot.services.timer_service import EngineRegistry, GameEngine
 
 async def _make_game(repo: SqliteRepo, phase: Phase, deadline: int | None) -> Game:
     g = Game(
-        id=new_game_id(), guild_id="g", host_user_id="h",
-        phase=phase, day_number=1, deadline_epoch=deadline,
-        main_text_channel_id="c1", main_vc_channel_id="c2",
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=phase,
+        day_number=1,
+        deadline_epoch=deadline,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
         created_at=0,
     )
     await repo.create_game(g)
@@ -28,6 +33,7 @@ async def _make_game(repo: SqliteRepo, phase: Phase, deadline: int | None) -> Ga
 async def test_engine_advances_transient_phase_immediately(repo: SqliteRepo) -> None:
     """Phases with no deadline should cause the engine to call advance without waiting."""
     from wolfbot.domain.models import Transition
+
     clock = FakeClock(now=0)
     advance_count = 0
 
@@ -75,6 +81,7 @@ async def test_engine_wakes_on_wake_signal(repo: SqliteRepo) -> None:
 
     async def fake_advance(game_id: str) -> None:
         from wolfbot.domain.models import Transition
+
         await repo.apply_transition(
             game_id,
             Transition(next_phase=Phase.GAME_OVER, next_day=1, new_deadline_epoch=None),
@@ -117,6 +124,7 @@ async def test_registry_wake_routes_to_engine(repo: SqliteRepo) -> None:
     async def fake_advance(game_id: str) -> None:
         called.append(game_id)
         from wolfbot.domain.models import Transition
+
         await repo.apply_transition(
             game_id,
             Transition(next_phase=Phase.GAME_OVER, next_day=1, new_deadline_epoch=None),
@@ -124,7 +132,7 @@ async def test_registry_wake_routes_to_engine(repo: SqliteRepo) -> None:
         )
 
     engine = GameEngine(game_id=game.id, repo=repo, advance=fake_advance, clock=clock)
-    registry.attach(engine)
+    await registry.attach(engine)
     engine.start()
     await asyncio.sleep(0.01)
     registry.wake(game.id)

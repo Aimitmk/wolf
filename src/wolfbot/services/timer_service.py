@@ -114,7 +114,19 @@ class EngineRegistry:
     def __init__(self) -> None:
         self._engines: dict[str, GameEngine] = {}
 
-    def attach(self, engine: GameEngine) -> None:
+    async def attach(self, engine: GameEngine) -> None:
+        """Register `engine`, stopping any prior engine for the same game first.
+
+        Recovery can re-fire (e.g. Discord reconnect retriggers on_ready), so the
+        registry must not leak orphan tasks that keep driving a game after they've
+        been replaced. Stopping before replacement makes `attach()` idempotent.
+        """
+        existing = self._engines.pop(engine.game_id, None)
+        if existing is not None and existing is not engine:
+            try:
+                await existing.stop()
+            except Exception:
+                log.exception("attach: failed to stop existing engine for %s", engine.game_id)
         self._engines[engine.game_id] = engine
 
     def detach(self, game_id: str) -> GameEngine | None:

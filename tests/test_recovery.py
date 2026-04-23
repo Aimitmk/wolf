@@ -18,8 +18,9 @@ from wolfbot.services.timer_service import EngineRegistry
 
 def _seats() -> list[Seat]:
     return [
-        Seat(seat_no=i, display_name=f"P{i}", discord_user_id=f"u{i}",
-             is_llm=False, persona_key=None)
+        Seat(
+            seat_no=i, display_name=f"P{i}", discord_user_id=f"u{i}", is_llm=False, persona_key=None
+        )
         for i in range(1, 10)
     ]
 
@@ -31,11 +32,16 @@ async def _seed_game_at_night_vote(
     phase: Phase = Phase.DAY_VOTE,
 ) -> Game:
     game = Game(
-        id=new_game_id(), guild_id="g", host_user_id="h",
-        phase=phase, day_number=1,
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=phase,
+        day_number=1,
         deadline_epoch=deadline_epoch,
-        main_text_channel_id="c1", main_vc_channel_id="c2",
-        heaven_channel_id="ch-h", wolves_channel_id="ch-w",
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
         created_at=0,
     )
     await repo.create_game(game)
@@ -44,23 +50,37 @@ async def _seed_game_at_night_vote(
     for p in await repo.load_players(game.id):
         # assign dummy roles so live-role lookups work
         role = [
-            Role.WEREWOLF, Role.WEREWOLF, Role.MADMAN,
-            Role.SEER, Role.MEDIUM, Role.KNIGHT,
-            Role.VILLAGER, Role.VILLAGER, Role.VILLAGER,
+            Role.WEREWOLF,
+            Role.WEREWOLF,
+            Role.MADMAN,
+            Role.SEER,
+            Role.MEDIUM,
+            Role.KNIGHT,
+            Role.VILLAGER,
+            Role.VILLAGER,
+            Role.VILLAGER,
         ][p.seat_no - 1]
         await repo.set_player_role(game.id, p.seat_no, role)
     return game
 
 
 @pytest_asyncio.fixture
-async def rec_bundle(repo: SqliteRepo) -> AsyncIterator[tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock]]:
+async def rec_bundle(
+    repo: SqliteRepo,
+) -> AsyncIterator[
+    tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock]
+]:
     disc = FakeDiscordAdapter()
     llm = FakeLLMAdapter()
     reg = EngineRegistry()
     clock = FakeClock(now=10_000)
     gs = GameService(
-        repo=repo, discord=disc, llm=llm, wake=reg,
-        clock=clock, rng=random.Random(0),
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        clock=clock,
+        rng=random.Random(0),
     )
     rec = RecoveryService(repo=repo, game_service=gs, registry=reg, discord=disc, clock=clock)
     try:
@@ -118,14 +138,16 @@ async def test_restart_of_waiting_game_just_reconciles(
     rec, _, disc, _, clock = rec_bundle
     # Seed a game already in WAITING_HOST_DECISION (deadline must be None)
     game = await _seed_game_at_night_vote(
-        repo, deadline_epoch=None, now=clock.now,
+        repo,
+        deadline_epoch=None,
+        now=clock.now,
         phase=Phase.WAITING_HOST_DECISION,
     )
     await repo.upsert_pending_decision(
-        __import__(
-            "wolfbot.domain.models", fromlist=["PendingDecision"]
-        ).PendingDecision(
-            game_id=game.id, phase=Phase.NIGHT, day=1,
+        __import__("wolfbot.domain.models", fromlist=["PendingDecision"]).PendingDecision(
+            game_id=game.id,
+            phase=Phase.NIGHT,
+            day=1,
             required_submission=__import__(
                 "wolfbot.domain.enums", fromlist=["SubmissionType"]
             ).SubmissionType.WOLF_ATTACK,
@@ -152,9 +174,7 @@ async def test_recovery_isolation_per_game(
     """One game failing shouldn't block others."""
     rec, _, disc, _reg, clock = rec_bundle
     # Game A (good)
-    await _seed_game_at_night_vote(
-        repo, deadline_epoch=clock.now + 300, now=clock.now
-    )
+    await _seed_game_at_night_vote(repo, deadline_epoch=clock.now + 300, now=clock.now)
     # Fail on reconcile only for subsequent call — simulate a mid-recovery error
     disc.fail_on.add("reconcile")
 
@@ -162,3 +182,238 @@ async def test_recovery_isolation_per_game(
     # Even though reconcile raises, recovery should have proceeded and returned IDs.
     # Our service catches reconcile failure. So the game still gets "recovered".
     assert len(recovered) == 1
+
+
+async def test_double_recover_does_not_orphan_engines(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Simulates on_ready re-firing after a reconnect. The second recover_all()
+    must not leave the first engine task running."""
+    rec, _, _, reg, clock = rec_bundle
+    game = await _seed_game_at_night_vote(repo, deadline_epoch=clock.now + 300, now=clock.now)
+
+    await rec.recover_all()
+    first_engine = reg._engines[game.id]  # type: ignore[attr-defined]
+    first_task = first_engine._task  # type: ignore[attr-defined]
+    assert first_task is not None
+
+    await rec.recover_all()
+    second_engine = reg._engines[game.id]  # type: ignore[attr-defined]
+
+    assert second_engine is not first_engine
+    # Previous engine's task must have been stopped during re-attach
+    assert first_task.done()
+    # Registry still holds exactly one engine per game
+    assert len(reg._engines) == 1  # type: ignore[attr-defined]
+
+
+async def test_recovery_pending_day_vote_excludes_already_voted(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """DAY_VOTE: only seats without a submitted vote should be in missing_seats."""
+    from wolfbot.domain.models import Vote
+
+    rec, _, _, _, clock = rec_bundle
+    game = await _seed_game_at_night_vote(
+        repo, deadline_epoch=clock.now - 60, now=clock.now, phase=Phase.DAY_VOTE
+    )
+    # Seats 1, 2, 3 have already voted.
+    for seat in (1, 2, 3):
+        await repo.insert_vote(
+            Vote(
+                game_id=game.id,
+                day=1,
+                round=0,
+                voter_seat=seat,
+                target_seat=4,
+                submitted_at=clock.now - 120,
+            )
+        )
+
+    await rec.recover_all()
+    pending = await repo.load_pending_decision(game.id)
+    assert pending is not None
+    assert pending.missing_seats == (4, 5, 6, 7, 8, 9)
+    # submissions breakdown reflects the same
+    assert len(pending.submissions) == 1
+    assert pending.submissions[0].missing_seats == (4, 5, 6, 7, 8, 9)
+
+
+async def test_recovery_pending_night_excludes_knight_on_day_zero(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Night 0: knight doesn't act, so they must not be in submissions."""
+    from wolfbot.domain.enums import SubmissionType
+
+    rec, _, _, _, clock = rec_bundle
+    # Seed game at NIGHT day 0
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=0,
+        deadline_epoch=clock.now - 60,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    for s in _seats():
+        await repo.insert_seat(game.id, s)
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.MADMAN,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    for idx, role in enumerate(roles, start=1):
+        await repo.set_player_role(game.id, idx, role)
+
+    await rec.recover_all()
+    pending = await repo.load_pending_decision(game.id)
+    assert pending is not None
+    submission_types = {s.submission_type for s in pending.submissions}
+    assert SubmissionType.KNIGHT_GUARD not in submission_types
+
+
+async def test_recovery_pending_night_primary_is_first_outstanding(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """If wolves submitted but seer hasn't, required_submission is SEER_DIVINE."""
+    from wolfbot.domain.enums import SubmissionType
+    from wolfbot.domain.models import NightAction
+
+    rec, _, _, _, clock = rec_bundle
+    # Night day 1 — knight is expected too.
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=1,
+        deadline_epoch=clock.now - 60,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    for s in _seats():
+        await repo.insert_seat(game.id, s)
+    roles = [
+        Role.WEREWOLF,
+        Role.WEREWOLF,
+        Role.MADMAN,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.VILLAGER,
+        Role.VILLAGER,
+        Role.VILLAGER,
+    ]
+    for idx, role in enumerate(roles, start=1):
+        await repo.set_player_role(game.id, idx, role)
+    # Both wolves submit their attack; seer and knight do not.
+    for wolf_seat in (1, 2):
+        await repo.insert_night_action(
+            NightAction(
+                game_id=game.id,
+                day=1,
+                actor_seat=wolf_seat,
+                kind=SubmissionType.WOLF_ATTACK,
+                target_seat=7,
+                submitted_at=clock.now - 120,
+            )
+        )
+
+    await rec.recover_all()
+    pending = await repo.load_pending_decision(game.id)
+    assert pending is not None
+    # WOLF_ATTACK is satisfied → primary shifts to SEER_DIVINE
+    assert pending.required_submission is SubmissionType.SEER_DIVINE
+    kinds = [s.submission_type for s in pending.submissions]
+    assert kinds == [SubmissionType.SEER_DIVINE, SubmissionType.KNIGHT_GUARD]
+    seer_sub = next(
+        s for s in pending.submissions if s.submission_type is SubmissionType.SEER_DIVINE
+    )
+    assert seer_sub.missing_seats == (4,)
+    knight_sub = next(
+        s for s in pending.submissions if s.submission_type is SubmissionType.KNIGHT_GUARD
+    )
+    assert knight_sub.missing_seats == (6,)
+
+
+async def test_pending_decision_backward_compat_synthesizes_submissions() -> None:
+    """Old DB rows (no submissions_json) should still yield a single-entry breakdown."""
+    from wolfbot.domain.enums import SubmissionType
+    from wolfbot.domain.models import PendingDecision
+
+    pd = PendingDecision(
+        game_id="g",
+        phase=Phase.DAY_VOTE,
+        day=1,
+        required_submission=SubmissionType.VOTE,
+        missing_seats=(3, 5),
+        submissions=(),
+        created_at=0,
+    )
+    synth = pd.effective_submissions()
+    assert len(synth) == 1
+    assert synth[0].submission_type is SubmissionType.VOTE
+    assert synth[0].missing_seats == (3, 5)
+
+
+async def test_engine_registry_attach_stops_existing(
+    repo: SqliteRepo,
+) -> None:
+    """attach() must stop any prior engine sharing the same game_id."""
+    import asyncio
+
+    from wolfbot.services.timer_service import GameEngine
+
+    reg = EngineRegistry()
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.DAY_VOTE,
+        day_number=1,
+        deadline_epoch=10**10,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+    )
+    await repo.create_game(game)
+
+    async def noop(_: str) -> None:
+        return None
+
+    first = GameEngine(game_id=game.id, repo=repo, advance=noop)
+    await reg.attach(first)
+    first.start()
+    await asyncio.sleep(0)  # let the task actually start
+
+    second = GameEngine(game_id=game.id, repo=repo, advance=noop)
+    await reg.attach(second)
+
+    assert reg._engines[game.id] is second  # type: ignore[attr-defined]
+    # First engine's task has been stopped
+    assert first._task is not None and first._task.done()  # type: ignore[attr-defined]
+
+    # Cleanup — end the game so second's loop exits, then stop_all.
+    await repo.end_game(game.id, ended_at_epoch=1)
+    second.wake()
+    await reg.stop_all()

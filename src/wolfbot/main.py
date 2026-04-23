@@ -46,12 +46,8 @@ async def _run() -> None:
         api_key=settings.XAI_API_KEY.get_secret_value(),
         model=settings.XAI_MODEL,
     )
-    llm_adapter = LLMAdapter(
-        repo=repo, decider=decider, message_poster=discord_adapter
-    )
-    game_service = GameService(
-        repo=repo, discord=discord_adapter, llm=llm_adapter, wake=registry
-    )
+    llm_adapter = LLMAdapter(repo=repo, decider=decider, message_poster=discord_adapter)
+    game_service = GameService(repo=repo, discord=discord_adapter, llm=llm_adapter, wake=registry)
     discord_adapter.set_game_service(game_service)
     llm_adapter.set_game_service(game_service)
 
@@ -68,15 +64,24 @@ async def _run() -> None:
     bot.tree.add_command(cog.wolf, guild=discord.Object(id=settings.DISCORD_GUILD_ID))
 
     recovery = RecoveryService(
-        repo=repo, game_service=game_service,
-        registry=registry, discord=discord_adapter,
+        repo=repo,
+        game_service=game_service,
+        registry=registry,
+        discord=discord_adapter,
     )
+    recovery_done = asyncio.Event()
 
     @bot.event
     async def on_ready() -> None:
         guild = discord.Object(id=settings.DISCORD_GUILD_ID)
         await bot.tree.sync(guild=guild)
         log.info("synced slash commands to guild %s", settings.DISCORD_GUILD_ID)
+        # on_ready re-fires on reconnect. Engines started on the first ready keep
+        # ticking locally across reconnects, so re-running recovery would only
+        # duplicate them. Run it once per process.
+        if recovery_done.is_set():
+            return
+        recovery_done.set()
         recovered = await recovery.recover_all()
         log.info("recovered %d game(s)", len(recovered))
 

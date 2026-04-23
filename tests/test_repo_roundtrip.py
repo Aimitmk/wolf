@@ -10,6 +10,7 @@ from wolfbot.domain.enums import (
     Role,
     SubmissionType,
 )
+from wolfbot.domain.errors import ActiveGameExistsError
 from wolfbot.domain.models import (
     Game,
     LogEntry,
@@ -77,8 +78,12 @@ async def test_vote_upsert(repo: SqliteRepo, seats: list[Seat]) -> None:
 async def test_night_action_upsert(repo: SqliteRepo, seats: list[Seat]) -> None:
     g = await _base_game(repo, seats)
     a = NightAction(
-        game_id=g.id, day=1, actor_seat=1,
-        kind=SubmissionType.WOLF_ATTACK, target_seat=5, submitted_at=20,
+        game_id=g.id,
+        day=1,
+        actor_seat=1,
+        kind=SubmissionType.WOLF_ATTACK,
+        target_seat=5,
+        submitted_at=20,
     )
     await repo.insert_night_action(a)
     a2 = a.model_copy(update={"target_seat": 6, "submitted_at": 21})
@@ -91,9 +96,12 @@ async def test_night_action_upsert(repo: SqliteRepo, seats: list[Seat]) -> None:
 async def test_pending_decision_roundtrip(repo: SqliteRepo, seats: list[Seat]) -> None:
     g = await _base_game(repo, seats)
     pd = PendingDecision(
-        game_id=g.id, phase=Phase.DAY_VOTE, day=1,
+        game_id=g.id,
+        phase=Phase.DAY_VOTE,
+        day=1,
         required_submission=SubmissionType.VOTE,
-        missing_seats=(3, 5, 7), created_at=30,
+        missing_seats=(3, 5, 7),
+        created_at=30,
     )
     await repo.upsert_pending_decision(pd)
     loaded = await repo.load_pending_decision(g.id)
@@ -120,16 +128,27 @@ async def test_apply_transition_commits_all(repo: SqliteRepo, seats: list[Seat])
         player_updates=(PlayerUpdate(seat_no=1, role=Role.WEREWOLF),),
         public_logs=(
             LogEntry(
-                game_id=g.id, day=0, phase=Phase.LOBBY, kind="PHASE_CHANGE",
-                actor_seat=None, visibility="PUBLIC",
-                text="setup begin", created_at=100,
+                game_id=g.id,
+                day=0,
+                phase=Phase.LOBBY,
+                kind="PHASE_CHANGE",
+                actor_seat=None,
+                visibility="PUBLIC",
+                text="setup begin",
+                created_at=100,
             ),
         ),
         private_logs=(
             LogEntry(
-                game_id=g.id, day=0, phase=Phase.LOBBY, kind="ROLE_NOTICE",
-                actor_seat=None, visibility="PRIVATE", audience_seat=1,
-                text="あなたは人狼です", created_at=100,
+                game_id=g.id,
+                day=0,
+                phase=Phase.LOBBY,
+                kind="ROLE_NOTICE",
+                actor_seat=None,
+                visibility="PRIVATE",
+                audience_seat=1,
+                text="あなたは人狼です",
+                created_at=100,
             ),
         ),
     )
@@ -157,9 +176,7 @@ async def test_apply_transition_optimistic_lock(repo: SqliteRepo, seats: list[Se
     assert loaded.phase is Phase.LOBBY
 
 
-async def test_apply_transition_rolls_back_on_failure(
-    repo: SqliteRepo, seats: list[Seat]
-) -> None:
+async def test_apply_transition_rolls_back_on_failure(repo: SqliteRepo, seats: list[Seat]) -> None:
     """If a write after the phase UPDATE fails, the whole transition must roll back.
 
     Reproduces the bug where only `games.phase` advanced while player/log writes
@@ -179,9 +196,14 @@ async def test_apply_transition_rolls_back_on_failure(
         player_updates=(PlayerUpdate(seat_no=1, role=Role.WEREWOLF),),
         public_logs=(
             LogEntry(
-                game_id=g.id, day=0, phase=Phase.LOBBY, kind="PHASE_CHANGE",
-                actor_seat=None, visibility="PUBLIC",
-                text="setup begin", created_at=100,
+                game_id=g.id,
+                day=0,
+                phase=Phase.LOBBY,
+                kind="PHASE_CHANGE",
+                actor_seat=None,
+                visibility="PUBLIC",
+                text="setup begin",
+                created_at=100,
             ),
         ),
     )
@@ -200,13 +222,18 @@ async def test_apply_transition_rolls_back_on_failure(
 async def test_apply_transition_writes_pending(repo: SqliteRepo, seats: list[Seat]) -> None:
     g = await _base_game(repo, seats)
     pd = PendingDecision(
-        game_id=g.id, phase=Phase.DAY_VOTE, day=1,
+        game_id=g.id,
+        phase=Phase.DAY_VOTE,
+        day=1,
         required_submission=SubmissionType.VOTE,
-        missing_seats=(2, 4), created_at=40,
+        missing_seats=(2, 4),
+        created_at=40,
     )
     t = Transition(
-        next_phase=Phase.WAITING_HOST_DECISION, next_day=1,
-        requires_host_decision=True, pending=pd,
+        next_phase=Phase.WAITING_HOST_DECISION,
+        next_day=1,
+        requires_host_decision=True,
+        pending=pd,
     )
     assert await repo.apply_transition(g.id, t, expected_phase=Phase.LOBBY)
     loaded = await repo.load_pending_decision(g.id)
@@ -223,7 +250,10 @@ async def test_apply_transition_kills_player_and_records_guard(
         next_day=2,
         player_updates=(
             PlayerUpdate(
-                seat_no=5, alive=False, death_cause=DeathCause.ATTACK, death_day=1,
+                seat_no=5,
+                alive=False,
+                death_cause=DeathCause.ATTACK,
+                death_day=1,
             ),
         ),
         record_guard=(6, 3),
@@ -248,6 +278,26 @@ async def test_active_game_lookup(repo: SqliteRepo, seats: list[Seat]) -> None:
     await repo.end_game(g.id, ended_at_epoch=99999)
     assert await repo.load_active_games() == []
     assert await repo.load_active_game_for_guild("guild-1") is None
+
+
+async def test_duplicate_active_game_rejected(repo: SqliteRepo, seats: list[Seat]) -> None:
+    await _base_game(repo, seats)
+    second = Game(
+        id="gm-2",
+        guild_id="guild-1",
+        host_user_id="host-1",
+        phase=Phase.LOBBY,
+        day_number=0,
+        main_text_channel_id="c-text",
+        main_vc_channel_id="c-vc",
+        created_at=2000,
+    )
+    with pytest.raises(ActiveGameExistsError):
+        await repo.create_game(second)
+    # After ending the first, a new game is allowed for the same guild.
+    await repo.end_game("gm-1", ended_at_epoch=99999)
+    await repo.create_game(second)
+    assert (await repo.load_active_game_for_guild("guild-1")) is not None
 
 
 async def test_persona_assignments(repo: SqliteRepo, seats: list[Seat]) -> None:

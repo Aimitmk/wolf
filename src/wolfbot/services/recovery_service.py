@@ -16,7 +16,14 @@ from collections.abc import Callable, Sequence
 from typing import Protocol, runtime_checkable
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
-from wolfbot.domain.models import Game, PendingDecision, Player, Seat, Transition
+from wolfbot.domain.models import (
+    Game,
+    PendingDecision,
+    PendingSubmission,
+    Player,
+    Seat,
+    Transition,
+)
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.game_service import GameService
 from wolfbot.services.timer_service import EngineRegistry, GameEngine
@@ -29,9 +36,7 @@ class RecoveryDiscordAdapter(Protocol):
     async def reconcile(
         self, game: Game, seats: Sequence[Seat], players: Sequence[Player]
     ) -> None: ...
-    async def announce_recovery(
-        self, game: Game, pending: PendingDecision | None
-    ) -> None: ...
+    async def announce_recovery(self, game: Game, pending: PendingDecision | None) -> None: ...
 
 
 class RecoveryService:
@@ -73,7 +78,7 @@ class RecoveryService:
             and game.deadline_epoch is not None
             and self.clock() > game.deadline_epoch
         ):
-            pending = _derive_pending(game, players, self.clock())
+            pending = await _derive_pending(self.repo, game, players, self.clock())
             transition = Transition(
                 next_phase=Phase.WAITING_HOST_DECISION,
                 next_day=game.day_number,
@@ -81,9 +86,7 @@ class RecoveryService:
                 requires_host_decision=True,
                 pending=pending,
             )
-            ok = await self.repo.apply_transition(
-                game.id, transition, expected_phase=game.phase
-            )
+            ok = await self.repo.apply_transition(game.id, transition, expected_phase=game.phase)
             if ok:
                 game = (await self.repo.load_game(game.id)) or game
 
@@ -105,42 +108,79 @@ class RecoveryService:
             repo=self.repo,
             advance=self.game_service.advance,
         )
-        self.registry.attach(engine)
+        await self.registry.attach(engine)
         engine.start()
 
 
-def _derive_pending(
-    game: Game, players: Sequence[Player], now: int
+async def _derive_pending(
+    repo: SqliteRepo, game: Game, players: Sequence[Player], now: int
 ) -> PendingDecision:
-    """Figure out missing submitters for the currently-frozen phase."""
+    """Figure out who actually still owes a submission for the frozen phase.
+
+    Reads the real `votes` / `night_actions` rows, subtracts submitted seats from
+    expected seats (role-appropriate, day-appropriate), and returns the decision
+    with a full `submissions` breakdown so the host UI can display every type.
+    """
+    alive_seats = {p.seat_no for p in players if p.alive}
+
     if game.phase is Phase.DAY_VOTE or game.phase is Phase.DAY_RUNOFF:
-        alive = [p.seat_no for p in players if p.alive]
-        required = (
-            SubmissionType.VOTE if game.phase is Phase.DAY_VOTE else SubmissionType.RUNOFF_VOTE
-        )
+        round_ = 0 if game.phase is Phase.DAY_VOTE else 1
+        votes = await repo.load_votes(game.id, game.day_number, round_=round_)
+        voted = {v.voter_seat for v in votes}
+        missing = tuple(sorted(alive_seats - voted))
+        kind = SubmissionType.VOTE if game.phase is Phase.DAY_VOTE else SubmissionType.RUNOFF_VOTE
         return PendingDecision(
             game_id=game.id,
             phase=game.phase,
             day=game.day_number,
-            required_submission=required,
-            missing_seats=tuple(sorted(alive)),  # treat all alive as pending; caller can refine
+            required_submission=kind,
+            missing_seats=missing,
+            submissions=(PendingSubmission(submission_type=kind, missing_seats=missing),),
             created_at=now,
         )
+
     if game.phase is Phase.NIGHT:
-        expected: list[int] = []
-        for p in players:
-            if not p.alive or p.role is None:
-                continue
-            if p.role in (Role.WEREWOLF, Role.SEER, Role.KNIGHT):
-                expected.append(p.seat_no)
+        actions = await repo.load_night_actions(game.id, game.day_number)
+        submitted_by_kind: dict[SubmissionType, set[int]] = {
+            SubmissionType.WOLF_ATTACK: set(),
+            SubmissionType.SEER_DIVINE: set(),
+            SubmissionType.KNIGHT_GUARD: set(),
+        }
+        for a in actions:
+            if a.kind in submitted_by_kind:
+                submitted_by_kind[a.kind].add(a.actor_seat)
+
+        # Knight only submits starting night 1 (state_machine gate).
+        kinds: list[tuple[SubmissionType, Role]] = [
+            (SubmissionType.WOLF_ATTACK, Role.WEREWOLF),
+            (SubmissionType.SEER_DIVINE, Role.SEER),
+        ]
+        if game.day_number >= 1:
+            kinds.append((SubmissionType.KNIGHT_GUARD, Role.KNIGHT))
+
+        subs: list[PendingSubmission] = []
+        for kind, required_role in kinds:
+            expected = {p.seat_no for p in players if p.alive and p.role is required_role}
+            missing_for_kind = tuple(sorted(expected - submitted_by_kind[kind]))
+            if missing_for_kind:
+                subs.append(PendingSubmission(submission_type=kind, missing_seats=missing_for_kind))
+
+        if not subs:
+            # Deadline fired with all submissions already in (race condition);
+            # park on WOLF_ATTACK as the nominal primary with an empty seat list.
+            subs = [PendingSubmission(submission_type=SubmissionType.WOLF_ATTACK, missing_seats=())]
+
+        primary = subs[0]
         return PendingDecision(
             game_id=game.id,
             phase=Phase.NIGHT,
             day=game.day_number,
-            required_submission=SubmissionType.WOLF_ATTACK,
-            missing_seats=tuple(sorted(expected)),
+            required_submission=primary.submission_type,
+            missing_seats=primary.missing_seats,
+            submissions=tuple(subs),
             created_at=now,
         )
+
     # Fallback: no derivable pending (shouldn't happen for timer-driven phases)
     return PendingDecision(
         game_id=game.id,
@@ -148,5 +188,6 @@ def _derive_pending(
         day=game.day_number,
         required_submission=SubmissionType.VOTE,
         missing_seats=(),
+        submissions=(),
         created_at=now,
     )

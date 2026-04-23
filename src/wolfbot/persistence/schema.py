@@ -32,6 +32,10 @@ DDL: list[str] = [
         ON games(ended_at) WHERE ended_at IS NULL
     """,
     """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_games_unique_active
+        ON games(guild_id) WHERE ended_at IS NULL
+    """,
+    """
     CREATE TABLE IF NOT EXISTS seats (
         game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
         seat_no INTEGER NOT NULL,
@@ -156,4 +160,10 @@ async def migrate(db_path: str | Path) -> None:
         await db.execute("PRAGMA journal_mode = WAL")
         for stmt in DDL:
             await db.execute(stmt)
+        # Additive column migrations: SQLite doesn't support
+        # `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we guard with PRAGMA.
+        async with db.execute("PRAGMA table_info(pending_decisions)") as cur:
+            cols = {row[1] async for row in cur}
+        if "submissions_json" not in cols:
+            await db.execute("ALTER TABLE pending_decisions ADD COLUMN submissions_json TEXT")
         await db.commit()

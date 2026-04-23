@@ -27,6 +27,7 @@ from wolfbot.domain.enums import (
     Role,
     SubmissionType,
 )
+from wolfbot.domain.errors import ActiveGameExistsError
 from wolfbot.domain.models import Game, PendingDecision, Player, Seat
 from wolfbot.domain.rules import legal_attack_targets, legal_divine_targets, legal_guard_targets
 from wolfbot.llm.personas import pick_personas
@@ -80,9 +81,7 @@ class DiscordBotAdapter:
     ) -> None:
         await self.perms.kill(game, seats, seat_no, was_wolf=was_wolf)
 
-    async def reconcile(
-        self, game: Game, seats: Sequence[Seat], players: Sequence[Player]
-    ) -> None:
+    async def reconcile(self, game: Game, seats: Sequence[Seat], players: Sequence[Player]) -> None:
         await self.perms.apply(game, seats, players)
 
     async def on_game_end(self, game: Game, seats: Sequence[Seat]) -> None:
@@ -107,9 +106,7 @@ class DiscordBotAdapter:
         except discord.DiscordException:
             log.exception("post_morning failed %s", game.id)
 
-    async def send_private(
-        self, game: Game, audience_seat: int, text: str, kind: str
-    ) -> None:
+    async def send_private(self, game: Game, audience_seat: int, text: str, kind: str) -> None:
         seat = await self._seat(game.id, audience_seat)
         if seat is None or seat.discord_user_id is None:
             return
@@ -121,7 +118,9 @@ class DiscordBotAdapter:
         except discord.Forbidden:
             log.warning(
                 "DM forbidden for user %s (seat %s, game %s)",
-                seat.discord_user_id, audience_seat, game.id,
+                seat.discord_user_id,
+                audience_seat,
+                game.id,
             )
         except discord.DiscordException:
             log.exception("send_private failed %s seat %s", game.id, audience_seat)
@@ -211,15 +210,18 @@ class DiscordBotAdapter:
         self, game: Game, pending: PendingDecision, seats: Sequence[Seat]
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
-        names = [seats_by_no[sn].display_name for sn in pending.missing_seats if sn in seats_by_no]
-        missing_str = "、".join(names) if names else "(なし)"
-        text = (
-            "⏸ **ホスト待ち**\n"
-            f"フェイズ: `{pending.phase.value}` (day {pending.day})\n"
-            f"未提出: {missing_str}\n"
-            f"未確定: `{pending.required_submission.value}`\n"
+        lines = [
+            "⏸ **ホスト待ち**",
+            f"フェイズ: `{pending.phase.value}` (day {pending.day})",
+        ]
+        for sub in pending.effective_submissions():
+            names = [seats_by_no[sn].display_name for sn in sub.missing_seats if sn in seats_by_no]
+            missing_str = "、".join(names) if names else "(なし)"
+            lines.append(f"`{sub.submission_type.value}` 未提出: {missing_str}")
+        lines.append(
             "`/wolf extend <秒>` で延長、または `/wolf force-skip` で未提出を確定処理します。"
         )
+        text = "\n".join(lines)
         channel = self._main_text(game)
         if channel is not None:
             try:
@@ -227,17 +229,17 @@ class DiscordBotAdapter:
             except discord.DiscordException:
                 log.exception("announce_waiting failed %s", game.id)
 
-    async def announce_recovery(
-        self, game: Game, pending: PendingDecision | None
-    ) -> None:
+    async def announce_recovery(self, game: Game, pending: PendingDecision | None) -> None:
         channel = self._main_text(game)
         if channel is None:
             return
-        text = f"♻️ 復帰しました。現在フェイズ: `{game.phase.value}` / day {game.day_number}"
+        lines = [f"♻️ 復帰しました。現在フェイズ: `{game.phase.value}` / day {game.day_number}"]
         if pending:
-            text += f"\n未提出あり: `{pending.required_submission.value}` → 未確定"
+            for sub in pending.effective_submissions():
+                count = len(sub.missing_seats)
+                lines.append(f"未提出あり: `{sub.submission_type.value}` → {count} 件未確定")
         try:
-            await channel.send(text)
+            await channel.send("\n".join(lines))
         except discord.DiscordException:
             log.exception("announce_recovery failed %s", game.id)
 
@@ -309,8 +311,11 @@ class WolfCog(commands.Cog):
         seats = await self.repo.load_seats(game.id)
         try:
             await self.llm_adapter.maybe_react_to_message(
-                game, players, seats,
-                author_seat=author_seat, text=message.content,
+                game,
+                players,
+                seats,
+                author_seat=author_seat,
+                text=message.content,
             )
         except Exception:
             log.exception("llm_adapter reaction failed for %s", game.id)
@@ -319,9 +324,7 @@ class WolfCog(commands.Cog):
     @wolf.command(name="create", description="新しい 9 人村を作成")
     async def create(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
-            await interaction.response.send_message(
-                "ギルド内で実行してください。", ephemeral=True
-            )
+            await interaction.response.send_message("ギルド内で実行してください。", ephemeral=True)
             return
         guild_id = str(interaction.guild_id)
         existing = await self.repo.load_active_game_for_guild(guild_id)
@@ -333,12 +336,8 @@ class WolfCog(commands.Cog):
             return
         await interaction.response.defer(thinking=True)
 
-        heaven = await self._create_private_channel(
-            interaction.guild, name="wolf-heaven"
-        )
-        wolves = await self._create_private_channel(
-            interaction.guild, name="wolf-wolves"
-        )
+        heaven = await self._create_private_channel(interaction.guild, name="wolf-heaven")
+        wolves = await self._create_private_channel(interaction.guild, name="wolf-wolves")
         if heaven is None or wolves is None:
             await interaction.followup.send(
                 "チャンネル作成に失敗しました。Bot の権限を確認してください。"
@@ -357,7 +356,19 @@ class WolfCog(commands.Cog):
             wolves_channel_id=str(wolves.id),
             created_at=int(time.time()),
         )
-        await self.repo.create_game(game)
+        try:
+            await self.repo.create_game(game)
+        except ActiveGameExistsError:
+            # Concurrent /wolf create won the race; drop the channels we just made.
+            for ch in (heaven, wolves):
+                try:
+                    await ch.delete(reason="wolfbot: duplicate /wolf create race")
+                except discord.DiscordException:
+                    log.exception("cleanup of %s failed", ch.id)
+            winner = await self.repo.load_active_game_for_guild(guild_id)
+            winner_id = winner.id if winner else "?"
+            await interaction.followup.send(f"既に進行中のゲームがあります (id: `{winner_id}`)。")
+            return
         await interaction.followup.send(
             f"🎲 ゲーム作成 (id: `{game.id}`)。`/wolf join` で参加してください。"
         )
@@ -434,9 +445,7 @@ class WolfCog(commands.Cog):
             )
             return
         if str(interaction.user.id) != game.host_user_id:
-            await interaction.response.send_message(
-                "ホストのみ開始できます。", ephemeral=True
-            )
+            await interaction.response.send_message("ホストのみ開始できます。", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
 
@@ -464,13 +473,12 @@ class WolfCog(commands.Cog):
                     persona_key=persona.key,
                 )
                 await self.repo.insert_seat(game.id, llm_seat)
-                await self.repo.insert_persona_assignment(
-                    game.id, seat_no, persona.key
-                )
+                await self.repo.insert_persona_assignment(game.id, seat_no, persona.key)
                 seats = await self.repo.load_seats(game.id)
 
         # Move to SETUP; engine picks it up
         from wolfbot.domain.models import Transition
+
         ok = await self.repo.apply_transition(
             game.id,
             Transition(next_phase=Phase.SETUP, next_day=0, new_deadline_epoch=None),
@@ -482,10 +490,8 @@ class WolfCog(commands.Cog):
             )
             return
 
-        engine = GameEngine(
-            game_id=game.id, repo=self.repo, advance=self.gs.advance
-        )
-        self.registry.attach(engine)
+        engine = GameEngine(game_id=game.id, repo=self.repo, advance=self.gs.advance)
+        await self.registry.attach(engine)
         engine.start()
 
         await interaction.followup.send(
@@ -506,9 +512,7 @@ class WolfCog(commands.Cog):
         players = await self.repo.load_players(game.id)
         pending = await self.repo.load_pending_decision(game.id)
         now = int(time.time())
-        remaining = (
-            max(0, game.deadline_epoch - now) if game.deadline_epoch else None
-        )
+        remaining = max(0, game.deadline_epoch - now) if game.deadline_epoch else None
         alive = [p for p in players if p.alive]
         dead = [p for p in players if not p.alive]
         seat_name = {s.seat_no: s.display_name for s in seats}
@@ -528,12 +532,13 @@ class WolfCog(commands.Cog):
             inline=False,
         )
         if pending is not None:
-            missing = ", ".join(
-                seat_name.get(sn, str(sn)) for sn in pending.missing_seats
-            )
+            lines: list[str] = []
+            for sub in pending.effective_submissions():
+                missing = ", ".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
+                lines.append(f"`{sub.submission_type.value}`: {missing if missing else '(なし)'}")
             embed.add_field(
                 name="未提出",
-                value=f"`{pending.required_submission.value}`: {missing}",
+                value="\n".join(lines),
                 inline=False,
             )
         await interaction.response.send_message(embed=embed)
@@ -552,9 +557,7 @@ class WolfCog(commands.Cog):
             return
         ok = await self.gs.host_extend(game.id, extra_seconds=seconds)
         if ok:
-            await interaction.response.send_message(
-                f"⏱ 締切を {seconds} 秒延長しました。"
-            )
+            await interaction.response.send_message(f"⏱ 締切を {seconds} 秒延長しました。")
         else:
             await interaction.response.send_message(
                 "延長できませんでした (WAITING 中ではない可能性)。",
@@ -569,9 +572,7 @@ class WolfCog(commands.Cog):
             return
         ok = await self.gs.host_force_skip(game.id)
         if ok:
-            await interaction.response.send_message(
-                "⏭ 未提出を確定扱いで進行します。"
-            )
+            await interaction.response.send_message("⏭ 未提出を確定扱いで進行します。")
         else:
             await interaction.response.send_message(
                 "実行できませんでした (WAITING 中ではない可能性)。",
@@ -586,9 +587,7 @@ class WolfCog(commands.Cog):
             return
         game = await self.repo.load_active_game_for_guild(str(interaction.guild_id))
         if game is None:
-            await interaction.response.send_message(
-                "進行中のゲームはありません。", ephemeral=True
-            )
+            await interaction.response.send_message("進行中のゲームはありません。", ephemeral=True)
             return
         caller = str(interaction.user.id)
         is_host = caller == game.host_user_id
@@ -605,24 +604,16 @@ class WolfCog(commands.Cog):
         await interaction.response.send_message("🛑 ゲームを強制終了しました。")
 
     # ----------------------------------------------------------- internals
-    async def _host_check(
-        self, interaction: discord.Interaction
-    ) -> Game | None:
+    async def _host_check(self, interaction: discord.Interaction) -> Game | None:
         if interaction.guild is None:
-            await interaction.response.send_message(
-                "ギルド内で実行してください。", ephemeral=True
-            )
+            await interaction.response.send_message("ギルド内で実行してください。", ephemeral=True)
             return None
         game = await self.repo.load_active_game_for_guild(str(interaction.guild_id))
         if game is None:
-            await interaction.response.send_message(
-                "進行中のゲームはありません。", ephemeral=True
-            )
+            await interaction.response.send_message("進行中のゲームはありません。", ephemeral=True)
             return None
         if str(interaction.user.id) != game.host_user_id:
-            await interaction.response.send_message(
-                "ホストのみ実行できます。", ephemeral=True
-            )
+            await interaction.response.send_message("ホストのみ実行できます。", ephemeral=True)
             return None
         return game
 

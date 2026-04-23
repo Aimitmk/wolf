@@ -37,6 +37,7 @@ from wolfbot.domain.models import (
     LogEntry,
     NightAction,
     PendingDecision,
+    PendingSubmission,
     Player,
     PlayerUpdate,
     Seat,
@@ -124,9 +125,7 @@ def plan_setup(
     from wolfbot.domain.rules import assign_roles
 
     role_map = assign_roles(seats, rng)
-    updates = tuple(
-        PlayerUpdate(seat_no=sn, role=role) for sn, role in sorted(role_map.items())
-    )
+    updates = tuple(PlayerUpdate(seat_no=sn, role=role) for sn, role in sorted(role_map.items()))
     pub = _public_log(
         game,
         kind="SETUP_COMPLETE",
@@ -266,6 +265,12 @@ def plan_day_vote_resolve(
                 day=game.day_number,
                 required_submission=SubmissionType.VOTE,
                 missing_seats=missing,
+                submissions=(
+                    PendingSubmission(
+                        submission_type=SubmissionType.VOTE,
+                        missing_seats=missing,
+                    ),
+                ),
                 created_at=now_epoch,
             ),
         )
@@ -336,6 +341,12 @@ def plan_day_runoff_resolve(
                 day=game.day_number,
                 required_submission=SubmissionType.RUNOFF_VOTE,
                 missing_seats=missing,
+                submissions=(
+                    PendingSubmission(
+                        submission_type=SubmissionType.RUNOFF_VOTE,
+                        missing_seats=missing,
+                    ),
+                ),
                 created_at=now_epoch,
             ),
         )
@@ -413,8 +424,7 @@ def _apply_execution(
     )
 
     new_players = [
-        p.model_copy(update={"alive": False}) if p.seat_no == executed_seat else p
-        for p in players
+        p.model_copy(update={"alive": False}) if p.seat_no == executed_seat else p for p in players
     ]
     v = check_victory(new_players)
     if v is not None:
@@ -463,12 +473,8 @@ def plan_night_resolve(
     wolves = alive_werewolves(players)
 
     wolf_actions = [a for a in actions if a.kind is SubmissionType.WOLF_ATTACK]
-    seer_action = next(
-        (a for a in actions if a.kind is SubmissionType.SEER_DIVINE), None
-    )
-    knight_action = next(
-        (a for a in actions if a.kind is SubmissionType.KNIGHT_GUARD), None
-    )
+    seer_action = next((a for a in actions if a.kind is SubmissionType.SEER_DIVINE), None)
+    knight_action = next((a for a in actions if a.kind is SubmissionType.KNIGHT_GUARD), None)
 
     attack = resolve_wolf_attack(wolf_actions, wolves, force_skip=force_skip)
 
@@ -495,6 +501,33 @@ def plan_night_resolve(
             if seer_seat in missing
             else SubmissionType.KNIGHT_GUARD
         )
+        # Build the per-kind breakdown so the host UI can show every outstanding
+        # action at once. Order matches role priority (wolf > seer > knight).
+        per_kind: list[PendingSubmission] = []
+        wolf_missing = tuple(
+            sorted(set(wolves) if wolves_split_pauses else set(missing) & set(wolves))
+        )
+        if wolf_missing:
+            per_kind.append(
+                PendingSubmission(
+                    submission_type=SubmissionType.WOLF_ATTACK,
+                    missing_seats=wolf_missing,
+                )
+            )
+        if seer_seat is not None and seer_seat in missing:
+            per_kind.append(
+                PendingSubmission(
+                    submission_type=SubmissionType.SEER_DIVINE,
+                    missing_seats=(seer_seat,),
+                )
+            )
+        if knight_seat is not None and knight_seat in missing:
+            per_kind.append(
+                PendingSubmission(
+                    submission_type=SubmissionType.KNIGHT_GUARD,
+                    missing_seats=(knight_seat,),
+                )
+            )
         return Transition(
             next_phase=Phase.WAITING_HOST_DECISION,
             next_day=game.day_number,
@@ -506,6 +539,7 @@ def plan_night_resolve(
                 day=game.day_number,
                 required_submission=pending_kind,
                 missing_seats=tuple(sorted(pending_missing)),
+                submissions=tuple(per_kind),
                 created_at=now_epoch,
             ),
         )
@@ -542,14 +576,8 @@ def plan_night_resolve(
         )
 
     # Step 2: Seer
-    if (
-        seer_seat is not None
-        and seer_action is not None
-        and seer_action.target_seat is not None
-    ):
-        target = next(
-            (p for p in players if p.seat_no == seer_action.target_seat), None
-        )
+    if seer_seat is not None and seer_action is not None and seer_action.target_seat is not None:
+        target = next((p for p in players if p.seat_no == seer_action.target_seat), None)
         if target is not None and target.role is not None:
             faction = FACTION_OF_ROLE[target.role]
             private.append(
@@ -603,8 +631,7 @@ def plan_night_resolve(
 
     # Step 9: Victory check on post-attack state
     new_players = [
-        p.model_copy(update={"alive": False}) if p.seat_no in newly_dead else p
-        for p in players
+        p.model_copy(update={"alive": False}) if p.seat_no in newly_dead else p for p in players
     ]
     v = check_victory(new_players)
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import discord
+
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Game, Player, Seat
 from wolfbot.services.permission_manager import PermissionManager
@@ -23,9 +25,21 @@ class FakeChannel:
     id: int
     guild: Any
     _perm_calls: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
+    _overwrites: dict[int, discord.PermissionOverwrite] = field(default_factory=dict)
+
+    def overwrites_for(self, target: Any) -> discord.PermissionOverwrite:
+        return self._overwrites.get(target.id, discord.PermissionOverwrite())
 
     async def set_permissions(self, member: FakeMember, **overrides: Any) -> None:
         self._perm_calls.append((member.id, dict(overrides)))
+        if "overwrite" in overrides:
+            ov = overrides["overwrite"]
+            if ov is None:
+                self._overwrites.pop(member.id, None)
+            else:
+                self._overwrites[member.id] = ov
+        else:
+            self._overwrites[member.id] = discord.PermissionOverwrite(**overrides)
 
 
 @dataclass
@@ -66,17 +80,21 @@ def _nine_seats() -> list[Seat]:
 
 def _players(roles: list[Role], alive: list[bool] | None = None) -> list[Player]:
     return [
-        Player(
-            seat_no=i + 1, role=r, alive=True if alive is None else alive[i]
-        )
+        Player(seat_no=i + 1, role=r, alive=True if alive is None else alive[i])
         for i, r in enumerate(roles)
     ]
 
 
 ROLES = [
-    Role.WEREWOLF, Role.WEREWOLF, Role.MADMAN,
-    Role.SEER, Role.MEDIUM, Role.KNIGHT,
-    Role.VILLAGER, Role.VILLAGER, Role.VILLAGER,
+    Role.WEREWOLF,
+    Role.WEREWOLF,
+    Role.MADMAN,
+    Role.SEER,
+    Role.MEDIUM,
+    Role.KNIGHT,
+    Role.VILLAGER,
+    Role.VILLAGER,
+    Role.VILLAGER,
 ]
 
 
@@ -219,7 +237,9 @@ async def test_llm_seats_no_discord_user_are_skipped() -> None:
     pm = PermissionManager(bot=bot)
     seats = [
         Seat(seat_no=1, display_name="H1", discord_user_id="101", is_llm=False, persona_key=None),
-        Seat(seat_no=2, display_name="LLM2", discord_user_id=None, is_llm=True, persona_key="setsu"),
+        Seat(
+            seat_no=2, display_name="LLM2", discord_user_id=None, is_llm=True, persona_key="setsu"
+        ),
     ]
     players = [
         Player(seat_no=1, role=Role.VILLAGER, alive=True),
@@ -235,7 +255,7 @@ async def test_llm_seats_no_discord_user_are_skipped() -> None:
 
 
 async def test_apply_is_idempotent_on_repeated_call() -> None:
-    """Second apply with same state should produce same call contents (no crash)."""
+    """Second apply with same state must skip API calls — only actual diffs."""
     bot, _, ch, game = _setup_world()
     pm = PermissionManager(bot=bot)
     seats = _nine_seats()
@@ -245,13 +265,45 @@ async def test_apply_is_idempotent_on_repeated_call() -> None:
     first = len(ch["main"]._perm_calls)
     await pm.apply(game, seats, players)
     second = len(ch["main"]._perm_calls)
-    assert second == first * 2  # re-applied
+    assert second == first  # second apply must not issue any new calls
+
+
+async def test_apply_only_touches_changed_member() -> None:
+    """Flipping one player's alive state should yield calls only for that player."""
+    bot, _, ch, game = _setup_world()
+    pm = PermissionManager(bot=bot)
+    seats = _nine_seats()
+    alive = [True] * 9
+    players = _players(ROLES, alive=alive)
+
+    await pm.apply(game, seats, players)
+    ch["main"]._perm_calls.clear()
+    ch["heaven"]._perm_calls.clear()
+    ch["wolves"]._perm_calls.clear()
+
+    alive[4] = False  # kill seat 5 (medium — non-wolf)
+    players2 = _players(ROLES, alive=alive)
+    await pm.apply(game, seats, players2)
+
+    # main + heaven changes only for seat 5; wolves channel unaffected (not wolf)
+    main_targets = {mid for mid, _ in ch["main"]._perm_calls}
+    heaven_targets = {mid for mid, _ in ch["heaven"]._perm_calls}
+    wolves_targets = {mid for mid, _ in ch["wolves"]._perm_calls}
+    assert main_targets == {100 + 5}
+    assert heaven_targets == {100 + 5}
+    assert wolves_targets == set()
 
 
 async def test_on_game_end_clears_overwrites_with_none() -> None:
     bot, _, ch, game = _setup_world()
     pm = PermissionManager(bot=bot)
     seats = _nine_seats()
+    # Apply first so there are overwrites to clear — otherwise the diff check
+    # correctly short-circuits (nothing to clear on an untouched channel).
+    players = _players(ROLES)
+    await pm.apply(game, seats, players)
+    for key in ["main", "heaven", "wolves"]:
+        ch[key]._perm_calls.clear()
 
     await pm.on_game_end(game, seats)
 
@@ -263,12 +315,24 @@ async def test_on_game_end_clears_overwrites_with_none() -> None:
         # Every human seat should have been touched (9 seats on 3 channels)
         assert len({mid for mid, _ in calls}) == 9
 
+    # Second on_game_end is a no-op — overwrites are already cleared.
+    for key in ["main", "heaven", "wolves"]:
+        ch[key]._perm_calls.clear()
+    await pm.on_game_end(game, seats)
+    for key in ["main", "heaven", "wolves"]:
+        assert ch[key]._perm_calls == []
+
 
 async def test_apply_is_no_op_when_guild_missing() -> None:
     pm = PermissionManager(bot=FakeBot())
     game = Game(
-        id="g", guild_id="999", host_user_id="h", phase=Phase.DAY_DISCUSSION,
-        day_number=1, main_text_channel_id="1", main_vc_channel_id="2",
+        id="g",
+        guild_id="999",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="1",
+        main_vc_channel_id="2",
         created_at=0,
     )
     # Should not raise despite no guild

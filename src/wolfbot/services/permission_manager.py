@@ -20,6 +20,8 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+import discord
+
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Game, Player, Seat
 
@@ -69,9 +71,7 @@ class PermissionManager:
         if game.wolves_channel_id:
             wolves_ch = guild.get_channel(int(game.wolves_channel_id))
             if wolves_ch is not None:
-                await self._apply_wolves(
-                    wolves_ch, seats, player_by_seat, game.phase, guild
-                )
+                await self._apply_wolves(wolves_ch, seats, player_by_seat, game.phase, guild)
 
     async def kill(
         self,
@@ -99,16 +99,22 @@ class PermissionManager:
             heaven = guild.get_channel(int(game.heaven_channel_id))
             if heaven is not None:
                 await self._set_perms(
-                    heaven, member,
-                    view_channel=True, send_messages=True, read_messages=True,
+                    heaven,
+                    member,
+                    view_channel=True,
+                    send_messages=True,
+                    read_messages=True,
                 )
 
         if was_wolf and game.wolves_channel_id:
             wolves_ch = guild.get_channel(int(game.wolves_channel_id))
             if wolves_ch is not None:
                 await self._set_perms(
-                    wolves_ch, member,
-                    view_channel=False, send_messages=False, read_messages=False,
+                    wolves_ch,
+                    member,
+                    view_channel=False,
+                    send_messages=False,
+                    read_messages=False,
                 )
 
     async def on_game_end(self, game: Game, seats: Sequence[Seat]) -> None:
@@ -116,11 +122,14 @@ class PermissionManager:
         guild = self._guild(game)
         if guild is None:
             return
-        for channel_id in filter(None, [
-            game.main_text_channel_id,
-            game.heaven_channel_id,
-            game.wolves_channel_id,
-        ]):
+        for channel_id in filter(
+            None,
+            [
+                game.main_text_channel_id,
+                game.heaven_channel_id,
+                game.wolves_channel_id,
+            ],
+        ):
             channel = guild.get_channel(int(channel_id))
             if channel is None:
                 continue
@@ -149,8 +158,11 @@ class PermissionManager:
             p = player_by_seat.get(s.seat_no)
             alive = True if p is None else bool(p.alive)
             await self._set_perms(
-                channel, member,
-                send_messages=alive, read_messages=True, view_channel=True,
+                channel,
+                member,
+                send_messages=alive,
+                read_messages=True,
+                view_channel=True,
             )
 
     async def _apply_heaven(
@@ -170,13 +182,19 @@ class PermissionManager:
             alive = True if p is None else bool(p.alive)
             if alive:
                 await self._set_perms(
-                    channel, member,
-                    view_channel=False, send_messages=False, read_messages=False,
+                    channel,
+                    member,
+                    view_channel=False,
+                    send_messages=False,
+                    read_messages=False,
                 )
             else:
                 await self._set_perms(
-                    channel, member,
-                    view_channel=True, send_messages=True, read_messages=True,
+                    channel,
+                    member,
+                    view_channel=True,
+                    send_messages=True,
+                    read_messages=True,
                 )
 
     async def _apply_wolves(
@@ -195,21 +213,28 @@ class PermissionManager:
             if member is None:
                 continue
             p = player_by_seat.get(s.seat_no)
-            is_alive_wolf = bool(
-                p is not None and p.alive and p.role is Role.WEREWOLF
-            )
+            is_alive_wolf = bool(p is not None and p.alive and p.role is Role.WEREWOLF)
             if is_alive_wolf:
                 await self._set_perms(
-                    channel, member,
-                    view_channel=True, send_messages=writable, read_messages=True,
+                    channel,
+                    member,
+                    view_channel=True,
+                    send_messages=writable,
+                    read_messages=True,
                 )
             else:
                 await self._set_perms(
-                    channel, member,
-                    view_channel=False, send_messages=False, read_messages=False,
+                    channel,
+                    member,
+                    view_channel=False,
+                    send_messages=False,
+                    read_messages=False,
                 )
 
     async def _set_perms(self, channel: Any, member: Any, **overrides: bool) -> None:
+        expected = discord.PermissionOverwrite(**overrides)
+        if _current_overwrite(channel, member) == expected:
+            return
         async with self._sem:
             try:
                 await channel.set_permissions(member, **overrides)
@@ -222,6 +247,8 @@ class PermissionManager:
                 raise
 
     async def _clear_perms(self, channel: Any, member: Any) -> None:
+        if _current_overwrite(channel, member) == discord.PermissionOverwrite():
+            return
         async with self._sem:
             try:
                 await channel.set_permissions(member, overwrite=None)
@@ -231,3 +258,20 @@ class PermissionManager:
                     getattr(channel, "id", "?"),
                     getattr(member, "id", "?"),
                 )
+
+
+def _current_overwrite(channel: Any, member: Any) -> discord.PermissionOverwrite:
+    """Return the channel's current overwrite for `member`, or an empty overwrite.
+
+    `discord.TextChannel.overwrites_for()` always returns a `PermissionOverwrite`
+    (empty when no rule exists). The AttributeError fallback is for tests or mocks
+    that don't implement the method — in that case we treat current as empty so
+    the diff check falls through to the API call.
+    """
+    reader = getattr(channel, "overwrites_for", None)
+    if reader is None:
+        return discord.PermissionOverwrite()
+    try:
+        return reader(member) or discord.PermissionOverwrite()
+    except Exception:
+        return discord.PermissionOverwrite()

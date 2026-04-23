@@ -89,15 +89,46 @@ class LogEntry(BaseModel):
     created_at: int
 
 
+class PendingSubmission(BaseModel):
+    """A single outstanding submission kind and the seats that owe it.
+
+    NIGHT typically carries up to three of these (wolf attack, seer divine, knight
+    guard). DAY_VOTE / DAY_RUNOFF carry exactly one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    submission_type: SubmissionType
+    missing_seats: tuple[int, ...]
+
+
 class PendingDecision(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     game_id: str
     phase: Phase
     day: int
+    # Primary (legacy) view: the single "most pressing" submission. For NIGHT with
+    # multiple missing kinds, this is the first entry of `submissions`. Preserved
+    # for existing DB rows and status messages that only know one type.
     required_submission: SubmissionType
     missing_seats: tuple[int, ...]
+    # Full breakdown. Empty tuple is valid only for pre-Fix-3 rows loaded from DB;
+    # call sites that construct a fresh PendingDecision should populate this.
+    submissions: tuple[PendingSubmission, ...] = ()
     created_at: int
+
+    def effective_submissions(self) -> tuple[PendingSubmission, ...]:
+        """Return `submissions` if present, else synthesize a single entry from
+        the legacy primary fields. Use this for display to cover old DB rows."""
+        if self.submissions:
+            return self.submissions
+        return (
+            PendingSubmission(
+                submission_type=self.required_submission,
+                missing_seats=self.missing_seats,
+            ),
+        )
 
 
 class PlayerUpdate(BaseModel):

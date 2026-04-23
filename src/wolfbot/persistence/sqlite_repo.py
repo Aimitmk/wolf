@@ -15,11 +15,13 @@ from typing import Any
 import aiosqlite
 
 from wolfbot.domain.enums import DeathCause, Phase, Role, SubmissionType
+from wolfbot.domain.errors import ActiveGameExistsError
 from wolfbot.domain.models import (
     Game,
     LogEntry,
     NightAction,
     PendingDecision,
+    PendingSubmission,
     Player,
     PlayerUpdate,
     Seat,
@@ -91,13 +93,39 @@ def _row_to_night_action(row: aiosqlite.Row) -> NightAction:
 
 def _row_to_pending(row: aiosqlite.Row) -> PendingDecision:
     missing = json.loads(row["missing_seats_json"])
+    submissions_raw = row["submissions_json"]
+    submissions: tuple[PendingSubmission, ...] = ()
+    if submissions_raw:
+        parsed = json.loads(submissions_raw)
+        submissions = tuple(
+            PendingSubmission(
+                submission_type=SubmissionType(item["submission_type"]),
+                missing_seats=tuple(item["missing_seats"]),
+            )
+            for item in parsed
+        )
     return PendingDecision(
         game_id=row["game_id"],
         phase=Phase(row["phase"]),
         day=row["day"],
         required_submission=SubmissionType(row["required_submission"]),
         missing_seats=tuple(missing),
+        submissions=submissions,
         created_at=row["created_at"],
+    )
+
+
+def _submissions_json(pending: PendingDecision) -> str:
+    """Serialize submissions to JSON, synthesizing from primary when empty."""
+    items = pending.effective_submissions()
+    return json.dumps(
+        [
+            {
+                "submission_type": s.submission_type.value,
+                "missing_seats": list(s.missing_seats),
+            }
+            for s in items
+        ]
     )
 
 
@@ -144,31 +172,40 @@ class SqliteRepo:
 
     # ------------------------------------------------------------------ games
     async def create_game(self, game: Game) -> None:
-        async with self._tx() as db:
-            await db.execute(
-                """
-                INSERT INTO games (id, guild_id, host_user_id, phase, day_number, deadline_epoch,
-                                   main_text_channel_id, main_vc_channel_id,
-                                   heaven_channel_id, wolves_channel_id,
-                                   created_at, ended_at, force_skip_pending)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    game.id,
-                    game.guild_id,
-                    game.host_user_id,
-                    game.phase.value,
-                    game.day_number,
-                    game.deadline_epoch,
-                    game.main_text_channel_id,
-                    game.main_vc_channel_id,
-                    game.heaven_channel_id,
-                    game.wolves_channel_id,
-                    game.created_at,
-                    game.ended_at,
-                    int(game.force_skip_pending),
-                ),
-            )
+        try:
+            async with self._tx() as db:
+                await db.execute(
+                    """
+                    INSERT INTO games (id, guild_id, host_user_id, phase, day_number, deadline_epoch,
+                                       main_text_channel_id, main_vc_channel_id,
+                                       heaven_channel_id, wolves_channel_id,
+                                       created_at, ended_at, force_skip_pending)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        game.id,
+                        game.guild_id,
+                        game.host_user_id,
+                        game.phase.value,
+                        game.day_number,
+                        game.deadline_epoch,
+                        game.main_text_channel_id,
+                        game.main_vc_channel_id,
+                        game.heaven_channel_id,
+                        game.wolves_channel_id,
+                        game.created_at,
+                        game.ended_at,
+                        int(game.force_skip_pending),
+                    ),
+                )
+        except aiosqlite.IntegrityError as e:
+            # SQLite surfaces the partial unique index violation as "UNIQUE constraint
+            # failed: games.guild_id" (not the index name). Games.id is a UUID that
+            # effectively can't collide, so any uniqueness failure here is the
+            # active-game constraint.
+            if "games.guild_id" in str(e):
+                raise ActiveGameExistsError(game.guild_id) from e
+            raise
 
     async def update_game_channels(
         self, game_id: str, heaven_channel_id: str, wolves_channel_id: str
@@ -185,9 +222,7 @@ class SqliteRepo:
         return _row_to_game(row) if row else None
 
     async def load_active_games(self) -> list[Game]:
-        async with self._db.execute(
-            "SELECT * FROM games WHERE ended_at IS NULL"
-        ) as cur:
+        async with self._db.execute("SELECT * FROM games WHERE ended_at IS NULL") as cur:
             rows = await cur.fetchall()
         return [_row_to_game(r) for r in rows]
 
@@ -241,9 +276,7 @@ class SqliteRepo:
 
     async def delete_seat(self, game_id: str, seat_no: int) -> None:
         async with self._tx() as db:
-            await db.execute(
-                "DELETE FROM seats WHERE game_id=? AND seat_no=?", (game_id, seat_no)
-            )
+            await db.execute("DELETE FROM seats WHERE game_id=? AND seat_no=?", (game_id, seat_no))
 
     async def load_seats(self, game_id: str) -> list[Seat]:
         async with self._db.execute(
@@ -259,9 +292,7 @@ class SqliteRepo:
             rows = await cur.fetchall()
         return [_row_to_player(r) for r in rows]
 
-    async def set_player_dm_channel(
-        self, game_id: str, seat_no: int, dm_channel_id: str
-    ) -> None:
+    async def set_player_dm_channel(self, game_id: str, seat_no: int, dm_channel_id: str) -> None:
         async with self._tx() as db:
             await db.execute(
                 "UPDATE seats SET dm_channel_id=? WHERE game_id=? AND seat_no=?",
@@ -362,9 +393,7 @@ class SqliteRepo:
                 (game_id, knight_seat, last_guard_seat, last_guard_day),
             )
 
-    async def load_previous_guard(
-        self, game_id: str
-    ) -> tuple[int, int | None, int | None] | None:
+    async def load_previous_guard(self, game_id: str) -> tuple[int, int | None, int | None] | None:
         async with self._db.execute(
             "SELECT knight_seat, last_guard_seat, last_guard_day FROM previous_guard WHERE game_id=?",
             (game_id,),
@@ -420,9 +449,7 @@ class SqliteRepo:
         async with self._tx() as db:
             await self._insert_log_private(db, entry)
 
-    async def load_public_logs(
-        self, game_id: str, limit: int = 40
-    ) -> list[dict[str, Any]]:
+    async def load_public_logs(self, game_id: str, limit: int = 40) -> list[dict[str, Any]]:
         async with self._db.execute(
             """
             SELECT day, phase, kind, actor_seat, text, created_at
@@ -458,13 +485,15 @@ class SqliteRepo:
             await db.execute(
                 """
                 INSERT INTO pending_decisions
-                    (game_id, phase, day, required_submission, missing_seats_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (game_id, phase, day, required_submission, missing_seats_json,
+                     submissions_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(game_id) DO UPDATE SET
                     phase=excluded.phase,
                     day=excluded.day,
                     required_submission=excluded.required_submission,
                     missing_seats_json=excluded.missing_seats_json,
+                    submissions_json=excluded.submissions_json,
                     created_at=excluded.created_at
                 """,
                 (
@@ -473,6 +502,7 @@ class SqliteRepo:
                     decision.day,
                     decision.required_submission.value,
                     json.dumps(list(decision.missing_seats)),
+                    _submissions_json(decision),
                     decision.created_at,
                 ),
             )
@@ -489,9 +519,7 @@ class SqliteRepo:
         return _row_to_pending(row) if row else None
 
     # ------------------------------------------------------- persona_assignments
-    async def insert_persona_assignment(
-        self, game_id: str, seat_no: int, persona_key: str
-    ) -> None:
+    async def insert_persona_assignment(self, game_id: str, seat_no: int, persona_key: str) -> None:
         async with self._tx() as db:
             await db.execute(
                 """
@@ -587,9 +615,7 @@ class SqliteRepo:
                     raise _OptimisticLockMiss()
 
                 if transition.clear_force_skip:
-                    await db.execute(
-                        "UPDATE games SET force_skip_pending=0 WHERE id=?", (game_id,)
-                    )
+                    await db.execute("UPDATE games SET force_skip_pending=0 WHERE id=?", (game_id,))
 
                 for upd in transition.player_updates:
                     await _apply_player_update(db, game_id, upd)
@@ -603,13 +629,15 @@ class SqliteRepo:
                     await db.execute(
                         """
                         INSERT INTO pending_decisions
-                            (game_id, phase, day, required_submission, missing_seats_json, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                            (game_id, phase, day, required_submission, missing_seats_json,
+                             submissions_json, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(game_id) DO UPDATE SET
                             phase=excluded.phase,
                             day=excluded.day,
                             required_submission=excluded.required_submission,
                             missing_seats_json=excluded.missing_seats_json,
+                            submissions_json=excluded.submissions_json,
                             created_at=excluded.created_at
                         """,
                         (
@@ -618,13 +646,12 @@ class SqliteRepo:
                             transition.pending.day,
                             transition.pending.required_submission.value,
                             json.dumps(list(transition.pending.missing_seats)),
+                            _submissions_json(transition.pending),
                             transition.pending.created_at,
                         ),
                     )
                 elif not transition.requires_host_decision:
-                    await db.execute(
-                        "DELETE FROM pending_decisions WHERE game_id=?", (game_id,)
-                    )
+                    await db.execute("DELETE FROM pending_decisions WHERE game_id=?", (game_id,))
 
                 if transition.record_guard is not None:
                     knight_seat, target_seat = transition.record_guard
@@ -652,9 +679,7 @@ class _OptimisticLockMiss(Exception):
     """
 
 
-async def _apply_player_update(
-    db: aiosqlite.Connection, game_id: str, upd: PlayerUpdate
-) -> None:
+async def _apply_player_update(db: aiosqlite.Connection, game_id: str, upd: PlayerUpdate) -> None:
     sets: list[str] = []
     params: list[Any] = []
     if upd.role is not None:
