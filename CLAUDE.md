@@ -67,6 +67,8 @@ Within `services/`: `discord_service.py` contains both `DiscordBotAdapter` and t
 
 Transient phases (`SETUP`, `NIGHT_0`) have `deadline_epoch=None` and auto-advance without sleeping. All other phases sleep until deadline or early wake. Phase duration constants live in the state machine / rules modules.
 
+**LLM submissions inside `_dispatch_submissions` are fire-and-forget.** `LLMAdapter.submit_llm_votes` / `submit_llm_night_actions` / `submit_llm_daystart_speeches` (`src/wolfbot/services/llm_service.py`) schedule one `asyncio.create_task` per LLM actor and return immediately — the `await` at the call site awaits only the scheduling, not the xAI round-trip. A slow xAI response must never block `GameEngine`'s deadline watcher. Each background task re-loads the game and re-checks `phase`, `day_number`, and `ended_at` before every per-player submission, so a force-skip or deadline advance mid-flight is safely dropped. Do **not** add timeouts or awaits expecting LLM results at the `advance()` call site.
+
 ### Circular dependency resolution
 
 See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` are constructed **before** `GameService`, then `set_game_service(...)` injects the back-reference once `GameService` exists. Preserve this pattern when adding a new adapter that needs to call back into `GameService`.
@@ -83,8 +85,11 @@ See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` a
 - `submit_vote` / `submit_night_action` return `SubmitResult` (`src/wolfbot/domain/enums.py`) — a StrEnum of specific rejection reasons the UI surfaces back to the player. New submission endpoints should return `SubmitResult`, not a bool.
 - Both submission endpoints require a `day: int` argument that must match `game.day_number`; otherwise they return `SubmitResult.STALE_PHASE`. `VoteView` / `NightActionView` capture the current `day` at DM-send time so a player clicking yesterday's DM today is rejected even when the phase happens to match.
 - `PendingSubmission` has two parallel seat lists: `missing_seats` (never submitted) and `unresolved_seats` (submitted but unsettled — currently only wolf attack splits). `resend_pending_dms` re-sends DMs to the union of both, so `/wolf extend` can break a split lockout without needing `/wolf force-skip`.
+- `DiscordAdapter.send_night_action_dms(game, actors, alive_players, seats)` intentionally takes two separate player pools: `actors` = who to DM (typically the pending subset), `alive_players` = the full alive pool used to compute legal targets. Keep them separate in any new code path — a resend to a single not-yet-submitted wolf during a split still needs to offer the full legal attack list.
 - Lobby seat mutations must go through `SqliteRepo.join_lobby` / `leave_lobby` (phase-guarded in one tx). Do **not** call raw `insert_seat` / `delete_seat` from command paths — those exist for test setup. This keeps stale `/wolf join` / `/wolf leave` from corrupting a game that already transitioned out of LOBBY.
+- The `LOBBY → SETUP` transition plus LLM-seat backfill goes through `SqliteRepo.claim_start_and_backfill`, which packages the phase flip and the bot-seat inserts into one optimistically-locked transaction (matches on `expected_phase=LOBBY`). `/wolf start` uses this; don't re-implement the flow with a separate phase update followed by `insert_seat` calls — a concurrent `/wolf join` / `/wolf leave` would slip in between.
 - `force_skip_pending` is set only via `Transition.set_force_skip=True` passed to `apply_transition`. That way the flag flip and the `WAITING_HOST_DECISION → paused phase` swap share a transaction — if `/wolf extend` wins the race, both roll back together. There is no standalone `repo.set_force_skip` method.
+- `GameService.host_abort` returns `bool` — `False` means the game was already ended and no work was done. The `/wolf abort` handler in `discord_service.py` branches on this: only on `True` does it detach + stop the `GameEngine` and post the public "強制終了" message; otherwise it replies ephemerally. New callers of `host_abort` must respect the same pattern or risk double-teardown.
 
 ### Recovery on startup
 
