@@ -60,9 +60,9 @@ async def _seed_vote_game(repo: SqliteRepo) -> tuple[Game, list[Seat]]:
     seats = [
         Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
         Seat(
-            seat_no=2, display_name="Setsu", discord_user_id=None, is_llm=True, persona_key="setsu"
+            seat_no=2, display_name="セツ", discord_user_id=None, is_llm=True, persona_key="setsu"
         ),
-        Seat(seat_no=3, display_name="Gina", discord_user_id=None, is_llm=True, persona_key="gina"),
+        Seat(seat_no=3, display_name="ジナ", discord_user_id=None, is_llm=True, persona_key="gina"),
     ]
     for s in seats:
         await repo.insert_seat(game.id, s)
@@ -496,7 +496,7 @@ async def test_daystart_speech_inserts_public_log(repo: SqliteRepo) -> None:
         Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
         Seat(
             seat_no=2,
-            display_name="Setsu",
+            display_name="セツ",
             discord_user_id=None,
             is_llm=True,
             persona_key="setsu",
@@ -533,7 +533,7 @@ async def test_daystart_speech_inserts_public_log(repo: SqliteRepo) -> None:
     await adapter._maybe_speak(game, llm_player, llm_seat, seats)
 
     assert len(poster.public) == 1
-    assert "Setsu" in poster.public[0][1] and "おはようございます" in poster.public[0][1]
+    assert "セツ" in poster.public[0][1] and "おはようございます" in poster.public[0][1]
 
     # Speech was persisted with actor_seat set so build_user_context can attribute it.
     logs = await repo.load_public_logs(game.id, limit=40)

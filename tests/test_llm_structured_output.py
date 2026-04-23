@@ -130,9 +130,9 @@ async def _seed_game(repo, phase: Phase = Phase.NIGHT):
             seat_no=1, display_name="Human1", discord_user_id="u1", is_llm=False, persona_key=None
         ),
         Seat(
-            seat_no=2, display_name="Setsu", discord_user_id=None, is_llm=True, persona_key="setsu"
+            seat_no=2, display_name="セツ", discord_user_id=None, is_llm=True, persona_key="setsu"
         ),
-        Seat(seat_no=3, display_name="Gina", discord_user_id=None, is_llm=True, persona_key="gina"),
+        Seat(seat_no=3, display_name="ジナ", discord_user_id=None, is_llm=True, persona_key="gina"),
     ]
     for s in seats:
         await repo.insert_seat(game.id, s)
@@ -208,7 +208,7 @@ async def test_llm_adapter_votes_with_name_resolution(repo) -> None:
     decider = FakeLLMActionDecider(
         scripted=[
             LLMAction(intent="vote", target_name="Human1", reason_summary="疑う", confidence=0.6),
-            LLMAction(intent="vote", target_name="Gina", reason_summary="怪しい", confidence=0.5),
+            LLMAction(intent="vote", target_name="ジナ", reason_summary="怪しい", confidence=0.5),
         ]
     )
     adapter = LLMAdapter(
@@ -226,7 +226,7 @@ async def test_llm_adapter_votes_with_name_resolution(repo) -> None:
     assert len(gs.votes) == 2
     submissions_by_voter = {v[1]: v[2] for v in gs.votes}
     assert submissions_by_voter[2] == 1  # seat 2 → Human1
-    # seat 3 tried to vote for "Gina" (itself, not in candidates) → random fallback to
+    # seat 3 tried to vote for "ジナ" (itself, not in candidates) → random fallback to
     # some other alive seat (not itself)
     assert submissions_by_voter[3] != 3
     assert submissions_by_voter[3] in (1, 2)

@@ -223,3 +223,70 @@ def test_execution_triggering_victory_ends_game() -> None:
     assert t.next_phase is Phase.GAME_OVER
     assert t.victory is not None
     assert t.new_deadline_epoch is None
+
+
+# ---------------------------------------------------------------- vote tally
+def test_execution_log_includes_grouped_vote_tally() -> None:
+    """EXECUTION text appends 🗳 投票結果 block grouped by target, sorted by count."""
+    game = _game(day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _seats()
+    votes = [
+        _v(1, 7),
+        _v(2, 7),
+        _v(3, 7),
+        _v(4, 7),
+        _v(5, 8),
+        _v(6, 8),
+        _v(7, 9),
+        _v(8, None),
+        _v(9, None),
+    ]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
+    exec_log = next(log for log in t.public_logs if log.kind == "EXECUTION")
+    text = exec_log.text
+    assert "P7 が処刑されました。" in text
+    assert "🗳 投票結果:" in text
+    # Sort rule: primary key = -count, secondary = target_seat_no (棄権 → +inf).
+    # So within count=2, P8 precedes 棄権; overall: P7(4) → P8(2) → 棄権(2) → P9(1).
+    p7_idx = text.index("・P7 (4票): P1、P2、P3、P4")
+    p8_idx = text.index("・P8 (2票): P5、P6")
+    abstain_idx = text.index("・棄権 (2票): P8、P9")
+    p9_idx = text.index("・P9 (1票): P7")
+    assert p7_idx < p8_idx < abstain_idx < p9_idx
+
+
+def test_runoff_start_log_includes_initial_round_tally() -> None:
+    """Tied initial vote → RUNOFF_START log carries the initial-round breakdown."""
+    game = _game(day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _seats()
+    votes = [
+        _v(1, 7),
+        _v(2, 7),
+        _v(3, 8),
+        _v(4, 8),
+        _v(5, 9),
+        _v(6, 9),
+        _v(7, 9),
+        _v(8, 7),
+        _v(9, 1),
+    ]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
+    runoff_log = next(log for log in t.public_logs if log.kind == "RUNOFF_START")
+    assert "同票のため決選投票に移ります。" in runoff_log.text
+    assert "🗳 投票結果:" in runoff_log.text
+    # P7 and P9 tied at 3 votes each.
+    assert "・P7 (3票):" in runoff_log.text
+    assert "・P9 (3票):" in runoff_log.text
+
+
+def test_all_abstain_no_execution_log_includes_tally() -> None:
+    game = _game(day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _seats()
+    votes = [_v(i, None) for i in range(1, 10)]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
+    no_exec = next(log for log in t.public_logs if log.kind == "NO_EXECUTION")
+    assert "🗳 投票結果:" in no_exec.text
+    assert "・棄権 (9票): P1、P2、P3、P4、P5、P6、P7、P8、P9" in no_exec.text

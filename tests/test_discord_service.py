@@ -269,8 +269,12 @@ async def test_announce_waiting_censors_wolf_attack_names_on_main_channel(
     assert "2件" in main_text
     assert "Alice" not in main_text
     assert "Bob" not in main_text
+    # Public wording must not reveal it was a *split* vs a plain no-submit —
+    # "意見が割れました" implies ≥2 disagreeing wolves and leaks the count.
+    assert "意見が割れました" not in main_text
+    assert "未確定" in main_text
 
-    # Wolves channel got the name-inclusive version.
+    # Wolves channel got the name-inclusive version (including split wording).
     assert len(adapter.wolves_sent) == 1
     wolves_text = adapter.wolves_sent[0]
     assert "Alice" in wolves_text and "Bob" in wolves_text

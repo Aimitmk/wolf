@@ -114,6 +114,38 @@ def _victory_log(game: Game, v: Faction, now_epoch: int) -> LogEntry:
     )
 
 
+def _format_vote_tally(
+    votes: Sequence[Vote],
+    seats_by_no: Mapping[int, Seat],
+    alive_seats: set[int],
+) -> str:
+    """Grouped-by-target tally block, empty string if no valid ballots cast.
+
+    Dead-seat stale votes are filtered out to match `compute_vote_result`. Bucket
+    `target_seat=None` into 棄権. Targets sort by vote count desc then seat_no asc;
+    voters within each bucket sort by seat_no asc.
+    """
+    valid = [v for v in votes if v.voter_seat in alive_seats]
+    if not valid:
+        return ""
+    buckets: dict[int | None, list[int]] = {}
+    for v in sorted(valid, key=lambda x: x.voter_seat):
+        buckets.setdefault(v.target_seat, []).append(v.voter_seat)
+
+    def sort_key(item: tuple[int | None, list[int]]) -> tuple[int, int]:
+        target, voters = item
+        # 棄権 (None) sinks to the bottom regardless of count.
+        target_order = target if target is not None else 10**9
+        return (-len(voters), target_order)
+
+    lines = ["🗳 投票結果:"]
+    for target, voters in sorted(buckets.items(), key=sort_key):
+        label = "棄権" if target is None else _name(seats_by_no, target)
+        voter_names = "、".join(_name(seats_by_no, v) for v in voters)
+        lines.append(f"・{label} ({len(voters)}票): {voter_names}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- SETUP
 def plan_setup(
     game: Game,
@@ -277,17 +309,25 @@ def plan_day_vote_resolve(
 
     outcome = compute_vote_result(votes, alive_seats=alive_seats)
     seats_by_no = {s.seat_no: s for s in seats}
+    tally = _format_vote_tally(votes, seats_by_no, alive_seats)
+    tally_suffix = f"\n\n{tally}" if tally else ""
 
     if outcome.executed is not None:
         return _apply_execution(
-            game, players, seats_by_no, outcome.executed, now_epoch, clear_force=True
+            game,
+            players,
+            seats_by_no,
+            outcome.executed,
+            now_epoch,
+            clear_force=True,
+            tally_suffix=tally_suffix,
         )
     if outcome.tied:
         candidates = "、".join(_name(seats_by_no, s) for s in outcome.tied)
         pub = _public_log(
             game,
             kind="RUNOFF_START",
-            text=f"同票のため決選投票に移ります。候補: {candidates}",
+            text=f"同票のため決選投票に移ります。候補: {candidates}{tally_suffix}",
             now_epoch=now_epoch,
             phase=Phase.DAY_RUNOFF,
         )
@@ -302,7 +342,7 @@ def plan_day_vote_resolve(
     pub = _public_log(
         game,
         kind="NO_EXECUTION",
-        text="有効な投票がなかったため、本日は処刑なしで夜を迎えます。",
+        text=f"有効な投票がなかったため、本日は処刑なしで夜を迎えます。{tally_suffix}",
         now_epoch=now_epoch,
         phase=Phase.NIGHT,
     )
@@ -355,16 +395,24 @@ def plan_day_runoff_resolve(
         votes, alive_seats=alive_seats, candidate_seats=set(tied_candidates)
     )
     seats_by_no = {s.seat_no: s for s in seats}
+    tally = _format_vote_tally(votes, seats_by_no, alive_seats)
+    tally_suffix = f"\n\n{tally}" if tally else ""
 
     if outcome.executed is not None:
         return _apply_execution(
-            game, players, seats_by_no, outcome.executed, now_epoch, clear_force=True
+            game,
+            players,
+            seats_by_no,
+            outcome.executed,
+            now_epoch,
+            clear_force=True,
+            tally_suffix=tally_suffix,
         )
     # Runoff tie → no execution
     pub = _public_log(
         game,
         kind="NO_EXECUTION",
-        text="決選投票も同票のため、本日は処刑なしで夜を迎えます。",
+        text=f"決選投票も同票のため、本日は処刑なしで夜を迎えます。{tally_suffix}",
         now_epoch=now_epoch,
         phase=Phase.NIGHT,
     )
@@ -385,6 +433,7 @@ def _apply_execution(
     now_epoch: int,
     *,
     clear_force: bool,
+    tally_suffix: str = "",
 ) -> Transition:
     """Apply execution death, check victory, go to NIGHT or GAME_OVER."""
     # Defense-in-depth: compute_vote_result filters by alive seats, but if a
@@ -394,7 +443,7 @@ def _apply_execution(
         pub = _public_log(
             game,
             kind="NO_EXECUTION",
-            text="投票結果が無効だったため、本日は処刑なしで夜を迎えます。",
+            text=f"投票結果が無効だったため、本日は処刑なしで夜を迎えます。{tally_suffix}",
             now_epoch=now_epoch,
             phase=Phase.NIGHT,
         )
@@ -410,7 +459,7 @@ def _apply_execution(
         _public_log(
             game,
             kind="EXECUTION",
-            text=f"{exec_name} が処刑されました。",
+            text=f"{exec_name} が処刑されました。{tally_suffix}",
             now_epoch=now_epoch,
         ),
     )

@@ -45,9 +45,9 @@ async def _seed(repo):
     seats = [
         Seat(seat_no=1, display_name="Alice", discord_user_id="u1", is_llm=False, persona_key=None),
         Seat(
-            seat_no=2, display_name="Setsu", discord_user_id=None, is_llm=True, persona_key="setsu"
+            seat_no=2, display_name="セツ", discord_user_id=None, is_llm=True, persona_key="setsu"
         ),
-        Seat(seat_no=3, display_name="Gina", discord_user_id=None, is_llm=True, persona_key="gina"),
+        Seat(seat_no=3, display_name="ジナ", discord_user_id=None, is_llm=True, persona_key="gina"),
     ]
     for s in seats:
         await repo.insert_seat(game.id, s)
@@ -129,7 +129,7 @@ async def test_cooldown_prevents_double_speech(repo) -> None:
     await repo.increment_llm_normal_speech(game.id, day=1, seat_no=2, now_epoch=clock_val[0] - 5)
 
     await adapter.maybe_react_to_message(
-        game, players, seats, author_seat=1, text="Setsu どう思う？"
+        game, players, seats, author_seat=1, text="セツ どう思う？"
     )
     assert poster.messages == []  # cooldown blocked
 
@@ -155,7 +155,7 @@ async def test_cap_blocks_fourth_speech(repo) -> None:
     for _ in range(3):
         await repo.increment_llm_normal_speech(game.id, day=1, seat_no=2, now_epoch=100)
 
-    await adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="Setsu 発言して")
+    await adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="セツ 発言して")
     assert poster.messages == []
 
 
@@ -182,9 +182,9 @@ async def test_reaction_only_triggered_by_matching_message(repo) -> None:
     assert poster.messages == []
 
     await adapter.maybe_react_to_message(
-        game, players, seats, author_seat=1, text="Setsu、占い CO してよ"
+        game, players, seats, author_seat=1, text="セツ、占い CO してよ"
     )
-    # Setsu's name matches → at least 1 post. (Gina also matches keyword "占い".)
+    # セツ's name matches → at least 1 post. (ジナ also matches keyword "占い".)
     assert len(poster.messages) >= 1
 
 
@@ -206,7 +206,7 @@ async def test_reaction_suppressed_outside_day_discussion(repo) -> None:
     players = await repo.load_players(game.id)
 
     await adapter.maybe_react_to_message(
-        game, players, seats, author_seat=1, text="Setsu！占い結果！"
+        game, players, seats, author_seat=1, text="セツ！占い結果！"
     )
     assert poster.messages == []
 
@@ -284,11 +284,11 @@ async def test_concurrent_reactions_on_same_seat_are_serialized(repo) -> None:
     adapter.set_game_service(FakeGS())  # type: ignore[arg-type]
     players = await repo.load_players(game.id)
 
-    # Two reactions concurrently, same seat (Setsu). Before the fix this produced
+    # Two reactions concurrently, same seat (セツ). Before the fix this produced
     # two posts and a speech count of 2 (read-check-write race).
     await asyncio.gather(
-        adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="Setsu 反応して"),
-        adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="Setsu どう思う"),
+        adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="セツ 反応して"),
+        adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="セツ どう思う"),
     )
 
     assert len(poster.messages) == 1
@@ -317,7 +317,7 @@ async def test_concurrent_reactions_on_different_seats_both_post(repo) -> None:
     # Trigger text contains both LLM names → each reacts for itself only.
     await asyncio.gather(
         adapter.maybe_react_to_message(
-            game, players, seats, author_seat=1, text="Setsu と Gina に呼びかけ"
+            game, players, seats, author_seat=1, text="セツ と ジナ に呼びかけ"
         ),
     )
 
@@ -344,7 +344,7 @@ async def test_skip_intent_means_no_post(repo) -> None:
     adapter.set_game_service(FakeGS())  # type: ignore[arg-type]
     players = await repo.load_players(game.id)
 
-    await adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="Setsu 占い？")
+    await adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="セツ 占い？")
     assert poster.messages == []
     # Count NOT incremented since no speech happened
     count, _, _ = await repo.load_llm_speech(game.id, day=1, seat_no=2)

@@ -67,19 +67,19 @@ def render_pending_host_lines(
     lines: list[str] = []
     for sub in pending.effective_submissions():
         is_role_id = sub.submission_type in ROLE_IDENTIFYING_KINDS
-        if sub.missing_seats:
-            if is_role_id:
-                lines.append(f"`{sub.submission_type.value}` 未提出: {len(sub.missing_seats)}件")
-            else:
+        if is_role_id:
+            # Merge missing + unresolved under one 未確定 line so a wolf-split
+            # (unresolved non-empty) is indistinguishable from plain no-submit.
+            # Otherwise the "意見が割れました" wording would confirm ≥2 wolves
+            # alive and leak the exact count.
+            combined = len(sub.missing_seats) + len(sub.unresolved_seats)
+            if combined:
+                lines.append(f"`{sub.submission_type.value}` 未確定: {combined}件")
+        else:
+            if sub.missing_seats:
                 names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
                 lines.append(f"`{sub.submission_type.value}` 未提出: {names}")
-        if sub.unresolved_seats:
-            if is_role_id:
-                lines.append(
-                    f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
-                    f"{len(sub.unresolved_seats)}件"
-                )
-            else:
+            if sub.unresolved_seats:
                 names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.unresolved_seats)
                 lines.append(f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): {names}")
     return lines
@@ -283,12 +283,15 @@ class DiscordBotAdapter:
         wolves_lines: list[str] = []
         for sub in pending.effective_submissions():
             is_role_id = sub.submission_type in ROLE_IDENTIFYING_KINDS
-            if sub.missing_seats:
-                if is_role_id:
-                    public_lines.append(
-                        f"`{sub.submission_type.value}` 未提出: {len(sub.missing_seats)}件"
-                    )
-                else:
+            if is_role_id:
+                # Merge missing + unresolved into one 未確定 line; see
+                # render_pending_host_lines for rationale (avoid leaking
+                # wolf count via the "意見が割れました" wording).
+                combined = len(sub.missing_seats) + len(sub.unresolved_seats)
+                if combined:
+                    public_lines.append(f"`{sub.submission_type.value}` 未確定: {combined}件")
+            else:
+                if sub.missing_seats:
                     names = [
                         seats_by_no[sn].display_name
                         for sn in sub.missing_seats
@@ -297,13 +300,7 @@ class DiscordBotAdapter:
                     public_lines.append(
                         f"`{sub.submission_type.value}` 未提出: {'、'.join(names) or '(なし)'}"
                     )
-            if sub.unresolved_seats:
-                if is_role_id:
-                    public_lines.append(
-                        f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
-                        f"{len(sub.unresolved_seats)}件"
-                    )
-                else:
+                if sub.unresolved_seats:
                     names = [
                         seats_by_no[sn].display_name
                         for sn in sub.unresolved_seats
