@@ -628,8 +628,10 @@ class GameService:
     async def host_force_skip(self, game_id: str) -> bool:
         """/wolf force-skip. Valid only while WAITING_HOST_DECISION.
 
-        Sets `force_skip_pending=1`, swaps phase back to the paused phase, and wakes.
-        The engine's next advance re-runs plan_* with force_skip=True and resolves.
+        Sets `force_skip_pending=1` and swaps phase back to the paused phase in a
+        single transaction (`Transition.set_force_skip=True`), then wakes. If
+        `/wolf extend` wins the race, apply_transition's optimistic lock fails
+        and the flag set is rolled back too — no residual `force_skip_pending`.
         """
         game = await self.repo.load_game(game_id)
         if game is None or game.phase is not Phase.WAITING_HOST_DECISION:
@@ -637,12 +639,11 @@ class GameService:
         pending = await self.repo.load_pending_decision(game_id)
         if pending is None:
             return False
-        await self.repo.set_force_skip(game_id, True)
-        # Swap the phase back — use a zero-change transition that only rewrites phase.
         t = Transition(
             next_phase=pending.phase,
             next_day=game.day_number,
             new_deadline_epoch=self.clock(),  # deadline = now → advance fires immediately
+            set_force_skip=True,
         )
         ok = await self.repo.apply_transition(
             game_id, t, expected_phase=Phase.WAITING_HOST_DECISION

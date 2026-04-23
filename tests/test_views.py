@@ -147,6 +147,58 @@ async def test_night_view_on_accepted_shows_success() -> None:
     assert view.select_target.disabled is True
 
 
+def test_vote_view_labels_include_seat_number() -> None:
+    """Labels must disambiguate duplicate display_names so a voter can tell two
+    Alices apart in the DM Select.
+    """
+
+    async def on_submit(
+        game_id: str, voter: int, target: int, round_: int, day: int
+    ) -> SubmitResult:
+        return SubmitResult.ACCEPTED
+
+    dup_a = Seat(
+        seat_no=3, display_name="Alice", discord_user_id="u3", is_llm=False, persona_key=None
+    )
+    dup_b = Seat(
+        seat_no=7, display_name="Alice", discord_user_id="u7", is_llm=False, persona_key=None
+    )
+    view = VoteView(
+        game_id="g",
+        voter_seat=1,
+        candidates=[dup_a, dup_b],
+        round_=0,
+        day=1,
+        on_submit=on_submit,
+    )
+    labels = {opt.label for opt in view.select_target.options}
+    assert labels == {"席3 Alice", "席7 Alice"}
+
+
+def test_night_view_labels_include_seat_number() -> None:
+    async def on_submit(
+        game_id: str, actor: int, kind: SubmissionType, target: int, day: int
+    ) -> SubmitResult:
+        return SubmitResult.ACCEPTED
+
+    dup_a = Seat(
+        seat_no=3, display_name="Alice", discord_user_id="u3", is_llm=False, persona_key=None
+    )
+    dup_b = Seat(
+        seat_no=7, display_name="Alice", discord_user_id="u7", is_llm=False, persona_key=None
+    )
+    view = NightActionView(
+        game_id="g",
+        actor_seat=2,
+        kind=SubmissionType.SEER_DIVINE,
+        candidates=[dup_a, dup_b],
+        day=1,
+        on_submit=on_submit,
+    )
+    labels = {opt.label for opt in view.select_target.options}
+    assert labels == {"席3 Alice", "席7 Alice"}
+
+
 async def test_night_view_on_role_mismatch_shows_reject() -> None:
     async def on_submit(
         game_id: str, actor: int, kind: SubmissionType, target: int, day: int

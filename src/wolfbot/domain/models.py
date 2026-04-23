@@ -179,6 +179,10 @@ class Transition(BaseModel):
     victory: Faction | None = None
     morning_text: str | None = None
     clear_force_skip: bool = False
+    # Used by /wolf force-skip so the flag set and the phase swap land in the
+    # same transaction. If apply_transition's optimistic lock fails (e.g.
+    # /wolf extend won the race), the flag is rolled back with the rest.
+    set_force_skip: bool = False
     # Instructions for downstream services:
     # - seat_nos whose permissions need updating (killed this transition)
     newly_dead_seats: tuple[int, ...] = ()

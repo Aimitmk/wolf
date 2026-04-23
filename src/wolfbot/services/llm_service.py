@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -55,6 +56,18 @@ class MessagePoster(Protocol):
 
 
 log = logging.getLogger(__name__)
+
+
+def seat_token(seat: Seat) -> str:
+    """Stable LLM/UI identifier: `席{N} {display_name}`.
+
+    Disambiguates candidates when display_name collides (duplicate humans, or a
+    human named the same as a persona). Resolver parses the leading `席\\d+`.
+    """
+    return f"席{seat.seat_no} {seat.display_name}"
+
+
+_SEAT_TOKEN_RE = re.compile(r"^\s*席(\d+)\b")
 
 
 # ---------------------------------------------------------------- LLMAction
@@ -226,7 +239,7 @@ class LLMAdapter:
                 seat,
                 players,
                 seats,
-                task_text=task_night_action(kind, [c.display_name for c in candidates]),
+                task_text=task_night_action(kind, [seat_token(c) for c in candidates]),
             )
             target_seat = self._resolve_target(action.target_name, candidates, allow_none=False)
             await self.gs.submit_night_action(
@@ -278,7 +291,7 @@ class LLMAdapter:
                 seat,
                 players,
                 seats,
-                task_text=task_vote([c.display_name for c in cand_seats], runoff=round_ == 1),
+                task_text=task_vote([seat_token(c) for c in cand_seats], runoff=round_ == 1),
             )
             target = self._resolve_target(
                 action.target_name, cand_seats, allow_none=action.intent == "skip"
@@ -492,16 +505,32 @@ class LLMAdapter:
         *,
         allow_none: bool,
     ) -> int | None:
+        """Map an LLM `target_name` back to a seat_no.
+
+        Candidates are presented to the LLM as `席{N} {display_name}` tokens. The
+        primary path parses the leading `席N` prefix, which disambiguates duplicate
+        display_names. Bare-name matches are a legacy fallback and only accepted
+        when exactly one candidate has that display_name.
+        """
         if target_name is None:
             if allow_none:
                 return None
             pick = self.rng.choice(list(candidates))
-            log.warning("LLM returned null target; fallback to %s", pick.display_name)
+            log.warning("LLM returned null target; fallback to seat %d", pick.seat_no)
             return pick.seat_no
-        for c in candidates:
-            if c.display_name == target_name:
-                return c.seat_no
-        log.warning("LLM target_name %r not in candidates; random fallback", target_name)
+        m = _SEAT_TOKEN_RE.match(target_name)
+        if m is not None:
+            seat_no = int(m.group(1))
+            for c in candidates:
+                if c.seat_no == seat_no:
+                    return c.seat_no
+        matches = [c for c in candidates if c.display_name == target_name]
+        if len(matches) == 1:
+            return matches[0].seat_no
+        log.warning(
+            "LLM target_name %r not resolvable (ambiguous or unknown); random fallback",
+            target_name,
+        )
         return self.rng.choice(list(candidates)).seat_no
 
     @staticmethod

@@ -893,3 +893,78 @@ async def test_submit_night_action_rejected_when_day_mismatch(
     assert result is SubmitResult.STALE_PHASE
     actions = await repo.load_night_actions(game.id, day=2)
     assert actions == []
+
+
+async def test_apply_transition_commits_set_force_skip_on_match(
+    repo: SqliteRepo,
+) -> None:
+    """Happy path: set_force_skip=True flips the DB flag atomically with the phase swap."""
+    from wolfbot.domain.models import Transition
+
+    game = Game(
+        id=new_game_id(),
+        guild_id="g-fs-ok",
+        host_user_id="h",
+        phase=Phase.WAITING_HOST_DECISION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+    )
+    await repo.create_game(game)
+
+    t = Transition(
+        next_phase=Phase.DAY_VOTE,
+        next_day=1,
+        new_deadline_epoch=9999,
+        set_force_skip=True,
+    )
+    ok = await repo.apply_transition(
+        game.id, t, expected_phase=Phase.WAITING_HOST_DECISION
+    )
+    assert ok is True
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_VOTE
+    assert loaded.force_skip_pending is True
+
+
+async def test_apply_transition_rolls_back_set_force_skip_on_phase_mismatch(
+    repo: SqliteRepo,
+) -> None:
+    """Repro for the Codex v2 Medium finding: a force-skip that loses to extend
+    must not leak `force_skip_pending=1`. apply_transition's optimistic lock
+    rollback now reverts the flag together with the phase swap.
+    """
+    from wolfbot.domain.models import Transition
+
+    game = Game(
+        id=new_game_id(),
+        guild_id="g-fs-race",
+        host_user_id="h",
+        phase=Phase.DAY_VOTE,  # as if extend already restored the phase
+        day_number=1,
+        deadline_epoch=5555,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+    )
+    await repo.create_game(game)
+
+    t = Transition(
+        next_phase=Phase.DAY_VOTE,
+        next_day=1,
+        new_deadline_epoch=9999,
+        set_force_skip=True,
+    )
+    ok = await repo.apply_transition(
+        game.id, t, expected_phase=Phase.WAITING_HOST_DECISION
+    )
+    assert ok is False
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_VOTE
+    assert loaded.deadline_epoch == 5555  # unchanged
+    assert loaded.force_skip_pending is False  # critical: no residual flag

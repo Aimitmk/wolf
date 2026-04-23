@@ -83,6 +83,8 @@ See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` a
 - `submit_vote` / `submit_night_action` return `SubmitResult` (`src/wolfbot/domain/enums.py`) — a StrEnum of specific rejection reasons the UI surfaces back to the player. New submission endpoints should return `SubmitResult`, not a bool.
 - Both submission endpoints require a `day: int` argument that must match `game.day_number`; otherwise they return `SubmitResult.STALE_PHASE`. `VoteView` / `NightActionView` capture the current `day` at DM-send time so a player clicking yesterday's DM today is rejected even when the phase happens to match.
 - `PendingSubmission` has two parallel seat lists: `missing_seats` (never submitted) and `unresolved_seats` (submitted but unsettled — currently only wolf attack splits). `resend_pending_dms` re-sends DMs to the union of both, so `/wolf extend` can break a split lockout without needing `/wolf force-skip`.
+- Lobby seat mutations must go through `SqliteRepo.join_lobby` / `leave_lobby` (phase-guarded in one tx). Do **not** call raw `insert_seat` / `delete_seat` from command paths — those exist for test setup. This keeps stale `/wolf join` / `/wolf leave` from corrupting a game that already transitioned out of LOBBY.
+- `force_skip_pending` is set only via `Transition.set_force_skip=True` passed to `apply_transition`. That way the flag flip and the `WAITING_HOST_DECISION → paused phase` swap share a transaction — if `/wolf extend` wins the race, both roll back together. There is no standalone `repo.set_force_skip` method.
 
 ### Recovery on startup
 
@@ -117,7 +119,7 @@ Personas in `src/wolfbot/llm/personas.py` are **Gnosia-flavored archetypes**; `s
 - Never quote original Gnosia dialogue; imitate personality via tone only.
 - No meta-commentary (no "as an AI", no referring to inputs as data).
 - Japanese only, 80–300 chars per utterance.
-- `target_name` must exactly match a candidate name or be `null` / intent=`skip`.
+- `target_name` must exactly match a candidate **token** (`席{seat_no} {display_name}`) or be `null` / intent=`skip`. The seat-number prefix disambiguates duplicate display_names (e.g. two humans named "Alice", or a human colliding with a persona). `LLMAdapter._resolve_target` parses the prefix; bare display_names still resolve when unambiguous (legacy fallback).
 
 ## Testing conventions
 

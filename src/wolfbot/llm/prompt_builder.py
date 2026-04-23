@@ -107,18 +107,21 @@ def task_daytime_speech(day_number: int) -> str:
     )
 
 
-def task_vote(candidate_names: Sequence[str], runoff: bool) -> str:
-    names = "、".join(candidate_names)
+def task_vote(candidate_tokens: Sequence[str], runoff: bool) -> str:
+    """Candidates are `席{N} {display_name}` tokens; target_name must echo one back."""
+    names = "、".join(candidate_tokens)
     runoff_note = "これは決選投票です。" if runoff else ""
     return (
         f"{runoff_note}投票先として合法な候補は: {names}\n"
-        " `intent=vote`、`target_name` に候補名のいずれかを厳密に一致させて返してください。"
+        " `intent=vote`、`target_name` に候補トークン (例: `席3 Alice`) のいずれかを"
+        " 厳密に一致させて返してください。`席番号` を含めないと同名の別席と区別できません。"
         " どうしても棄権したい場合は `intent=skip` を返し、`target_name` は `null` にします。"
     )
 
 
-def task_night_action(kind: SubmissionType, candidate_names: Sequence[str]) -> str:
-    names = "、".join(candidate_names)
+def task_night_action(kind: SubmissionType, candidate_tokens: Sequence[str]) -> str:
+    """Candidates are `席{N} {display_name}` tokens; target_name must echo one back."""
+    names = "、".join(candidate_tokens)
     label = {
         SubmissionType.WOLF_ATTACK: "襲撃",
         SubmissionType.SEER_DIVINE: "占い",
@@ -126,7 +129,8 @@ def task_night_action(kind: SubmissionType, candidate_names: Sequence[str]) -> s
     }[kind]
     return (
         f"夜です。{label} 対象を 1 名選んでください。合法候補: {names}\n"
-        " `intent=night_action`、`target_name` に候補名のいずれかを厳密に一致させて返してください。"
+        " `intent=night_action`、`target_name` に候補トークン (例: `席3 Alice`) のいずれかを"
+        " 厳密に一致させて返してください。`席番号` を含めないと同名の別席と区別できません。"
     )
 
 

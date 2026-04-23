@@ -9,6 +9,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,24 @@ from wolfbot.domain.models import (
     Transition,
     Vote,
 )
+
+
+class JoinLobbyResult(StrEnum):
+    """Outcome of `SqliteRepo.join_lobby`. Surfaced to the slash-command user."""
+
+    ACCEPTED = "accepted"
+    STALE_PHASE = "stale_phase"
+    ALREADY_JOINED = "already_joined"
+    LOBBY_FULL = "lobby_full"
+    NO_FREE_SEAT = "no_free_seat"
+
+
+class LeaveLobbyResult(StrEnum):
+    """Outcome of `SqliteRepo.leave_lobby`. Surfaced to the slash-command user."""
+
+    ACCEPTED = "accepted"
+    STALE_PHASE = "stale_phase"
+    NOT_JOINED = "not_joined"
 
 
 def _row_to_game(row: aiosqlite.Row) -> Game:
@@ -244,13 +263,6 @@ class SqliteRepo:
                 (ended_at_epoch, Phase.GAME_OVER.value, game_id),
             )
 
-    async def set_force_skip(self, game_id: str, value: bool) -> None:
-        async with self._tx() as db:
-            await db.execute(
-                "UPDATE games SET force_skip_pending=? WHERE id=?",
-                (int(value), game_id),
-            )
-
     async def set_deadline(self, game_id: str, deadline_epoch: int | None) -> None:
         async with self._tx() as db:
             await db.execute(
@@ -280,6 +292,96 @@ class SqliteRepo:
     async def delete_seat(self, game_id: str, seat_no: int) -> None:
         async with self._tx() as db:
             await db.execute("DELETE FROM seats WHERE game_id=? AND seat_no=?", (game_id, seat_no))
+
+    async def join_lobby(
+        self,
+        game_id: str,
+        *,
+        discord_user_id: str,
+        display_name: str,
+        expected_phase: Phase = Phase.LOBBY,
+    ) -> tuple[JoinLobbyResult, int | None]:
+        """Atomically seat a human in the lobby.
+
+        One transaction: (a) phase guard, (b) duplicate-join check,
+        (c) capacity check, (d) next-free seat_no selection, (e) INSERT.
+        Returns (result, seat_no); seat_no is None unless result is ACCEPTED.
+        Prevents stale `/wolf join` from corrupting a game that has already
+        transitioned out of LOBBY.
+        """
+        async with self._tx() as db:
+            async with db.execute(
+                "SELECT phase FROM games WHERE id=?", (game_id,)
+            ) as cur:
+                game_row = await cur.fetchone()
+            if game_row is None or game_row["phase"] != expected_phase.value:
+                return (JoinLobbyResult.STALE_PHASE, None)
+
+            async with db.execute(
+                "SELECT seat_no FROM seats WHERE game_id=? AND discord_user_id=?",
+                (game_id, discord_user_id),
+            ) as cur:
+                existing = await cur.fetchone()
+            if existing is not None:
+                return (JoinLobbyResult.ALREADY_JOINED, None)
+
+            async with db.execute(
+                "SELECT seat_no, is_llm FROM seats WHERE game_id=?", (game_id,)
+            ) as cur:
+                seat_rows = await cur.fetchall()
+            used = {int(r["seat_no"]) for r in seat_rows}
+            human_count = sum(1 for r in seat_rows if not bool(r["is_llm"]))
+            if human_count >= 9:
+                return (JoinLobbyResult.LOBBY_FULL, None)
+            free_slots = [i for i in range(1, 10) if i not in used]
+            if not free_slots:
+                return (JoinLobbyResult.NO_FREE_SEAT, None)
+            seat_no = free_slots[0]
+
+            await db.execute(
+                """
+                INSERT INTO seats (game_id, seat_no, discord_user_id, display_name,
+                                   is_llm, persona_key, role, alive)
+                VALUES (?, ?, ?, ?, 0, NULL, NULL, 1)
+                """,
+                (game_id, seat_no, discord_user_id, display_name),
+            )
+            return (JoinLobbyResult.ACCEPTED, seat_no)
+
+    async def leave_lobby(
+        self,
+        game_id: str,
+        *,
+        discord_user_id: str,
+        expected_phase: Phase = Phase.LOBBY,
+    ) -> LeaveLobbyResult:
+        """Atomically remove a human seat in the lobby.
+
+        One transaction: (a) phase guard, (b) locate the user's seat, (c) DELETE.
+        Prevents stale `/wolf leave` from removing a seat after LOBBY → SETUP.
+        """
+        async with self._tx() as db:
+            async with db.execute(
+                "SELECT phase FROM games WHERE id=?", (game_id,)
+            ) as cur:
+                game_row = await cur.fetchone()
+            if game_row is None or game_row["phase"] != expected_phase.value:
+                return LeaveLobbyResult.STALE_PHASE
+
+            async with db.execute(
+                "SELECT seat_no FROM seats WHERE game_id=? AND discord_user_id=?",
+                (game_id, discord_user_id),
+            ) as cur:
+                existing = await cur.fetchone()
+            if existing is None:
+                return LeaveLobbyResult.NOT_JOINED
+            seat_no = int(existing["seat_no"])
+
+            await db.execute(
+                "DELETE FROM seats WHERE game_id=? AND seat_no=?",
+                (game_id, seat_no),
+            )
+            return LeaveLobbyResult.ACCEPTED
 
     async def load_seats(self, game_id: str) -> list[Seat]:
         async with self._db.execute(
@@ -619,6 +721,8 @@ class SqliteRepo:
 
                 if transition.clear_force_skip:
                     await db.execute("UPDATE games SET force_skip_pending=0 WHERE id=?", (game_id,))
+                if transition.set_force_skip:
+                    await db.execute("UPDATE games SET force_skip_pending=1 WHERE id=?", (game_id,))
 
                 for upd in transition.player_updates:
                     await _apply_player_update(db, game_id, upd)

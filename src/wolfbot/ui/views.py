@@ -67,7 +67,7 @@ class VoteView(discord.ui.View):
         self._on_submit = on_submit
 
         options = [
-            discord.SelectOption(label=s.display_name, value=str(s.seat_no))
+            discord.SelectOption(label=f"席{s.seat_no} {s.display_name}", value=str(s.seat_no))
             for s in candidates
             if s.seat_no != voter_seat
         ][:25]
@@ -126,7 +126,8 @@ class NightActionView(discord.ui.View):
         }
         placeholder = placeholders.get(kind, "対象を選んでください")
         options = [
-            discord.SelectOption(label=s.display_name, value=str(s.seat_no)) for s in candidates
+            discord.SelectOption(label=f"席{s.seat_no} {s.display_name}", value=str(s.seat_no))
+            for s in candidates
         ][:25]
         self.select_target: discord.ui.Select[NightActionView] = discord.ui.Select(
             placeholder=placeholder, min_values=1, max_values=1, options=options

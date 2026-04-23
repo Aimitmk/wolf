@@ -31,7 +31,11 @@ from wolfbot.domain.errors import ActiveGameExistsError
 from wolfbot.domain.models import Game, PendingDecision, Player, Seat
 from wolfbot.domain.rules import legal_attack_targets, legal_divine_targets, legal_guard_targets
 from wolfbot.llm.personas import pick_personas
-from wolfbot.persistence.sqlite_repo import SqliteRepo
+from wolfbot.persistence.sqlite_repo import (
+    JoinLobbyResult,
+    LeaveLobbyResult,
+    SqliteRepo,
+)
 from wolfbot.services.game_service import GameService, new_game_id
 from wolfbot.services.llm_service import LLMAdapter
 from wolfbot.services.permission_manager import PermissionManager
@@ -417,34 +421,32 @@ class WolfCog(commands.Cog):
             await interaction.response.send_message("ギルド内で実行してください。", ephemeral=True)
             return
         game = await self.repo.load_active_game_for_guild(str(interaction.guild_id))
-        if game is None or game.phase is not Phase.LOBBY:
+        if game is None:
             await interaction.response.send_message(
                 "ロビー中のゲームがありません。", ephemeral=True
             )
             return
-        user_id = str(interaction.user.id)
-        existing_seat = await self.repo.seat_of_user(game.id, user_id)
-        if existing_seat is not None:
-            await interaction.response.send_message("既に参加しています。", ephemeral=True)
-            return
-        seats = await self.repo.load_seats(game.id)
-        human_seats = [s for s in seats if not s.is_llm]
-        if len(human_seats) >= 9:
+        # join_lobby atomically re-checks phase inside the transaction so a
+        # /wolf start that wins the race can't be silently corrupted by a
+        # stale insert here.
+        result, seat_no = await self.repo.join_lobby(
+            game.id,
+            discord_user_id=str(interaction.user.id),
+            display_name=interaction.user.display_name,
+        )
+        if result is JoinLobbyResult.ACCEPTED:
             await interaction.response.send_message(
-                "人数が 9 に達しているので参加できません。", ephemeral=True
+                f"✅ {interaction.user.display_name} が座席 {seat_no} に着席しました。"
             )
             return
-        next_seat_no = _next_seat_no(seats)
-        seat = Seat(
-            seat_no=next_seat_no,
-            display_name=interaction.user.display_name,
-            discord_user_id=user_id,
-            is_llm=False,
-            persona_key=None,
-        )
-        await self.repo.insert_seat(game.id, seat)
+        messages: dict[JoinLobbyResult, str] = {
+            JoinLobbyResult.STALE_PHASE: "ロビーは既に閉じています。",
+            JoinLobbyResult.ALREADY_JOINED: "既に参加しています。",
+            JoinLobbyResult.LOBBY_FULL: "人数が 9 に達しているので参加できません。",
+            JoinLobbyResult.NO_FREE_SEAT: "空き席がありません。",
+        }
         await interaction.response.send_message(
-            f"✅ {interaction.user.display_name} が座席 {next_seat_no} に着席しました。"
+            messages.get(result, "参加できませんでした。"), ephemeral=True
         )
 
     # --------------------------------------------------------------- /wolf leave
@@ -454,19 +456,26 @@ class WolfCog(commands.Cog):
             await interaction.response.send_message("ギルド内で実行してください。", ephemeral=True)
             return
         game = await self.repo.load_active_game_for_guild(str(interaction.guild_id))
-        if game is None or game.phase is not Phase.LOBBY:
+        if game is None:
             await interaction.response.send_message(
                 "ロビー中のゲームがありません。", ephemeral=True
             )
             return
-        user_id = str(interaction.user.id)
-        seat_no = await self.repo.seat_of_user(game.id, user_id)
-        if seat_no is None:
-            await interaction.response.send_message("参加していません。", ephemeral=True)
+        result = await self.repo.leave_lobby(
+            game.id,
+            discord_user_id=str(interaction.user.id),
+        )
+        if result is LeaveLobbyResult.ACCEPTED:
+            await interaction.response.send_message(
+                f"👋 {interaction.user.display_name} が退出しました。"
+            )
             return
-        await self.repo.delete_seat(game.id, seat_no)
+        messages: dict[LeaveLobbyResult, str] = {
+            LeaveLobbyResult.STALE_PHASE: "ロビーは既に閉じています。",
+            LeaveLobbyResult.NOT_JOINED: "参加していません。",
+        }
         await interaction.response.send_message(
-            f"👋 {interaction.user.display_name} が退出しました。"
+            messages.get(result, "退出できませんでした。"), ephemeral=True
         )
 
     # ---------------------------------------------------------------- /wolf start
@@ -684,13 +693,5 @@ class WolfCog(commands.Cog):
         except discord.DiscordException:
             log.exception("create_private_channel failed name=%s", name)
             return None
-
-
-def _next_seat_no(existing: Sequence[Seat]) -> int:
-    used = {s.seat_no for s in existing}
-    for i in range(1, 10):
-        if i not in used:
-            return i
-    return 9
 
 
