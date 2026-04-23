@@ -938,9 +938,7 @@ async def test_apply_transition_commits_set_force_skip_on_match(
         new_deadline_epoch=9999,
         set_force_skip=True,
     )
-    ok = await repo.apply_transition(
-        game.id, t, expected_phase=Phase.WAITING_HOST_DECISION
-    )
+    ok = await repo.apply_transition(game.id, t, expected_phase=Phase.WAITING_HOST_DECISION)
     assert ok is True
 
     loaded = await repo.load_game(game.id)
@@ -977,9 +975,7 @@ async def test_apply_transition_rolls_back_set_force_skip_on_phase_mismatch(
         new_deadline_epoch=9999,
         set_force_skip=True,
     )
-    ok = await repo.apply_transition(
-        game.id, t, expected_phase=Phase.WAITING_HOST_DECISION
-    )
+    ok = await repo.apply_transition(game.id, t, expected_phase=Phase.WAITING_HOST_DECISION)
     assert ok is False
 
     loaded = await repo.load_game(game.id)
@@ -987,3 +983,107 @@ async def test_apply_transition_rolls_back_set_force_skip_on_phase_mismatch(
     assert loaded.phase is Phase.DAY_VOTE
     assert loaded.deadline_epoch == 5555  # unchanged
     assert loaded.force_skip_pending is False  # critical: no residual flag
+
+
+async def test_resend_pending_dms_dispatches_llm_votes_for_missing_llm_seats(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Fix 1: on /wolf extend, resend_pending_dms re-dispatches LLM votes for
+    the still-pending LLM seats — not humans, not LLMs that already voted."""
+    service, _, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    # Humans 1-3 and LLM 7 voted; LLMs 6, 8, 9 did not.
+    for voter in (1, 2, 3, 7):
+        await service.submit_vote(game.id, voter, target_seat=4, round_=0, day=1)
+
+    # Clear prior FakeLLMAdapter calls from the initial _dispatch_submissions.
+    llm.calls.clear()
+
+    await service.resend_pending_dms(game.id)
+
+    # Exactly one LLM vote re-dispatch, for the three missing LLM seats only.
+    vote_calls = [c for c in llm.calls if c.name == "submit_llm_votes"]
+    assert len(vote_calls) == 1
+    call = vote_calls[0]
+    assert call.kwargs["restrict_to_seats"] == [6, 8, 9]
+    assert call.kwargs["round_"] == 0
+
+
+async def test_resend_pending_dms_dispatches_llm_night_with_unresolved(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Fix 1 + split-wolf: when NIGHT has missing submissions + a wolf split,
+    the resend passes restrict_to_seats (union) AND unresolved_seats (so the
+    in-loop guard re-asks the split wolves)."""
+    from wolfbot.domain.models import NightAction as NightActionModel
+
+    service, _, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    # Everyone including seat 1 must vote. Seat 1 votes seat 2; 2..9 vote seat 1
+    # → seat 1 executed, game advances to NIGHT.
+    await service.submit_vote(game.id, 1, target_seat=2, round_=0, day=1)
+    for voter in range(2, 10):
+        await service.submit_vote(game.id, voter, target_seat=1, round_=0, day=1)
+    await service.advance(game.id)  # -> NIGHT
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None and loaded.phase is Phase.NIGHT
+
+    # Identify wolves and a non-wolf alive target.
+    players = await repo.load_players(game.id)
+    wolves = sorted(p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF)
+    assert len(wolves) == 2
+    non_wolf_target = next(p.seat_no for p in players if p.alive and p.role is not Role.WEREWOLF)
+    other_target = next(
+        p.seat_no
+        for p in players
+        if p.alive and p.role is not Role.WEREWOLF and p.seat_no != non_wolf_target
+    )
+    # Wolves pick different targets → split.
+    await repo.insert_night_action(
+        NightActionModel(
+            game_id=game.id,
+            day=loaded.day_number,
+            actor_seat=wolves[0],
+            kind=SubmissionType.WOLF_ATTACK,
+            target_seat=non_wolf_target,
+            submitted_at=0,
+        )
+    )
+    await repo.insert_night_action(
+        NightActionModel(
+            game_id=game.id,
+            day=loaded.day_number,
+            actor_seat=wolves[1],
+            kind=SubmissionType.WOLF_ATTACK,
+            target_seat=other_target,
+            submitted_at=0,
+        )
+    )
+
+    llm.calls.clear()
+    await service.resend_pending_dms(game.id)
+
+    night_calls = [c for c in llm.calls if c.name == "submit_llm_night_actions"]
+    assert len(night_calls) == 1
+    call = night_calls[0]
+    # Both wolves should be in both restrict_to_seats and unresolved_seats (all
+    # alive wolves are LLMs by the _nine_seats fixture since wolves are picked
+    # from the shuffled role distribution — they may include humans. Filter to
+    # seats that are actually LLM + wolf.)
+    seats_loaded = await repo.load_seats(game.id)
+    llm_wolves = sorted(s.seat_no for s in seats_loaded if s.is_llm and s.seat_no in wolves)
+    # The resend must cover exactly the LLM subset of the split wolves.
+    assert call.kwargs["restrict_to_seats"] == llm_wolves
+    assert call.kwargs["unresolved_seats"] == llm_wolves

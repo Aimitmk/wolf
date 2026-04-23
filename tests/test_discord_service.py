@@ -149,3 +149,177 @@ async def test_send_night_action_dms_seer_with_filtered_actors_uses_full_alive(
     option_seats = {int(opt.value) for opt in view.select_target.options}
     # Divine = alive ∧ not self → seats {1,2,3,5,6,7,8,9}
     assert option_seats == {1, 2, 3, 5, 6, 7, 8, 9}
+
+
+class _ChannelCapturingAdapter(DiscordBotAdapter):
+    """DiscordBotAdapter with bot.get_channel wired to two mock channels.
+
+    Captures text sent to the main-text channel vs. the wolves channel so we
+    can assert that announce_waiting censors wolf identities on the public
+    side while still relaying them to the wolves-only channel.
+    """
+
+    MAIN_ID = "ch-main"
+    WOLVES_ID = "ch-wolves"
+
+    def __init__(self, repo: SqliteRepo) -> None:
+        self.bot = MagicMock()
+        self.repo = repo
+        self.settings = MagicMock()
+        self.perms = MagicMock()
+        self._gs_slot = {"gs": MagicMock()}
+        self.main_sent: list[str] = []
+        self.wolves_sent: list[str] = []
+
+        test_self = self
+
+        class _MainChannel:
+            async def send(self, text: str) -> None:
+                test_self.main_sent.append(text)
+
+        class _WolvesChannel:
+            async def send(self, text: str) -> None:
+                test_self.wolves_sent.append(text)
+
+        main = _MainChannel()
+        wolves = _WolvesChannel()
+
+        # discord.py isinstance check uses discord.TextChannel; patch the
+        # wolf_service module-level reference to our duck-typed objects.
+        import wolfbot.services.discord_service as mod
+
+        test_self._main_obj = main  # type: ignore[attr-defined]
+        test_self._wolves_obj = wolves  # type: ignore[attr-defined]
+
+        def _get_channel(cid: int) -> object:
+            if cid == int(_ChannelCapturingAdapter.MAIN_ID.replace("ch-main", "1")):
+                return main
+            if cid == int(_ChannelCapturingAdapter.WOLVES_ID.replace("ch-wolves", "2")):
+                return wolves
+            return None
+
+        self.bot.get_channel = _get_channel
+
+        # Bypass the isinstance(TextChannel) guard by monkey-patching the
+        # adapter helpers on this instance.
+        self._main_text = lambda game: main  # type: ignore[assignment]
+        self._wolves_channel = lambda game: wolves  # type: ignore[assignment]
+        # Silence unused-import warning for `mod`
+        _ = mod
+
+
+async def test_announce_waiting_censors_wolf_attack_names_on_main_channel(
+    repo: SqliteRepo,
+) -> None:
+    """Fix 3 regression: WOLF_ATTACK split seat names MUST NOT appear in the
+    main public channel; they must go to the wolves-only channel instead.
+
+    Background: the old code posted
+        `WOLF_ATTACK 再提出待ち(意見が割れました): Alice、Bob`
+    directly to the main text channel, revealing both wolves to villagers.
+    """
+    from wolfbot.domain.models import PendingDecision, PendingSubmission
+
+    game = Game(
+        id="g-ann",
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.WAITING_HOST_DECISION,
+        day_number=1,
+        main_text_channel_id="1",
+        main_vc_channel_id="vc",
+        heaven_channel_id="h",
+        wolves_channel_id="2",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = _seats_human_wolves(wolf_seats={1, 2})
+    # Rename seats 1 and 2 so we can grep the output for those names.
+    seats[0] = Seat(
+        seat_no=1, display_name="Alice", discord_user_id="1001", is_llm=False, persona_key=None
+    )
+    seats[1] = Seat(
+        seat_no=2, display_name="Bob", discord_user_id="1002", is_llm=False, persona_key=None
+    )
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+
+    pending = PendingDecision(
+        game_id=game.id,
+        phase=Phase.NIGHT,
+        day=1,
+        required_submission=SubmissionType.WOLF_ATTACK,
+        missing_seats=(1, 2),
+        submissions=(
+            PendingSubmission(
+                submission_type=SubmissionType.WOLF_ATTACK,
+                missing_seats=(),
+                unresolved_seats=(1, 2),
+            ),
+        ),
+        created_at=0,
+    )
+
+    adapter = _ChannelCapturingAdapter(repo)
+    await adapter.announce_waiting(game, pending, seats)
+
+    # Public channel got the count-only version.
+    assert len(adapter.main_sent) == 1
+    main_text = adapter.main_sent[0]
+    assert "2件" in main_text
+    assert "Alice" not in main_text
+    assert "Bob" not in main_text
+
+    # Wolves channel got the name-inclusive version.
+    assert len(adapter.wolves_sent) == 1
+    wolves_text = adapter.wolves_sent[0]
+    assert "Alice" in wolves_text and "Bob" in wolves_text
+
+
+async def test_announce_waiting_vote_pending_retains_names(repo: SqliteRepo) -> None:
+    """Fix 3 non-regression: DAY_VOTE pending lists still include seat names
+    (who's voting is public info). No wolves-channel post."""
+    from wolfbot.domain.models import PendingDecision, PendingSubmission
+
+    game = Game(
+        id="g-ann-v",
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.WAITING_HOST_DECISION,
+        day_number=1,
+        main_text_channel_id="1",
+        main_vc_channel_id="vc",
+        heaven_channel_id="h",
+        wolves_channel_id="2",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = _seats_human_wolves(wolf_seats=set())
+    seats[0] = Seat(
+        seat_no=1, display_name="Alice", discord_user_id="1001", is_llm=False, persona_key=None
+    )
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+
+    pending = PendingDecision(
+        game_id=game.id,
+        phase=Phase.DAY_VOTE,
+        day=1,
+        required_submission=SubmissionType.VOTE,
+        missing_seats=(1,),
+        submissions=(
+            PendingSubmission(
+                submission_type=SubmissionType.VOTE,
+                missing_seats=(1,),
+            ),
+        ),
+        created_at=0,
+    )
+
+    adapter = _ChannelCapturingAdapter(repo)
+    await adapter.announce_waiting(game, pending, seats)
+
+    assert len(adapter.main_sent) == 1
+    assert "Alice" in adapter.main_sent[0]
+    # No wolves-channel post for pure vote-pending state.
+    assert adapter.wolves_sent == []

@@ -55,6 +55,9 @@ class FakeDiscordAdapter:
     async def post_morning(self, game: Game, text: str) -> None:
         self._record("post_morning", game_id=game.id, text=text)
 
+    async def post_wolves_chat(self, game: Game, text: str, kind: str) -> None:
+        self._record("post_wolves_chat", game_id=game.id, text=text, kind=kind)
+
     async def send_private(self, game: Game, audience_seat: int, text: str, kind: str) -> None:
         self._record(
             "send_private",
@@ -122,12 +125,24 @@ class FakeLLMAdapter:
     calls: list[Recorded] = field(default_factory=list)
 
     async def submit_llm_night_actions(
-        self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        restrict_to_seats: frozenset[int] | None = None,
+        unresolved_seats: frozenset[int] = frozenset(),
     ) -> None:
         self.calls.append(
             Recorded(
                 "submit_llm_night_actions",
-                {"game_id": game.id, "players": [p.seat_no for p in players]},
+                {
+                    "game_id": game.id,
+                    "players": [p.seat_no for p in players],
+                    "restrict_to_seats": (
+                        sorted(restrict_to_seats) if restrict_to_seats is not None else None
+                    ),
+                    "unresolved_seats": sorted(unresolved_seats),
+                },
             )
         )
 
@@ -138,6 +153,7 @@ class FakeLLMAdapter:
         seats: Sequence[Seat],
         candidates: Sequence[int] | None,
         round_: int,
+        restrict_to_seats: frozenset[int] | None = None,
     ) -> None:
         self.calls.append(
             Recorded(
@@ -147,6 +163,9 @@ class FakeLLMAdapter:
                     "voters": [p.seat_no for p in players],
                     "candidates": list(candidates) if candidates else None,
                     "round_": round_,
+                    "restrict_to_seats": (
+                        sorted(restrict_to_seats) if restrict_to_seats is not None else None
+                    ),
                 },
             )
         )

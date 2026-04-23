@@ -310,9 +310,7 @@ class SqliteRepo:
         transitioned out of LOBBY.
         """
         async with self._tx() as db:
-            async with db.execute(
-                "SELECT phase FROM games WHERE id=?", (game_id,)
-            ) as cur:
+            async with db.execute("SELECT phase FROM games WHERE id=?", (game_id,)) as cur:
                 game_row = await cur.fetchone()
             if game_row is None or game_row["phase"] != expected_phase.value:
                 return (JoinLobbyResult.STALE_PHASE, None)
@@ -361,9 +359,7 @@ class SqliteRepo:
         Prevents stale `/wolf leave` from removing a seat after LOBBY → SETUP.
         """
         async with self._tx() as db:
-            async with db.execute(
-                "SELECT phase FROM games WHERE id=?", (game_id,)
-            ) as cur:
+            async with db.execute("SELECT phase FROM games WHERE id=?", (game_id,)) as cur:
                 game_row = await cur.fetchone()
             if game_row is None or game_row["phase"] != expected_phase.value:
                 return LeaveLobbyResult.STALE_PHASE
@@ -809,8 +805,7 @@ class SqliteRepo:
                 free_slots = [i for i in range(1, 10) if i not in used]
                 if len(llm_seats) > len(free_slots):
                     raise ValueError(
-                        f"not enough free seats: need {len(llm_seats)}, "
-                        f"have {len(free_slots)}"
+                        f"not enough free seats: need {len(llm_seats)}, have {len(free_slots)}"
                     )
 
                 for (display_name, persona_key), seat_no in zip(

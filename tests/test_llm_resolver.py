@@ -52,8 +52,10 @@ def test_resolve_target_prefers_seat_token_over_display_name() -> None:
 def test_resolve_target_falls_back_to_unique_display_name() -> None:
     """Backwards compatibility: bare-name responses still work when unambiguous."""
     adapter = _llm_adapter()
-    candidates = [_alice(3), Seat(seat_no=5, display_name="Bob", discord_user_id="u5",
-                                  is_llm=False, persona_key=None)]
+    candidates = [
+        _alice(3),
+        Seat(seat_no=5, display_name="Bob", discord_user_id="u5", is_llm=False, persona_key=None),
+    ]
 
     assert adapter._resolve_target("Bob", candidates, allow_none=False) == 5
 

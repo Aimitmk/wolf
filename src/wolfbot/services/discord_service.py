@@ -28,7 +28,7 @@ from wolfbot.domain.enums import (
     SubmissionType,
 )
 from wolfbot.domain.errors import ActiveGameExistsError
-from wolfbot.domain.models import Game, PendingDecision, Player, Seat
+from wolfbot.domain.models import Game, LogEntry, PendingDecision, Player, Seat
 from wolfbot.domain.rules import legal_attack_targets, legal_divine_targets, legal_guard_targets
 from wolfbot.llm.personas import pick_personas
 from wolfbot.persistence.sqlite_repo import (
@@ -45,26 +45,43 @@ from wolfbot.ui.views import NightActionView, VoteView
 log = logging.getLogger(__name__)
 
 
+# Role-identifying submission kinds — listing seat names for these in the public
+# channel would reveal role assignments (a seat owing WOLF_ATTACK *is* a wolf;
+# the unique seer/knight seat is trivially derived from "SEER_DIVINE 未提出: X").
+ROLE_IDENTIFYING_KINDS: frozenset[SubmissionType] = frozenset(
+    {SubmissionType.WOLF_ATTACK, SubmissionType.SEER_DIVINE, SubmissionType.KNIGHT_GUARD}
+)
+
+
 def render_pending_host_lines(
     pending: PendingDecision,
     seat_name: dict[int, str],
 ) -> list[str]:
     """Per-submission lines for the /wolf status ホスト待ち field.
 
-    Mirrors announce_waiting: shows missing_seats and unresolved_seats on
-    separate lines so split wolf attacks don't hide behind an empty missing
-    list.
+    For role-identifying kinds (WOLF_ATTACK/SEER_DIVINE/KNIGHT_GUARD) we emit
+    the count only — naming seats here leaks roles to every viewer of /wolf
+    status. For VOTE/RUNOFF_VOTE names stay (who's voting is public info).
+    Mirrors announce_waiting's censoring so the two views stay consistent.
     """
     lines: list[str] = []
     for sub in pending.effective_submissions():
+        is_role_id = sub.submission_type in ROLE_IDENTIFYING_KINDS
         if sub.missing_seats:
-            names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
-            lines.append(f"`{sub.submission_type.value}` 未提出: {names}")
+            if is_role_id:
+                lines.append(f"`{sub.submission_type.value}` 未提出: {len(sub.missing_seats)}件")
+            else:
+                names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
+                lines.append(f"`{sub.submission_type.value}` 未提出: {names}")
         if sub.unresolved_seats:
-            names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.unresolved_seats)
-            lines.append(
-                f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): {names}"
-            )
+            if is_role_id:
+                lines.append(
+                    f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
+                    f"{len(sub.unresolved_seats)}件"
+                )
+            else:
+                names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.unresolved_seats)
+                lines.append(f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): {names}")
     return lines
 
 
@@ -132,6 +149,15 @@ class DiscordBotAdapter:
             await channel.send(f"☀️ {text}")
         except discord.DiscordException:
             log.exception("post_morning failed %s", game.id)
+
+    async def post_wolves_chat(self, game: Game, text: str, kind: str) -> None:
+        channel = self._wolves_channel(game)
+        if channel is None:
+            return
+        try:
+            await channel.send(text)
+        except discord.DiscordException:
+            log.exception("post_wolves_chat failed %s", game.id)
 
     async def send_private(self, game: Game, audience_seat: int, text: str, kind: str) -> None:
         seat = await self._seat(game.id, audience_seat)
@@ -250,36 +276,76 @@ class DiscordBotAdapter:
         self, game: Game, pending: PendingDecision, seats: Sequence[Seat]
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
-        lines = [
+        public_lines = [
             "⏸ **ホスト待ち**",
             f"フェイズ: `{pending.phase.value}` (day {pending.day})",
         ]
+        wolves_lines: list[str] = []
         for sub in pending.effective_submissions():
+            is_role_id = sub.submission_type in ROLE_IDENTIFYING_KINDS
             if sub.missing_seats:
-                names = [
-                    seats_by_no[sn].display_name for sn in sub.missing_seats if sn in seats_by_no
-                ]
-                lines.append(
-                    f"`{sub.submission_type.value}` 未提出: {'、'.join(names) or '(なし)'}"
-                )
+                if is_role_id:
+                    public_lines.append(
+                        f"`{sub.submission_type.value}` 未提出: {len(sub.missing_seats)}件"
+                    )
+                else:
+                    names = [
+                        seats_by_no[sn].display_name
+                        for sn in sub.missing_seats
+                        if sn in seats_by_no
+                    ]
+                    public_lines.append(
+                        f"`{sub.submission_type.value}` 未提出: {'、'.join(names) or '(なし)'}"
+                    )
             if sub.unresolved_seats:
-                names = [
-                    seats_by_no[sn].display_name for sn in sub.unresolved_seats if sn in seats_by_no
-                ]
-                lines.append(
-                    f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
-                    f"{'、'.join(names) or '(なし)'}"
-                )
-        lines.append(
+                if is_role_id:
+                    public_lines.append(
+                        f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
+                        f"{len(sub.unresolved_seats)}件"
+                    )
+                else:
+                    names = [
+                        seats_by_no[sn].display_name
+                        for sn in sub.unresolved_seats
+                        if sn in seats_by_no
+                    ]
+                    public_lines.append(
+                        f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
+                        f"{'、'.join(names) or '(なし)'}"
+                    )
+            # Also relay WOLF_ATTACK details to the wolves-only channel — wolves
+            # need names to coordinate, but villagers watching main text must not
+            # see them.
+            if sub.submission_type is SubmissionType.WOLF_ATTACK:
+                if sub.missing_seats:
+                    names = [
+                        seats_by_no[sn].display_name
+                        for sn in sub.missing_seats
+                        if sn in seats_by_no
+                    ]
+                    wolves_lines.append(f"`WOLF_ATTACK` 未提出: {'、'.join(names)}")
+                if sub.unresolved_seats:
+                    names = [
+                        seats_by_no[sn].display_name
+                        for sn in sub.unresolved_seats
+                        if sn in seats_by_no
+                    ]
+                    wolves_lines.append(
+                        f"`WOLF_ATTACK` 再提出待ち(意見が割れました): {'、'.join(names)}"
+                    )
+        public_lines.append(
             "`/wolf extend <秒>` で延長、または `/wolf force-skip` で未提出を確定処理します。"
         )
-        text = "\n".join(lines)
+        text = "\n".join(public_lines)
         channel = self._main_text(game)
         if channel is not None:
             try:
                 await channel.send(text)
             except discord.DiscordException:
                 log.exception("announce_waiting failed %s", game.id)
+        if wolves_lines:
+            wolves_text = "\n".join(["⏸ **ホスト待ち** (人狼向け)", *wolves_lines])
+            await self.post_wolves_chat(game, wolves_text, kind="HOST_WAIT_WOLVES")
 
     async def announce_recovery(self, game: Game, pending: PendingDecision | None) -> None:
         channel = self._main_text(game)
@@ -298,6 +364,14 @@ class DiscordBotAdapter:
     # ------------------------------------------------------ helpers
     def _main_text(self, game: Game) -> discord.TextChannel | None:
         channel = self.bot.get_channel(int(game.main_text_channel_id))
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        return None
+
+    def _wolves_channel(self, game: Game) -> discord.TextChannel | None:
+        if game.wolves_channel_id is None:
+            return None
+        channel = self.bot.get_channel(int(game.wolves_channel_id))
         if isinstance(channel, discord.TextChannel):
             return channel
         return None
@@ -351,26 +425,80 @@ class WolfCog(commands.Cog):
             return
         if message.guild is None:
             return
+        if not message.content.strip():
+            return
         game = await self.repo.load_active_game_for_guild(str(message.guild.id))
         if game is None:
             return
-        if str(message.channel.id) != game.main_text_channel_id:
-            return
-        if game.phase is not Phase.DAY_DISCUSSION:
+        channel_id = str(message.channel.id)
+        is_main = channel_id == game.main_text_channel_id
+        is_wolves = game.wolves_channel_id is not None and channel_id == game.wolves_channel_id
+        if not (is_main or is_wolves):
             return
         author_seat = await self.repo.seat_of_user(game.id, str(message.author.id))
         players = await self.repo.load_players(game.id)
         seats = await self.repo.load_seats(game.id)
-        try:
-            await self.llm_adapter.maybe_react_to_message(
-                game,
-                players,
-                seats,
-                author_seat=author_seat,
-                text=message.content,
-            )
-        except Exception:
-            log.exception("llm_adapter reaction failed for %s", game.id)
+
+        if is_main and game.phase is Phase.DAY_DISCUSSION:
+            if author_seat is not None:
+                try:
+                    await self.repo.insert_log_public(
+                        LogEntry(
+                            game_id=game.id,
+                            day=game.day_number,
+                            phase=game.phase,
+                            kind="PLAYER_SPEECH",
+                            actor_seat=author_seat,
+                            visibility="PUBLIC",
+                            text=message.content,
+                            created_at=int(time.time()),
+                        )
+                    )
+                except Exception:
+                    log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
+            try:
+                await self.llm_adapter.maybe_react_to_message(
+                    game,
+                    players,
+                    seats,
+                    author_seat=author_seat,
+                    text=message.content,
+                )
+            except Exception:
+                log.exception("llm_adapter reaction failed for %s", game.id)
+            return
+
+        if is_wolves and game.phase is Phase.NIGHT and author_seat is not None:
+            # Author must be a living wolf — otherwise discard (defence-in-depth;
+            # Discord permissions already enforce this).
+            author_player = next((p for p in players if p.seat_no == author_seat), None)
+            if author_player is None or not author_player.alive:
+                return
+            if author_player.role is not Role.WEREWOLF:
+                return
+            alive_wolves = [p for p in players if p.alive and p.role is Role.WEREWOLF]
+            now_ts = int(time.time())
+            for wolf in alive_wolves:
+                try:
+                    await self.repo.insert_log_private(
+                        LogEntry(
+                            game_id=game.id,
+                            day=game.day_number,
+                            phase=game.phase,
+                            kind="WOLF_CHAT",
+                            actor_seat=author_seat,
+                            audience_seat=wolf.seat_no,
+                            visibility="PRIVATE",
+                            text=message.content,
+                            created_at=now_ts,
+                        )
+                    )
+                except Exception:
+                    log.exception(
+                        "WOLF_CHAT log insert failed for %s audience %s",
+                        game.id,
+                        wolf.seat_no,
+                    )
 
     # -------------------------------------------------------------- /wolf create
     @wolf.command(name="create", description="新しい 9 人村を作成")
@@ -715,5 +843,3 @@ class WolfCog(commands.Cog):
         except discord.DiscordException:
             log.exception("create_private_channel failed name=%s", name)
             return None
-
-

@@ -59,9 +59,7 @@ async def test_backfill_seven_humans_adds_two_llms_at_seats_eight_and_nine(
     game_id = await _seed_game_with_humans(repo, 7)
     specs = _picks_as_specs(2, seed=42)
 
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=specs
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
 
     seats = await repo.load_seats(game_id)
@@ -75,9 +73,7 @@ async def test_backfill_one_human_fills_eight_llms(repo: SqliteRepo) -> None:
     game_id = await _seed_game_with_humans(repo, 1)
     specs = _picks_as_specs(8, seed=0)
 
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=specs
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
 
     seats = await repo.load_seats(game_id)
@@ -92,9 +88,7 @@ async def test_backfill_zero_humans_fills_all_nine(repo: SqliteRepo) -> None:
     game_id = await _seed_game_with_humans(repo, 0)
     specs = _picks_as_specs(9, seed=1)
 
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=specs
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
 
     seats = await repo.load_seats(game_id)
@@ -107,9 +101,7 @@ async def test_backfill_no_shortfall_is_noop_on_seats_but_still_transitions(
 ) -> None:
     game_id = await _seed_game_with_humans(repo, 9)
 
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=[]
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=[])
     assert ok is True
 
     seats = await repo.load_seats(game_id)
@@ -124,9 +116,7 @@ async def test_backfill_persona_assignments_are_persisted(repo: SqliteRepo) -> N
     game_id = await _seed_game_with_humans(repo, 6)
     specs = _picks_as_specs(3, seed=123)
 
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=specs
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
 
     seats = await repo.load_seats(game_id)
@@ -144,9 +134,7 @@ async def test_backfill_transitions_phase_to_setup(repo: SqliteRepo) -> None:
     game = await repo.load_game(game_id)
     assert game is not None and game.phase is Phase.LOBBY
 
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=specs
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
 
     game = await repo.load_game(game_id)
@@ -192,12 +180,8 @@ async def test_backfill_concurrent_calls_only_winner_writes(
     specs_b = _picks_as_specs(4, seed=202)
 
     results = await asyncio.gather(
-        repo.claim_start_and_backfill(
-            game_id, expected_phase=Phase.LOBBY, llm_seats=specs_a
-        ),
-        repo.claim_start_and_backfill(
-            game_id, expected_phase=Phase.LOBBY, llm_seats=specs_b
-        ),
+        repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs_a),
+        repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs_b),
     )
     assert sorted(results) == [False, True]
 

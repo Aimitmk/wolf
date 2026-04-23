@@ -12,9 +12,7 @@ from wolfbot.domain.models import PendingDecision, PendingSubmission
 from wolfbot.services.discord_service import render_pending_host_lines
 
 
-def _pending(
-    *, phase: Phase, subs: tuple[PendingSubmission, ...]
-) -> PendingDecision:
+def _pending(*, phase: Phase, subs: tuple[PendingSubmission, ...]) -> PendingDecision:
     return PendingDecision(
         game_id="g",
         phase=phase,
@@ -27,7 +25,11 @@ def _pending(
 
 
 def test_render_unresolved_wolf_split_is_visible() -> None:
-    """2 狼襲撃割れ: missing=(), unresolved=(1,2) → 「再提出待ち」行が出る。"""
+    """2 狼襲撃割れ: missing=(), unresolved=(1,2) → 件数のみ (名前は隠蔽)。
+
+    WOLF_ATTACK は役職特定情報 — /wolf status は村人も見るので、
+    狼の座席名を出すと正体が漏れる。件数だけ出す。
+    """
     seat_name = {1: "Alice", 2: "Bob", 3: "Carol"}
     pending = _pending(
         phase=Phase.NIGHT,
@@ -43,8 +45,10 @@ def test_render_unresolved_wolf_split_is_visible() -> None:
     lines = render_pending_host_lines(pending, seat_name)
 
     assert lines == [
-        "`WOLF_ATTACK` 再提出待ち(意見が割れました): Alice、Bob",
+        "`WOLF_ATTACK` 再提出待ち(意見が割れました): 2件",
     ]
+    for name in ("Alice", "Bob"):
+        assert name not in "\n".join(lines)
 
 
 def test_render_missing_only() -> None:
@@ -66,7 +70,11 @@ def test_render_missing_only() -> None:
 
 
 def test_render_missing_and_unresolved_both_appear() -> None:
-    """Night with seer missing and wolves split: both buckets surface."""
+    """Night with seer missing and wolves split: both buckets surface as counts.
+
+    Both WOLF_ATTACK and SEER_DIVINE are role-identifying — listing Alice/Bob
+    would reveal the wolves; listing Dave would reveal the seer. Counts only.
+    """
     seat_name = {1: "Alice", 2: "Bob", 4: "Dave"}
     pending = _pending(
         phase=Phase.NIGHT,
@@ -87,8 +95,8 @@ def test_render_missing_and_unresolved_both_appear() -> None:
     lines = render_pending_host_lines(pending, seat_name)
 
     assert lines == [
-        "`WOLF_ATTACK` 再提出待ち(意見が割れました): Alice、Bob",
-        "`SEER_DIVINE` 未提出: Dave",
+        "`WOLF_ATTACK` 再提出待ち(意見が割れました): 2件",
+        "`SEER_DIVINE` 未提出: 1件",
     ]
 
 
@@ -98,18 +106,18 @@ def test_render_empty_when_nothing_pending() -> None:
 
 
 def test_render_falls_back_to_seat_number_for_unknown_seats() -> None:
-    """If seat_name is missing an entry, render the seat_no as string."""
+    """For non-role-identifying kinds, missing seat_name falls back to seat_no."""
     pending = _pending(
-        phase=Phase.NIGHT,
+        phase=Phase.DAY_VOTE,
         subs=(
             PendingSubmission(
-                submission_type=SubmissionType.WOLF_ATTACK,
-                missing_seats=(),
-                unresolved_seats=(1, 2),
+                submission_type=SubmissionType.VOTE,
+                missing_seats=(1, 2),
+                unresolved_seats=(),
             ),
         ),
     )
 
     lines = render_pending_host_lines(pending, {1: "Alice"})
 
-    assert lines == ["`WOLF_ATTACK` 再提出待ち(意見が割れました): Alice、2"]
+    assert lines == ["`VOTE` 未提出: Alice、2"]

@@ -54,9 +54,7 @@ async def _seed_lobby_with_humans(repo: SqliteRepo, human_count: int) -> str:
 async def test_join_lobby_accepts_fresh_user(repo: SqliteRepo) -> None:
     game_id = await _seed_empty_lobby(repo)
 
-    result, seat_no = await repo.join_lobby(
-        game_id, discord_user_id="u1", display_name="Alice"
-    )
+    result, seat_no = await repo.join_lobby(game_id, discord_user_id="u1", display_name="Alice")
 
     assert result is JoinLobbyResult.ACCEPTED
     assert seat_no == 1
@@ -70,9 +68,7 @@ async def test_join_lobby_fills_lowest_free_seat(repo: SqliteRepo) -> None:
     # Punch a hole at seat 1.
     await repo.delete_seat(game_id, 1)
 
-    result, seat_no = await repo.join_lobby(
-        game_id, discord_user_id="u_new", display_name="Alice"
-    )
+    result, seat_no = await repo.join_lobby(game_id, discord_user_id="u_new", display_name="Alice")
 
     assert result is JoinLobbyResult.ACCEPTED
     assert seat_no == 1
@@ -81,9 +77,7 @@ async def test_join_lobby_fills_lowest_free_seat(repo: SqliteRepo) -> None:
 async def test_join_lobby_rejects_duplicate_user(repo: SqliteRepo) -> None:
     game_id = await _seed_lobby_with_humans(repo, 1)
 
-    result, seat_no = await repo.join_lobby(
-        game_id, discord_user_id="u1", display_name="Alice"
-    )
+    result, seat_no = await repo.join_lobby(game_id, discord_user_id="u1", display_name="Alice")
 
     assert result is JoinLobbyResult.ALREADY_JOINED
     assert seat_no is None
@@ -95,9 +89,7 @@ async def test_join_lobby_rejects_duplicate_user(repo: SqliteRepo) -> None:
 async def test_join_lobby_rejects_when_9_humans_present(repo: SqliteRepo) -> None:
     game_id = await _seed_lobby_with_humans(repo, 9)
 
-    result, seat_no = await repo.join_lobby(
-        game_id, discord_user_id="u_new", display_name="Alice"
-    )
+    result, seat_no = await repo.join_lobby(game_id, discord_user_id="u_new", display_name="Alice")
 
     assert result is JoinLobbyResult.LOBBY_FULL
     assert seat_no is None
@@ -107,14 +99,10 @@ async def test_join_lobby_rejects_stale_phase_after_start(repo: SqliteRepo) -> N
     """Repro for the Codex v2 High finding: stale /wolf join after /wolf start."""
     game_id = await _seed_lobby_with_humans(repo, 8)
     specs = [(p.display_name, p.key) for p in pick_personas(1, random.Random(0))]
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=specs
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
 
-    result, seat_no = await repo.join_lobby(
-        game_id, discord_user_id="u_late", display_name="Late"
-    )
+    result, seat_no = await repo.join_lobby(game_id, discord_user_id="u_late", display_name="Late")
 
     assert result is JoinLobbyResult.STALE_PHASE
     assert seat_no is None
@@ -147,9 +135,7 @@ async def test_leave_lobby_rejects_stale_phase_after_start(repo: SqliteRepo) -> 
     """
     game_id = await _seed_lobby_with_humans(repo, 8)
     specs = [(p.display_name, p.key) for p in pick_personas(1, random.Random(0))]
-    ok = await repo.claim_start_and_backfill(
-        game_id, expected_phase=Phase.LOBBY, llm_seats=specs
-    )
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
     seats_before = await repo.load_seats(game_id)
     assert sorted(s.seat_no for s in seats_before) == list(range(1, 10))

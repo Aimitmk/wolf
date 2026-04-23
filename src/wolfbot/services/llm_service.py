@@ -27,7 +27,7 @@ from tenacity import (
 )
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
-from wolfbot.domain.models import Game, Player, Seat
+from wolfbot.domain.models import Game, LogEntry, Player, Seat
 from wolfbot.domain.rules import (
     legal_attack_targets,
     legal_divine_targets,
@@ -40,6 +40,7 @@ from wolfbot.llm.prompt_builder import (
     task_daytime_speech,
     task_night_action,
     task_vote,
+    task_wolf_chat,
 )
 
 if TYPE_CHECKING:  # avoid importing heavy modules unless needed
@@ -53,6 +54,7 @@ class MessagePoster(Protocol):
     """Subset of DiscordBotAdapter's public-post API; decoupled for testing."""
 
     async def post_public(self, game: Game, text: str, kind: str) -> None: ...
+    async def post_wolves_chat(self, game: Game, text: str, kind: str) -> None: ...
 
 
 log = logging.getLogger(__name__)
@@ -214,12 +216,23 @@ class LLMAdapter:
 
     # ------------------------------------------------------ night actions
     async def submit_llm_night_actions(
-        self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        restrict_to_seats: frozenset[int] | None = None,
+        unresolved_seats: frozenset[int] = frozenset(),
     ) -> None:
         """Schedule each LLM's night action in a background task.
 
         Fire-and-forget — the caller (game_service.advance) doesn't wait, so a
         slow xAI call can't block the GameEngine's deadline watcher.
+
+        When called from `resend_pending_dms` (on `/wolf extend`), pass
+        `restrict_to_seats` = union of missing + unresolved LLM seats so we only
+        re-dispatch the ones that still owe a submission. `unresolved_seats`
+        are those in a wolf-attack split — the in-loop "already submitted?"
+        guard otherwise skips them, which would keep the split locked.
         """
         seats_by_no = {s.seat_no: s for s in seats}
         llm_players = [
@@ -227,10 +240,12 @@ class LLMAdapter:
             for p in players
             if p.alive and seats_by_no.get(p.seat_no) is not None and seats_by_no[p.seat_no].is_llm
         ]
+        if restrict_to_seats is not None:
+            llm_players = [p for p in llm_players if p.seat_no in restrict_to_seats]
         if not llm_players:
             return
         task = asyncio.create_task(
-            self._run_night_actions(game, llm_players, players, seats),
+            self._run_night_actions(game, llm_players, players, seats, unresolved_seats),
             name=f"llm-night-{game.id}-d{game.day_number}",
         )
         self._background_tasks.add(task)
@@ -242,10 +257,16 @@ class LLMAdapter:
         llm_players: Sequence[Player],
         all_players: Sequence[Player],
         seats: Sequence[Seat],
+        unresolved_seats: frozenset[int] = frozenset(),
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         prev = await self.repo.load_previous_guard(game.id)
         prev_guard_seat = prev[1] if prev else None
+
+        # Wolf-chat prelude: before submitting attacks, LLM wolves post a
+        # coordination message to the wolves-only channel so both wolves
+        # converge on one target.
+        await self._run_wolf_chat(game, llm_players, all_players, seats)
 
         for player in llm_players:
             # Re-check the game state per player — phase may have advanced
@@ -263,6 +284,13 @@ class LLMAdapter:
                 continue
             kind, legal = self._role_to_kind(player, all_players, prev_guard_seat)
             if kind is None or not legal:
+                continue
+            # Idempotency guard: if this seat already submitted for this kind,
+            # skip — unless it's a wolf in a split (unresolved_seats) which
+            # needs to re-ask to break the lockout.
+            existing = await self.repo.load_night_actions(game.id, day=game.day_number)
+            already = any(a.actor_seat == player.seat_no and a.kind is kind for a in existing)
+            if already and player.seat_no not in unresolved_seats:
                 continue
             candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
             try:
@@ -283,6 +311,100 @@ class LLMAdapter:
                     "llm night action failed for game %s seat %s", game.id, player.seat_no
                 )
 
+    async def _run_wolf_chat(
+        self,
+        game: Game,
+        llm_players: Sequence[Player],
+        all_players: Sequence[Player],
+        seats: Sequence[Seat],
+    ) -> None:
+        """LLM wolves post a coordination message to the wolves-only channel.
+
+        Runs at the start of NIGHT, before attack submissions, so each wolf's
+        `task_night_action` sees the partner's proposed target in its WOLF_CHAT
+        private log and can converge instead of split. Serial (wolf B reads
+        wolf A's just-logged message). No-ops when the village has <2 alive
+        wolves total, no LLM wolves alive, or no wolves channel configured.
+        """
+        if game.wolves_channel_id is None or self.message_poster is None:
+            return
+        seats_by_no = {s.seat_no: s for s in seats}
+        alive_wolves_all = [p for p in all_players if p.alive and p.role is Role.WEREWOLF]
+        if len(alive_wolves_all) < 2:
+            return
+        llm_wolves = [p for p in llm_players if p.role is Role.WEREWOLF]
+        if not llm_wolves:
+            return
+
+        for wolf in llm_wolves:
+            fresh = await self.repo.load_game(game.id)
+            if (
+                fresh is None
+                or fresh.ended_at is not None
+                or fresh.phase is not Phase.NIGHT
+                or fresh.day_number != game.day_number
+            ):
+                return
+            seat = seats_by_no.get(wolf.seat_no)
+            if seat is None or seat.persona_key is None:
+                continue
+            legal = legal_attack_targets(all_players, wolf.seat_no)
+            candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
+            if not candidates:
+                continue
+            partner_tokens = [
+                seat_token(seats_by_no[p.seat_no])
+                for p in alive_wolves_all
+                if p.seat_no != wolf.seat_no and p.seat_no in seats_by_no
+            ]
+            try:
+                action = await self._ask(
+                    game,
+                    wolf,
+                    seat,
+                    all_players,
+                    seats,
+                    task_text=task_wolf_chat(partner_tokens, [seat_token(c) for c in candidates]),
+                )
+            except Exception:
+                log.exception("llm wolf-chat ask failed for game %s seat %s", game.id, wolf.seat_no)
+                continue
+            if action.intent != "speak":
+                continue
+            message = action.public_message.strip()
+            if not message:
+                continue
+            try:
+                await self.message_poster.post_wolves_chat(
+                    fresh, f"**{seat.display_name}**: {message}", kind="WOLF_CHAT"
+                )
+            except Exception:
+                log.exception("post_wolves_chat for LLM wolf failed seat %s", wolf.seat_no)
+                continue
+            now_ts = self._clock()
+            for audience in alive_wolves_all:
+                try:
+                    await self.repo.insert_log_private(
+                        LogEntry(
+                            game_id=fresh.id,
+                            day=fresh.day_number,
+                            phase=fresh.phase,
+                            kind="WOLF_CHAT",
+                            actor_seat=wolf.seat_no,
+                            audience_seat=audience.seat_no,
+                            visibility="PRIVATE",
+                            text=message,
+                            created_at=now_ts,
+                        )
+                    )
+                except Exception:
+                    log.exception(
+                        "WOLF_CHAT log insert failed game=%s actor=%s audience=%s",
+                        fresh.id,
+                        wolf.seat_no,
+                        audience.seat_no,
+                    )
+
     # ------------------------------------------------------ votes
     async def submit_llm_votes(
         self,
@@ -291,14 +413,21 @@ class LLMAdapter:
         seats: Sequence[Seat],
         candidates: Sequence[int] | None,
         round_: int,
+        restrict_to_seats: frozenset[int] | None = None,
     ) -> None:
-        """Schedule each LLM's vote in a background task. Fire-and-forget."""
+        """Schedule each LLM's vote in a background task. Fire-and-forget.
+
+        `restrict_to_seats` lets `resend_pending_dms` re-dispatch for only the
+        LLM seats that still owe a vote after `/wolf extend`.
+        """
         seats_by_no = {s.seat_no: s for s in seats}
         llm_voters = [
             p
             for p in players
             if p.alive and p.seat_no in seats_by_no and seats_by_no[p.seat_no].is_llm
         ]
+        if restrict_to_seats is not None:
+            llm_voters = [p for p in llm_voters if p.seat_no in restrict_to_seats]
         if not llm_voters:
             return
         task = asyncio.create_task(
@@ -330,6 +459,12 @@ class LLMAdapter:
                 return
             seat = seats_by_no[voter.seat_no]
             if seat.persona_key is None:
+                continue
+            # Idempotency guard: skip if this seat already has a vote row for
+            # this round. Handles the race where the original serial task
+            # eventually wins for a seat the resend also targeted.
+            existing_votes = await self.repo.load_votes(game.id, day=game.day_number, round_=round_)
+            if any(v.voter_seat == voter.seat_no for v in existing_votes):
                 continue
             if candidates is None:
                 cand_seats = [
@@ -521,13 +656,31 @@ class LLMAdapter:
                 or fresh.day_number != game.day_number
             ):
                 return
+            posted = False
             if self.message_poster is not None:
                 try:
                     await self.message_poster.post_public(
                         fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
                     )
+                    posted = True
                 except Exception:
                     log.exception("post_public for LLM speech failed")
+            if posted:
+                try:
+                    await self.repo.insert_log_public(
+                        LogEntry(
+                            game_id=fresh.id,
+                            day=fresh.day_number,
+                            phase=fresh.phase,
+                            kind="PLAYER_SPEECH",
+                            actor_seat=player.seat_no,
+                            visibility="PUBLIC",
+                            text=message,
+                            created_at=now,
+                        )
+                    )
+                except Exception:
+                    log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
             await self.repo.increment_llm_normal_speech(
                 game.id, game.day_number, player.seat_no, now
             )

@@ -66,6 +66,7 @@ class DiscordAdapter(Protocol):
 
     async def post_public(self, game: Game, text: str, kind: str) -> None: ...
     async def post_morning(self, game: Game, text: str) -> None: ...
+    async def post_wolves_chat(self, game: Game, text: str, kind: str) -> None: ...
     async def send_private(self, game: Game, audience_seat: int, text: str, kind: str) -> None: ...
 
     async def send_vote_dms(
@@ -94,7 +95,12 @@ class DiscordAdapter(Protocol):
 @runtime_checkable
 class LLMAdapter(Protocol):
     async def submit_llm_night_actions(
-        self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        restrict_to_seats: frozenset[int] | None = None,
+        unresolved_seats: frozenset[int] = frozenset(),
     ) -> None: ...
     async def submit_llm_votes(
         self,
@@ -103,6 +109,7 @@ class LLMAdapter(Protocol):
         seats: Sequence[Seat],
         candidates: Sequence[int] | None,
         round_: int,
+        restrict_to_seats: frozenset[int] | None = None,
     ) -> None: ...
     async def submit_llm_daystart_speeches(
         self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
@@ -515,7 +522,7 @@ class GameService:
         return SubmitResult.ACCEPTED
 
     async def resend_pending_dms(self, game_id: str) -> None:
-        """Re-send DM UIs to humans whose submission we're still waiting on.
+        """Re-send DM UIs to humans and re-dispatch LLM tasks for pending seats.
 
         Called from recovery after engine reattach, and from `host_extend` when
         a WAITING phase is resumed. Needed because VoteView/NightActionView
@@ -525,8 +532,11 @@ class GameService:
 
         No-ops for phases that never had DM UIs (LOBBY/SETUP/NIGHT_0/
         DAY_DISCUSSION/WAITING_HOST_DECISION/GAME_OVER). `send_vote_dms` /
-        `send_night_action_dms` already filter LLM seats internally, so only
-        human players receive the resend.
+        `send_night_action_dms` already filter LLM seats internally, so humans
+        get re-DMed here; LLMs get re-dispatched via the LLMAdapter with
+        `restrict_to_seats` set to exactly the still-pending LLM seats. The
+        in-loop "already submitted?" guard in the LLM dispatcher makes this
+        safe even if the original task is still running.
 
         At NIGHT, we union "missing" (never submitted) with "unresolved"
         (submitted but split) so wolves who picked different targets also get
@@ -544,6 +554,7 @@ class GameService:
             return
 
         seats = await self.repo.load_seats(game_id)
+        seats_by_no = {s.seat_no: s for s in seats}
         players = await self.repo.load_players(game_id)
         missing_by_kind = await missing_submitters(self.repo, game, players)
 
@@ -559,14 +570,31 @@ class GameService:
             alive_seats = {p.seat_no for p in players if p.alive}
             if game.phase is Phase.DAY_VOTE:
                 candidates = [s for s in seats if s.seat_no in alive_seats]
+                candidate_seat_nos: list[int] | None = None
             else:
                 round0 = await self.repo.load_votes(game_id, day=game.day_number, round_=0)
                 tied = set(compute_vote_result(round0, alive_seats).tied)
                 candidates = [s for s in seats if s.seat_no in tied]
+                candidate_seat_nos = list(tied)
             try:
                 await self.discord.send_vote_dms(game, voters, candidates, round_=round_)
             except Exception:
                 log.exception("resend_pending_dms vote failed for %s", game_id)
+            llm_missing = frozenset(
+                sn for sn in missing if seats_by_no.get(sn) is not None and seats_by_no[sn].is_llm
+            )
+            if llm_missing:
+                try:
+                    await self.llm.submit_llm_votes(
+                        game,
+                        players,
+                        seats,
+                        candidates=candidate_seat_nos,
+                        round_=round_,
+                        restrict_to_seats=llm_missing,
+                    )
+                except Exception:
+                    log.exception("resend_pending_dms llm vote dispatch failed for %s", game_id)
             return
 
         # NIGHT
@@ -574,8 +602,10 @@ class GameService:
         seats_to_dm: set[int] = set()
         for seats_tuple in missing_by_kind.values():
             seats_to_dm.update(seats_tuple)
+        unresolved_flat: set[int] = set()
         for seats_tuple in unresolved_by_kind.values():
-            seats_to_dm.update(seats_tuple)
+            unresolved_flat.update(seats_tuple)
+        seats_to_dm.update(unresolved_flat)
         if not seats_to_dm:
             return
         actors = [p for p in players if p.seat_no in seats_to_dm]
@@ -584,6 +614,21 @@ class GameService:
             await self.discord.send_night_action_dms(game, actors, alive_players, seats)
         except Exception:
             log.exception("resend_pending_dms night failed for %s", game_id)
+        llm_seats = frozenset(
+            sn for sn in seats_to_dm if seats_by_no.get(sn) is not None and seats_by_no[sn].is_llm
+        )
+        llm_unresolved = frozenset(sn for sn in unresolved_flat if sn in llm_seats)
+        if llm_seats:
+            try:
+                await self.llm.submit_llm_night_actions(
+                    game,
+                    players,
+                    seats,
+                    restrict_to_seats=llm_seats,
+                    unresolved_seats=llm_unresolved,
+                )
+            except Exception:
+                log.exception("resend_pending_dms llm night dispatch failed for %s", game_id)
 
     async def _all_votes_in(self, game: Game, round_: int) -> bool:
         players = await self.repo.load_players(game.id)
