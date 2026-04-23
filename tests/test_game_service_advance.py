@@ -313,6 +313,267 @@ async def test_permission_failure_does_not_advance_phase(
     assert loaded.phase is Phase.SETUP  # unchanged
 
 
+async def test_submit_vote_rejected_when_phase_not_day_vote(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Votes submitted during DAY_DISCUSSION (e.g. stale UI click) must not be persisted."""
+    service, _, _, _, _ = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION (not DAY_VOTE!)
+
+    await service.submit_vote(game.id, voter_seat=1, target_seat=2, round_=0)
+
+    votes = await repo.load_votes(game.id, day=1, round_=0)
+    assert votes == [], "vote during DAY_DISCUSSION must be dropped"
+
+
+async def test_submit_vote_rejected_when_voter_dead(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    # Kill seat 5 directly via repo internals (simulating they died in a prior phase).
+    from wolfbot.domain.enums import DeathCause
+    from wolfbot.domain.models import PlayerUpdate
+    from wolfbot.persistence.sqlite_repo import _apply_player_update
+    async with repo._tx() as db:
+        await _apply_player_update(
+            db, game.id,
+            PlayerUpdate(seat_no=5, alive=False, death_cause=DeathCause.ATTACK, death_day=1),
+        )
+
+    await service.submit_vote(game.id, voter_seat=5, target_seat=1, round_=0)
+    votes = await repo.load_votes(game.id, day=1, round_=0)
+    assert all(v.voter_seat != 5 for v in votes), "dead voter submission must be dropped"
+
+
+async def test_submit_vote_rejected_when_target_dead(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    from wolfbot.domain.enums import DeathCause
+    from wolfbot.domain.models import PlayerUpdate
+    from wolfbot.persistence.sqlite_repo import _apply_player_update
+    async with repo._tx() as db:
+        await _apply_player_update(
+            db, game.id,
+            PlayerUpdate(seat_no=7, alive=False, death_cause=DeathCause.ATTACK, death_day=1),
+        )
+
+    await service.submit_vote(game.id, voter_seat=1, target_seat=7, round_=0)
+    votes = await repo.load_votes(game.id, day=1, round_=0)
+    assert votes == [], "vote targeting a dead seat must be dropped"
+
+
+async def test_submit_vote_self_vote_rejected(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    await service.submit_vote(game.id, voter_seat=3, target_seat=3, round_=0)
+    votes = await repo.load_votes(game.id, day=1, round_=0)
+    assert votes == [], "self-vote must be dropped"
+
+
+async def test_submit_vote_runoff_rejects_target_outside_tied_set(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """In runoff, target must be one of the tied seats from round 0."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+
+    # Round 0: tie between seat 1 and seat 5 (4 votes each), voter 5 abstains.
+    for v in (1, 2, 3, 4):
+        await service.submit_vote(game.id, v, target_seat=5, round_=0)
+    for v in (6, 7, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=1, round_=0)
+    await service.submit_vote(game.id, 5, target_seat=None, round_=0)
+
+    await service.advance(game.id)  # -> DAY_RUNOFF (tied {1, 5})
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_RUNOFF, (
+        f"expected DAY_RUNOFF with tied tally, got {loaded.phase}"
+    )
+
+    # Illegal runoff target (seat 7, not in tied {1, 5}) must be dropped.
+    await service.submit_vote(game.id, voter_seat=3, target_seat=7, round_=1)
+    runoff_votes = await repo.load_votes(game.id, day=1, round_=1)
+    assert all(v.target_seat != 7 for v in runoff_votes), (
+        "runoff vote for non-tied target must be dropped"
+    )
+
+    # Legal runoff target (seat 1, in tied set) must be accepted.
+    await service.submit_vote(game.id, voter_seat=3, target_seat=1, round_=1)
+    runoff_votes = await repo.load_votes(game.id, day=1, round_=1)
+    assert any(v.voter_seat == 3 and v.target_seat == 1 for v in runoff_votes)
+
+
+async def test_submit_night_action_rejected_when_phase_not_night(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    service, _, _, _, _ = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+
+    players = await repo.load_players(game.id)
+    wolf = next(p.seat_no for p in players if p.role is Role.WEREWOLF)
+    await service.submit_night_action(
+        game.id, wolf, SubmissionType.WOLF_ATTACK, target_seat=1
+    )
+    actions = await repo.load_night_actions(game.id, day=1)
+    assert actions == [], "night action during DAY_DISCUSSION must be dropped"
+
+
+async def test_submit_night_action_rejected_when_role_mismatch(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """A villager submitting SEER_DIVINE must be rejected."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # -> NIGHT_0
+    await service.advance(game.id)  # -> DAY_DISCUSSION
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for v in range(1, 10):
+        target = 1 if v != 1 else 2
+        await service.submit_vote(game.id, v, target, round_=0)
+    await service.advance(game.id)  # -> NIGHT (assuming seat 1 executed)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return
+
+    players = await repo.load_players(game.id)
+    villager = next(
+        p.seat_no for p in players if p.alive and p.role is Role.VILLAGER
+    )
+    await service.submit_night_action(
+        game.id, villager, SubmissionType.SEER_DIVINE, target_seat=2
+    )
+    # Only true SEER submissions should land in the DB
+    actions = await repo.load_night_actions(game.id, day=loaded.day_number)
+    assert all(a.actor_seat != villager for a in actions), (
+        "villager submitting SEER_DIVINE must be dropped"
+    )
+
+
+async def test_submit_night_action_rejected_when_target_illegal(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """A wolf attacking a fellow wolf must be rejected (target not in legal_attack_targets)."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # -> NIGHT_0
+    await service.advance(game.id)  # -> DAY_DISCUSSION
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for v in range(1, 10):
+        target = 1 if v != 1 else 2
+        await service.submit_vote(game.id, v, target, round_=0)
+    await service.advance(game.id)  # -> NIGHT
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return
+
+    players = await repo.load_players(game.id)
+    wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+    if len(wolves) < 2:
+        return  # need 2 wolves to test wolf-on-wolf attack
+
+    await service.submit_night_action(
+        game.id, wolves[0], SubmissionType.WOLF_ATTACK, target_seat=wolves[1]
+    )
+    actions = await repo.load_night_actions(game.id, day=loaded.day_number)
+    assert not any(
+        a.actor_seat == wolves[0]
+        and a.kind is SubmissionType.WOLF_ATTACK
+        and a.target_seat == wolves[1]
+        for a in actions
+    ), "wolf attacking fellow wolf must be dropped"
+
+
+async def test_dawn_morning_not_posted_twice(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """At dawn, morning text must be posted exactly once — not duplicated via public_logs."""
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION day 1
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    # Everyone votes seat 1; seat 1 is executed
+    for voter in range(1, 10):
+        target = 1 if voter != 1 else 2
+        await service.submit_vote(game.id, voter, target, round_=0)
+    await service.advance(game.id)  # -> NIGHT (assuming not GAME_OVER)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        # executed seat 1 could trigger GAME_OVER; skip when no dawn transition
+        return
+
+    players = await repo.load_players(game.id)
+    wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+    seer = next(p.seat_no for p in players if p.alive and p.role is Role.SEER)
+    knight = next(p.seat_no for p in players if p.alive and p.role is Role.KNIGHT)
+    for w in wolves:
+        await service.submit_night_action(game.id, w, SubmissionType.WOLF_ATTACK, 4)
+    await service.submit_night_action(game.id, seer, SubmissionType.SEER_DIVINE, wolves[0])
+    await service.submit_night_action(game.id, knight, SubmissionType.KNIGHT_GUARD, 3)
+
+    disc.reset()
+    await service.advance(game.id)  # NIGHT -> dawn
+
+    morning_calls = [c for c in disc.calls if c.name == "post_morning"]
+    public_morning_calls = [
+        c for c in disc.calls if c.name == "post_public" and c.kwargs.get("kind") == "MORNING"
+    ]
+    assert len(morning_calls) == 1, (
+        f"post_morning should fire exactly once, got {len(morning_calls)}"
+    )
+    assert public_morning_calls == [], (
+        "MORNING public_logs must not be posted via post_public — duplicate dawn announcement"
+    )
+
+
 async def test_full_game_one_day_happy_path(
     repo: SqliteRepo,
     svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],

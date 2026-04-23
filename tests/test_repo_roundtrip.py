@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from wolfbot.domain.enums import (
     DeathCause,
     Phase,
@@ -153,6 +155,46 @@ async def test_apply_transition_optimistic_lock(repo: SqliteRepo, seats: list[Se
     loaded = await repo.load_game(g.id)
     assert loaded is not None
     assert loaded.phase is Phase.LOBBY
+
+
+async def test_apply_transition_rolls_back_on_failure(
+    repo: SqliteRepo, seats: list[Seat]
+) -> None:
+    """If a write after the phase UPDATE fails, the whole transition must roll back.
+
+    Reproduces the bug where only `games.phase` advanced while player/log writes
+    failed outside the transaction boundary.
+    """
+    g = await _base_game(repo, seats)
+
+    async def boom(_db: object, _entry: LogEntry) -> None:
+        raise RuntimeError("injected failure during log insert")
+
+    repo._insert_log_public = boom  # type: ignore[method-assign]
+
+    t = Transition(
+        next_phase=Phase.SETUP,
+        next_day=0,
+        new_deadline_epoch=None,
+        player_updates=(PlayerUpdate(seat_no=1, role=Role.WEREWOLF),),
+        public_logs=(
+            LogEntry(
+                game_id=g.id, day=0, phase=Phase.LOBBY, kind="PHASE_CHANGE",
+                actor_seat=None, visibility="PUBLIC",
+                text="setup begin", created_at=100,
+            ),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="injected failure"):
+        await repo.apply_transition(g.id, t, expected_phase=Phase.LOBBY)
+
+    loaded = await repo.load_game(g.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.LOBBY, "phase must roll back on mid-transition failure"
+    players = await repo.load_players(g.id)
+    seat1 = next(p for p in players if p.seat_no == 1)
+    assert seat1.role is None, "player_update must roll back on mid-transition failure"
+    assert await repo.load_public_logs(g.id) == [], "log inserts must roll back"
 
 
 async def test_apply_transition_writes_pending(repo: SqliteRepo, seats: list[Seat]) -> None:

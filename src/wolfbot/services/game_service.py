@@ -19,7 +19,7 @@ from collections.abc import Callable, Sequence
 from random import Random
 from typing import Protocol, runtime_checkable
 
-from wolfbot.domain.enums import Phase, SubmissionType
+from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import (
     Game,
     NightAction,
@@ -29,7 +29,12 @@ from wolfbot.domain.models import (
     Transition,
     Vote,
 )
-from wolfbot.domain.rules import compute_vote_result
+from wolfbot.domain.rules import (
+    compute_vote_result,
+    legal_attack_targets,
+    legal_divine_targets,
+    legal_guard_targets,
+)
 from wolfbot.domain.state_machine import (
     plan_day_discussion_to_vote,
     plan_day_runoff_resolve,
@@ -191,6 +196,11 @@ class GameService:
 
         # 3. Public announcements (including morning) and private logs.
         for entry in transition.public_logs:
+            # MORNING entries are persisted via public_logs but rendered to Discord
+            # through post_morning() below (with ☀️ decoration). Skip here to avoid
+            # double-posting. See state_machine.plan_night_resolve — kind="MORNING".
+            if entry.kind == "MORNING":
+                continue
             await self._safe_post_public(new_game, entry.text, entry.kind)
         for entry in transition.private_logs:
             if entry.audience_seat is None:
@@ -363,6 +373,39 @@ class GameService:
         game = await self.repo.load_game(game_id)
         if game is None:
             return
+        expected_phase = Phase.DAY_VOTE if round_ == 0 else Phase.DAY_RUNOFF
+        if game.phase is not expected_phase:
+            log.info(
+                "stale vote ignored: game=%s phase=%s expected=%s round=%s",
+                game_id, game.phase, expected_phase, round_,
+            )
+            return
+        players = await self.repo.load_players(game_id)
+        alive = {p.seat_no for p in players if p.alive}
+        if voter_seat not in alive:
+            log.info("vote from dead/unknown seat %s ignored (game=%s)", voter_seat, game_id)
+            return
+        if target_seat is not None:
+            if target_seat not in alive:
+                log.info(
+                    "vote targeting dead/unknown seat %s ignored (game=%s)",
+                    target_seat, game_id,
+                )
+                return
+            if target_seat == voter_seat:
+                log.info("self-vote seat=%s ignored (game=%s)", voter_seat, game_id)
+                return
+            if round_ == 1:
+                round0 = await self.repo.load_votes(
+                    game_id, day=game.day_number, round_=0
+                )
+                tied = set(compute_vote_result(round0, alive).tied)
+                if target_seat not in tied:
+                    log.info(
+                        "runoff vote for non-tied target %s ignored (tied=%s game=%s)",
+                        target_seat, sorted(tied), game_id,
+                    )
+                    return
         await self.repo.insert_vote(
             Vote(
                 game_id=game_id,
@@ -386,6 +429,46 @@ class GameService:
         game = await self.repo.load_game(game_id)
         if game is None:
             return
+        if game.phase not in (Phase.NIGHT, Phase.NIGHT_0):
+            log.info(
+                "stale night action ignored: game=%s phase=%s kind=%s",
+                game_id, game.phase, kind,
+            )
+            return
+        players = await self.repo.load_players(game_id)
+        actor = next((p for p in players if p.seat_no == actor_seat), None)
+        if actor is None or not actor.alive:
+            log.info(
+                "night action from dead/unknown seat %s ignored (game=%s)",
+                actor_seat, game_id,
+            )
+            return
+        role_for_kind = {
+            SubmissionType.WOLF_ATTACK: Role.WEREWOLF,
+            SubmissionType.SEER_DIVINE: Role.SEER,
+            SubmissionType.KNIGHT_GUARD: Role.KNIGHT,
+        }.get(kind)
+        if role_for_kind is None or actor.role is not role_for_kind:
+            log.info(
+                "night action role mismatch: seat=%s role=%s kind=%s ignored (game=%s)",
+                actor_seat, actor.role, kind, game_id,
+            )
+            return
+        if target_seat is not None:
+            if kind is SubmissionType.WOLF_ATTACK:
+                legal = legal_attack_targets(players, actor_seat)
+            elif kind is SubmissionType.SEER_DIVINE:
+                legal = legal_divine_targets(players, actor_seat)
+            else:  # KNIGHT_GUARD
+                prev = await self.repo.load_previous_guard(game_id)
+                prev_target = prev[1] if prev is not None else None
+                legal = legal_guard_targets(players, actor_seat, prev_target)
+            if target_seat not in legal:
+                log.info(
+                    "illegal night target seat=%s kind=%s target=%s legal=%s ignored (game=%s)",
+                    actor_seat, kind, target_seat, legal, game_id,
+                )
+                return
         await self.repo.insert_night_action(
             NightAction(
                 game_id=game_id,

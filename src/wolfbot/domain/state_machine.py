@@ -376,6 +376,24 @@ def _apply_execution(
     clear_force: bool,
 ) -> Transition:
     """Apply execution death, check victory, go to NIGHT or GAME_OVER."""
+    # Defense-in-depth: compute_vote_result filters by alive seats, but if a
+    # dead seat ever reaches here (corrupted DB, stale vote bypassing the
+    # service-layer guard) refuse to overwrite death_day — treat as no-execution.
+    if not any(p.seat_no == executed_seat and p.alive for p in players):
+        pub = _public_log(
+            game,
+            kind="NO_EXECUTION",
+            text="投票結果が無効だったため、本日は処刑なしで夜を迎えます。",
+            now_epoch=now_epoch,
+            phase=Phase.NIGHT,
+        )
+        return Transition(
+            next_phase=Phase.NIGHT,
+            next_day=game.day_number,
+            new_deadline_epoch=now_epoch + NIGHT_DURATION,
+            public_logs=(pub,),
+            clear_force_skip=clear_force,
+        )
     exec_name = _name(seats_by_no, executed_seat)
     public_logs: tuple[LogEntry, ...] = (
         _public_log(
@@ -553,6 +571,13 @@ def plan_night_resolve(
     # Step 4/5/6: Attack / compare / resolve
     _attack: AttackResult = attack
     attack_target = _attack.target_seat
+    # Defense-in-depth: submission-layer validation already rejects attacks on
+    # dead seats, but if corrupt state slips through, refuse to overwrite
+    # death_day — treat as a failed attack (no death).
+    if attack_target is not None and not any(
+        p.seat_no == attack_target and p.alive for p in players
+    ):
+        attack_target = None
     killed_seat: int | None = None
     if attack_target is not None and attack_target != guard_target:
         killed_seat = attack_target

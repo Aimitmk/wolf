@@ -102,6 +102,30 @@ def test_attack_succeeds_when_guard_differs() -> None:
     assert upd.death_cause is DeathCause.ATTACK
 
 
+def test_plan_night_resolve_skips_dead_attack_target() -> None:
+    """If attack target is already dead, death_day must not be overwritten."""
+    game = _game(day=2)
+    # seat 7 was killed on day 1 (execution)
+    alive = [True, True, True, True, True, True, False, True, True]
+    players = _players(alive=alive, executed_today=7, day=1)
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7, day=2),
+        _act(2, SubmissionType.WOLF_ATTACK, 7, day=2),
+        _act(4, SubmissionType.SEER_DIVINE, 8, day=2),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8, day=2),
+    ]
+    t = plan_night_resolve(
+        game, players, seats, actions,
+        previous_guard_seat=None, force_skip=False, now_epoch=1000,
+    )
+    # No new death, no player_update for dead seat — death_day of seat 7 preserved (=1)
+    assert t.newly_dead_seats == ()
+    assert all(u.seat_no != 7 for u in t.player_updates)
+    assert t.morning_text is not None
+    assert "平和" in t.morning_text
+
+
 def test_morning_announce_does_not_reveal_role() -> None:
     game = _game(day=1)
     players = _players()

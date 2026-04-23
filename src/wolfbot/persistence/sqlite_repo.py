@@ -585,59 +585,60 @@ class SqliteRepo:
                 )
                 if cur.rowcount != 1:
                     raise _OptimisticLockMiss()
-            if transition.clear_force_skip:
-                await db.execute(
-                    "UPDATE games SET force_skip_pending=0 WHERE id=?", (game_id,)
-                )
 
-            for upd in transition.player_updates:
-                await _apply_player_update(db, game_id, upd)
+                if transition.clear_force_skip:
+                    await db.execute(
+                        "UPDATE games SET force_skip_pending=0 WHERE id=?", (game_id,)
+                    )
 
-            for entry in transition.public_logs:
-                await self._insert_log_public(db, entry)
-            for entry in transition.private_logs:
-                await self._insert_log_private(db, entry)
+                for upd in transition.player_updates:
+                    await _apply_player_update(db, game_id, upd)
 
-            if transition.pending is not None:
-                await db.execute(
-                    """
-                    INSERT INTO pending_decisions
-                        (game_id, phase, day, required_submission, missing_seats_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(game_id) DO UPDATE SET
-                        phase=excluded.phase,
-                        day=excluded.day,
-                        required_submission=excluded.required_submission,
-                        missing_seats_json=excluded.missing_seats_json,
-                        created_at=excluded.created_at
-                    """,
-                    (
-                        transition.pending.game_id,
-                        transition.pending.phase.value,
-                        transition.pending.day,
-                        transition.pending.required_submission.value,
-                        json.dumps(list(transition.pending.missing_seats)),
-                        transition.pending.created_at,
-                    ),
-                )
-            elif not transition.requires_host_decision:
-                await db.execute(
-                    "DELETE FROM pending_decisions WHERE game_id=?", (game_id,)
-                )
+                for entry in transition.public_logs:
+                    await self._insert_log_public(db, entry)
+                for entry in transition.private_logs:
+                    await self._insert_log_private(db, entry)
 
-            if transition.record_guard is not None:
-                knight_seat, target_seat = transition.record_guard
-                await db.execute(
-                    """
-                    INSERT INTO previous_guard (game_id, knight_seat, last_guard_seat, last_guard_day)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(game_id) DO UPDATE SET
-                        knight_seat=excluded.knight_seat,
-                        last_guard_seat=excluded.last_guard_seat,
-                        last_guard_day=excluded.last_guard_day
-                    """,
-                    (game_id, knight_seat, target_seat, transition.next_day),
-                )
+                if transition.pending is not None:
+                    await db.execute(
+                        """
+                        INSERT INTO pending_decisions
+                            (game_id, phase, day, required_submission, missing_seats_json, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(game_id) DO UPDATE SET
+                            phase=excluded.phase,
+                            day=excluded.day,
+                            required_submission=excluded.required_submission,
+                            missing_seats_json=excluded.missing_seats_json,
+                            created_at=excluded.created_at
+                        """,
+                        (
+                            transition.pending.game_id,
+                            transition.pending.phase.value,
+                            transition.pending.day,
+                            transition.pending.required_submission.value,
+                            json.dumps(list(transition.pending.missing_seats)),
+                            transition.pending.created_at,
+                        ),
+                    )
+                elif not transition.requires_host_decision:
+                    await db.execute(
+                        "DELETE FROM pending_decisions WHERE game_id=?", (game_id,)
+                    )
+
+                if transition.record_guard is not None:
+                    knight_seat, target_seat = transition.record_guard
+                    await db.execute(
+                        """
+                        INSERT INTO previous_guard (game_id, knight_seat, last_guard_seat, last_guard_day)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(game_id) DO UPDATE SET
+                            knight_seat=excluded.knight_seat,
+                            last_guard_seat=excluded.last_guard_seat,
+                            last_guard_day=excluded.last_guard_day
+                        """,
+                        (game_id, knight_seat, target_seat, transition.next_day),
+                    )
         except _OptimisticLockMiss:
             return False
         return True
