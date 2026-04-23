@@ -184,13 +184,24 @@ class DiscordBotAdapter:
                 log.exception("vote DM failed seat %s", voter.seat_no)
 
     async def send_night_action_dms(
-        self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
+        self,
+        game: Game,
+        actors: Sequence[Player],
+        alive_players: Sequence[Player],
+        seats: Sequence[Seat],
     ) -> None:
+        """Send a role-specific night-action DM to each actor.
+
+        `actors` is the subset to DM (typically "still pending"); `alive_players`
+        is the full alive pool used for legal-target computation — they must be
+        kept separate so a resend to a single split wolf still offers the full
+        legal attack list.
+        """
         seats_by_no = {s.seat_no: s for s in seats}
         prev = await self.repo.load_previous_guard(game.id)
         prev_guard_seat = prev[1] if prev else None
 
-        for p in players:
+        for p in actors:
             if p.role is None:
                 continue
             seat = seats_by_no.get(p.seat_no)
@@ -200,15 +211,15 @@ class DiscordBotAdapter:
             candidates: list[Seat] = []
             if p.role is Role.WEREWOLF:
                 kind = SubmissionType.WOLF_ATTACK
-                legal = legal_attack_targets(players, p.seat_no)
+                legal = legal_attack_targets(alive_players, p.seat_no)
                 candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
             elif p.role is Role.SEER:
                 kind = SubmissionType.SEER_DIVINE
-                legal = legal_divine_targets(players, p.seat_no)
+                legal = legal_divine_targets(alive_players, p.seat_no)
                 candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
             elif p.role is Role.KNIGHT:
                 kind = SubmissionType.KNIGHT_GUARD
-                legal = legal_guard_targets(players, p.seat_no, prev_guard_seat)
+                legal = legal_guard_targets(alive_players, p.seat_no, prev_guard_seat)
                 candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
             if kind is None or not candidates:
                 continue
@@ -624,9 +635,20 @@ class WolfCog(commands.Cog):
                 "ホストまたは管理者のみ abort できます。", ephemeral=True
             )
             return
-        await self.gs.host_abort(game.id)
-        self.registry.detach(game.id)
-        await interaction.response.send_message("🛑 ゲームを強制終了しました。")
+        ok = await self.gs.host_abort(game.id)
+        if ok:
+            engine = self.registry.detach(game.id)
+            if engine is not None:
+                try:
+                    await engine.stop()
+                except Exception:
+                    log.exception("engine.stop failed during abort %s", game.id)
+            await interaction.response.send_message("🛑 ゲームを強制終了しました。")
+        else:
+            await interaction.response.send_message(
+                "終了できませんでした (既に終了している可能性があります)。",
+                ephemeral=True,
+            )
 
     # ----------------------------------------------------------- internals
     async def _host_check(self, interaction: discord.Interaction) -> Game | None:

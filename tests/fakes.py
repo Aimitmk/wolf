@@ -80,12 +80,17 @@ class FakeDiscordAdapter:
         )
 
     async def send_night_action_dms(
-        self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
+        self,
+        game: Game,
+        actors: Sequence[Player],
+        alive_players: Sequence[Player],
+        seats: Sequence[Seat],
     ) -> None:
         self._record(
             "send_night_action_dms",
             game_id=game.id,
-            players=[p.seat_no for p in players],
+            players=[p.seat_no for p in actors],
+            alive=[p.seat_no for p in alive_players],
         )
 
     async def announce_waiting(

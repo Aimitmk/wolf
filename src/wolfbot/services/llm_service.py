@@ -216,35 +216,72 @@ class LLMAdapter:
     async def submit_llm_night_actions(
         self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
     ) -> None:
+        """Schedule each LLM's night action in a background task.
+
+        Fire-and-forget — the caller (game_service.advance) doesn't wait, so a
+        slow xAI call can't block the GameEngine's deadline watcher.
+        """
         seats_by_no = {s.seat_no: s for s in seats}
         llm_players = [
             p
             for p in players
             if p.alive and seats_by_no.get(p.seat_no) is not None and seats_by_no[p.seat_no].is_llm
         ]
+        if not llm_players:
+            return
+        task = asyncio.create_task(
+            self._run_night_actions(game, llm_players, players, seats),
+            name=f"llm-night-{game.id}-d{game.day_number}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_night_actions(
+        self,
+        game: Game,
+        llm_players: Sequence[Player],
+        all_players: Sequence[Player],
+        seats: Sequence[Seat],
+    ) -> None:
+        seats_by_no = {s.seat_no: s for s in seats}
         prev = await self.repo.load_previous_guard(game.id)
         prev_guard_seat = prev[1] if prev else None
 
         for player in llm_players:
+            # Re-check the game state per player — phase may have advanced
+            # (force-skip, deadline resolve) while we were asking xAI.
+            fresh = await self.repo.load_game(game.id)
+            if (
+                fresh is None
+                or fresh.ended_at is not None
+                or fresh.phase is not Phase.NIGHT
+                or fresh.day_number != game.day_number
+            ):
+                return
             seat = seats_by_no[player.seat_no]
             if player.role is None or seat.persona_key is None:
                 continue
-            kind, legal = self._role_to_kind(player, players, prev_guard_seat)
+            kind, legal = self._role_to_kind(player, all_players, prev_guard_seat)
             if kind is None or not legal:
                 continue
             candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
-            action = await self._ask(
-                game,
-                player,
-                seat,
-                players,
-                seats,
-                task_text=task_night_action(kind, [seat_token(c) for c in candidates]),
-            )
-            target_seat = self._resolve_target(action.target_name, candidates, allow_none=False)
-            await self.gs.submit_night_action(
-                game.id, player.seat_no, kind, target_seat, game.day_number
-            )
+            try:
+                action = await self._ask(
+                    game,
+                    player,
+                    seat,
+                    all_players,
+                    seats,
+                    task_text=task_night_action(kind, [seat_token(c) for c in candidates]),
+                )
+                target_seat = self._resolve_target(action.target_name, candidates, allow_none=False)
+                await self.gs.submit_night_action(
+                    game.id, player.seat_no, kind, target_seat, game.day_number
+                )
+            except Exception:
+                log.exception(
+                    "llm night action failed for game %s seat %s", game.id, player.seat_no
+                )
 
     # ------------------------------------------------------ votes
     async def submit_llm_votes(
@@ -255,13 +292,42 @@ class LLMAdapter:
         candidates: Sequence[int] | None,
         round_: int,
     ) -> None:
+        """Schedule each LLM's vote in a background task. Fire-and-forget."""
         seats_by_no = {s.seat_no: s for s in seats}
         llm_voters = [
             p
             for p in players
             if p.alive and p.seat_no in seats_by_no and seats_by_no[p.seat_no].is_llm
         ]
+        if not llm_voters:
+            return
+        task = asyncio.create_task(
+            self._run_votes(game, llm_voters, players, seats, candidates, round_),
+            name=f"llm-votes-{game.id}-d{game.day_number}-r{round_}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_votes(
+        self,
+        game: Game,
+        llm_voters: Sequence[Player],
+        all_players: Sequence[Player],
+        seats: Sequence[Seat],
+        candidates: Sequence[int] | None,
+        round_: int,
+    ) -> None:
+        seats_by_no = {s.seat_no: s for s in seats}
+        expected_phase = Phase.DAY_VOTE if round_ == 0 else Phase.DAY_RUNOFF
         for voter in llm_voters:
+            fresh = await self.repo.load_game(game.id)
+            if (
+                fresh is None
+                or fresh.ended_at is not None
+                or fresh.phase is not expected_phase
+                or fresh.day_number != game.day_number
+            ):
+                return
             seat = seats_by_no[voter.seat_no]
             if seat.persona_key is None:
                 continue
@@ -270,39 +336,47 @@ class LLMAdapter:
                     s
                     for s in seats
                     if s.seat_no != voter.seat_no
-                    and any(p.seat_no == s.seat_no and p.alive for p in players)
+                    and any(p.seat_no == s.seat_no and p.alive for p in all_players)
                 ]
             else:
                 cand_seats = [
                     s for s in seats if s.seat_no in set(candidates) and s.seat_no != voter.seat_no
                 ]
-            if not cand_seats:
+            try:
+                if not cand_seats:
+                    await self.gs.submit_vote(
+                        game.id,
+                        voter.seat_no,
+                        target_seat=None,
+                        round_=round_,
+                        day=game.day_number,
+                    )
+                    continue
+                action = await self._ask(
+                    game,
+                    voter,
+                    seat,
+                    all_players,
+                    seats,
+                    task_text=task_vote([seat_token(c) for c in cand_seats], runoff=round_ == 1),
+                )
+                target = self._resolve_target(
+                    action.target_name, cand_seats, allow_none=action.intent == "skip"
+                )
                 await self.gs.submit_vote(
                     game.id,
                     voter.seat_no,
-                    target_seat=None,
+                    target_seat=target,
                     round_=round_,
                     day=game.day_number,
                 )
-                continue
-            action = await self._ask(
-                game,
-                voter,
-                seat,
-                players,
-                seats,
-                task_text=task_vote([seat_token(c) for c in cand_seats], runoff=round_ == 1),
-            )
-            target = self._resolve_target(
-                action.target_name, cand_seats, allow_none=action.intent == "skip"
-            )
-            await self.gs.submit_vote(
-                game.id,
-                voter.seat_no,
-                target_seat=target,
-                round_=round_,
-                day=game.day_number,
-            )
+            except Exception:
+                log.exception(
+                    "llm vote failed for game %s seat %s round %s",
+                    game.id,
+                    voter.seat_no,
+                    round_,
+                )
 
     # --------------------------------------------------- daytime speeches
     async def submit_llm_daystart_speeches(

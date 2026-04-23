@@ -573,6 +573,9 @@ async def test_host_extend_resends_dms_to_split_wolves(
     assert 1 in dmed and 2 in dmed
     # Seer and knight already submitted — not in the resend
     assert 4 not in dmed and 6 not in dmed
+    # Full alive pool must be preserved so legal attack targets are computed
+    # over all non-wolf survivors, not just the re-DMed subset.
+    assert set(sent[0].kwargs["alive"]) == {1, 2, 3, 4, 5, 6, 7, 8, 9}
 
 
 async def test_pending_decision_backward_compat_synthesizes_submissions() -> None:

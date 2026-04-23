@@ -300,6 +300,25 @@ async def test_host_abort_ends_game(
     assert any(c.name == "on_game_end" for c in disc.calls)
 
 
+async def test_host_abort_returns_false_when_already_ended(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Second abort on the same game must return False (race case) without re-posting on_game_end."""
+    service, disc, _, _, _ = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+
+    first = await service.host_abort(game.id)
+    assert first
+    on_game_end_after_first = sum(1 for c in disc.calls if c.name == "on_game_end")
+
+    second = await service.host_abort(game.id)
+    assert not second
+    on_game_end_after_second = sum(1 for c in disc.calls if c.name == "on_game_end")
+    assert on_game_end_after_second == on_game_end_after_first
+
+
 async def test_optimistic_lock_prevents_double_advance(
     repo: SqliteRepo,
     svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],

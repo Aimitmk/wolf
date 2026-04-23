@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 
@@ -16,6 +17,12 @@ from wolfbot.services.llm_service import (
     LLMAction,
     LLMAdapter,
 )
+
+
+async def _drain(adapter: LLMAdapter) -> None:
+    """Wait for all of the adapter's fire-and-forget background tasks to finish."""
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
 
 
 def test_action_parses_valid_json() -> None:
@@ -104,12 +111,12 @@ class FakeGameService:
         self.nights.append((game_id, actor_seat, kind, target_seat, day))
 
 
-async def _seed_game(repo):
+async def _seed_game(repo, phase: Phase = Phase.NIGHT):
     game = Game(
         id="g",
         guild_id="gu",
         host_user_id="h",
-        phase=Phase.NIGHT,
+        phase=phase,
         day_number=1,
         main_text_channel_id="c1",
         main_vc_channel_id="c2",
@@ -158,6 +165,7 @@ async def test_llm_adapter_submits_night_action_for_seer(repo) -> None:
 
     players = await repo.load_players(game.id)
     await adapter.submit_llm_night_actions(game, players, seats)
+    await _drain(adapter)
 
     assert len(gs.nights) == 1
     _, actor_seat, kind, target_seat, day = gs.nights[0]
@@ -186,6 +194,7 @@ async def test_llm_adapter_falls_back_on_invalid_target_name(repo) -> None:
 
     players = await repo.load_players(game.id)
     await adapter.submit_llm_night_actions(game, players, seats)
+    await _drain(adapter)
 
     # Should still have produced a valid seat number among legal targets
     assert len(gs.nights) == 1
@@ -194,8 +203,7 @@ async def test_llm_adapter_falls_back_on_invalid_target_name(repo) -> None:
 
 
 async def test_llm_adapter_votes_with_name_resolution(repo) -> None:
-    game, seats = await _seed_game(repo)
-    game.phase = Phase.DAY_VOTE
+    game, seats = await _seed_game(repo, phase=Phase.DAY_VOTE)
     gs = FakeGameService()
     decider = FakeLLMActionDecider(
         scripted=[
@@ -212,6 +220,7 @@ async def test_llm_adapter_votes_with_name_resolution(repo) -> None:
 
     players = await repo.load_players(game.id)
     await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await _drain(adapter)
 
     # 2 LLMs alive (seats 2, 3) → 2 vote submissions
     assert len(gs.votes) == 2
@@ -224,8 +233,7 @@ async def test_llm_adapter_votes_with_name_resolution(repo) -> None:
 
 
 async def test_llm_adapter_skip_intent_abstains_on_vote(repo) -> None:
-    game, seats = await _seed_game(repo)
-    game.phase = Phase.DAY_VOTE
+    game, seats = await _seed_game(repo, phase=Phase.DAY_VOTE)
     gs = FakeGameService()
     decider = FakeLLMActionDecider(
         scripted=[
@@ -242,5 +250,6 @@ async def test_llm_adapter_skip_intent_abstains_on_vote(repo) -> None:
 
     players = await repo.load_players(game.id)
     await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await _drain(adapter)
     # Both LLMs abstained → target None preserved
     assert all(v[2] is None for v in gs.votes)

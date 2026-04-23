@@ -76,7 +76,11 @@ class DiscordAdapter(Protocol):
         round_: int,
     ) -> None: ...
     async def send_night_action_dms(
-        self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
+        self,
+        game: Game,
+        actors: Sequence[Player],
+        alive_players: Sequence[Player],
+        seats: Sequence[Seat],
     ) -> None: ...
 
     async def announce_waiting(
@@ -321,7 +325,9 @@ class GameService:
         elif transition.next_phase is Phase.NIGHT:
             alive_players = [p for p in players_after if p.alive]
             try:
-                await self.discord.send_night_action_dms(new_game, alive_players, seats)
+                await self.discord.send_night_action_dms(
+                    new_game, alive_players, alive_players, seats
+                )
             except Exception:
                 log.exception("send_night_action_dms failed for %s", new_game.id)
             try:
@@ -573,8 +579,9 @@ class GameService:
         if not seats_to_dm:
             return
         actors = [p for p in players if p.seat_no in seats_to_dm]
+        alive_players = [p for p in players if p.alive]
         try:
-            await self.discord.send_night_action_dms(game, actors, seats)
+            await self.discord.send_night_action_dms(game, actors, alive_players, seats)
         except Exception:
             log.exception("resend_pending_dms night failed for %s", game_id)
 
