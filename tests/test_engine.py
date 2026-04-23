@@ -115,6 +115,64 @@ async def test_engine_stops_on_game_over(repo: SqliteRepo) -> None:
     assert called == []
 
 
+async def test_engine_does_not_leak_stale_wake_across_transient_phases(
+    repo: SqliteRepo,
+) -> None:
+    """Regression: `wake()` fired during a transient-phase advance must not make
+    the next non-transient phase's `_wait_deadline_or_wake` return immediately.
+
+    Mimics `GameService.advance`, which ends every successful advance with
+    `wake()`. Across the SETUP→NIGHT_0→DAY_DISCUSSION chain, the pre-fix engine
+    raced through all phases in milliseconds because each transient advance's
+    wake leaked into the next iteration, making `wait_for` return on an
+    already-set event.
+    """
+    from wolfbot.domain.models import Transition
+
+    clock = FakeClock(now=0)
+    game = await _make_game(repo, phase=Phase.SETUP, deadline=None)
+
+    advance_calls: list[Phase] = []
+    engine_ref: list[GameEngine] = []
+
+    async def fake_advance(game_id: str) -> None:
+        current = await repo.load_game(game_id)
+        assert current is not None
+        advance_calls.append(current.phase)
+        if current.phase is Phase.SETUP:
+            await repo.apply_transition(
+                game_id,
+                Transition(next_phase=Phase.NIGHT_0, next_day=0, new_deadline_epoch=None),
+                expected_phase=Phase.SETUP,
+            )
+        elif current.phase is Phase.NIGHT_0:
+            await repo.apply_transition(
+                game_id,
+                Transition(
+                    next_phase=Phase.DAY_DISCUSSION,
+                    next_day=1,
+                    new_deadline_epoch=clock.now + 300,
+                ),
+                expected_phase=Phase.NIGHT_0,
+            )
+        engine_ref[0].wake()
+
+    engine = GameEngine(game_id=game.id, repo=repo, advance=fake_advance, clock=clock)
+    engine_ref.append(engine)
+    engine.start()
+    await asyncio.sleep(0.05)  # let SETUP→NIGHT_0→DAY_DISCUSSION cascade run
+
+    assert advance_calls == [Phase.SETUP, Phase.NIGHT_0], (
+        f"expected only transient advances, got {advance_calls!r} — engine leaked "
+        "a stale wake into DAY_DISCUSSION wait"
+    )
+    assert engine._task is not None  # type: ignore[attr-defined]
+    assert not engine._task.done(), (  # type: ignore[attr-defined]
+        "engine should be parked in _wait_deadline_or_wake(300), not exited"
+    )
+    await engine.stop()
+
+
 async def test_registry_wake_routes_to_engine(repo: SqliteRepo) -> None:
     registry = EngineRegistry()
     clock = FakeClock(now=0)

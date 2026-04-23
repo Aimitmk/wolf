@@ -58,6 +58,18 @@ class GameEngine:
 
     async def _run(self) -> None:
         while not self._stopped.is_set():
+            # Drop any wake left set by a prior iteration — notably the chain
+            # of transient-phase advances (SETUP→NIGHT_0→DAY_DISCUSSION) each
+            # calls `wake()` at the end of `GameService.advance`, leaving the
+            # event set when we finally reach a deadline-bearing phase. Without
+            # this clear, `_wait_deadline_or_wake(300)` would return instantly
+            # on a pre-set event and the engine would race through DAY_DISCUSSION
+            # and DAY_VOTE in milliseconds. The re-read below captures whatever
+            # state those wakes were signaling, so discarding them here is
+            # lossless. Wakes fired AFTER this line (during load_game's awaits
+            # or inside _wait_deadline_or_wake) still work — they set the event
+            # before we await it.
+            self._wake.clear()
             try:
                 game = await self.repo.load_game(self.game_id)
             except Exception:
