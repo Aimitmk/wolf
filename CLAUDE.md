@@ -55,6 +55,8 @@ ui/            discord.ui Views (DM vote/action selects)
 main.py        wiring
 ```
 
+Within `services/`: `discord_service.py` contains both `DiscordBotAdapter` and the `WolfCog` slash-command dispatcher — new slash commands go in the cog, new Discord side-effects in the adapter. `submission_snapshot.py` is the shared pending-submission calculator, reused by `GameService` (early-wake checks) and `RecoveryService` (DM restoration on restart); reuse it rather than re-implement the "who still owes a submission" logic.
+
 ### The advance loop is the heart of the system
 
 1. Each active game has a `GameEngine` (`src/wolfbot/services/timer_service.py`) watching `deadline_epoch`.
@@ -71,13 +73,14 @@ See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` a
 
 ### Protocols for testability
 
-`GameService` talks to its collaborators through Protocols defined alongside it (`DiscordAdapter`, `LLMAdapter`, `LLMActionDecider`, `MessagePoster`, `WakeRegistry`). Tests swap in `FakeDiscordAdapter`, `FakeLLMAdapter`, `FakeClock` from `tests/fakes.py`. When you add a new collaborator, define a Protocol and a Fake — do **not** reach into `discord.py` or the xAI client from tests.
+`GameService` talks to its collaborators through Protocols defined alongside it (`DiscordAdapter`, `LLMAdapter`, `LLMActionDecider`, `MessagePoster`, `WakeSink`). `RecoveryService` defines its own narrower `RecoveryDiscordAdapter` for startup reconciliation. Tests swap in `FakeDiscordAdapter`, `FakeLLMAdapter`, `FakeClock` from `tests/fakes.py`. When you add a new collaborator, define a Protocol and a Fake — do **not** reach into `discord.py` or the xAI client from tests.
 
 ### Domain model split
 
 - **Frozen Pydantic models** (`ConfigDict(frozen=True)`) for data that must not mutate mid-flight: `Seat`, `LogEntry`, `PendingDecision`, `Transition`, `VoteOutcome`.
 - **Mutable live state** rehydrated from DB per operation: `Player`, `Game`, `Vote`, `NightAction`.
 - Atomic replacement is via `apply_transition`. Never mutate a model after it's been committed.
+- `submit_vote` / `submit_night_action` return `SubmitResult` (`src/wolfbot/domain/enums.py`) — a StrEnum of specific rejection reasons the UI surfaces back to the player. New submission endpoints should return `SubmitResult`, not a bool.
 
 ### Recovery on startup
 
@@ -86,6 +89,10 @@ See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` a
 - If `deadline_epoch < now`, the game is parked in `WAITING_HOST_DECISION`. The host must intervene via `/wolf force-skip` or `/wolf extend`. This is deliberate — do **not** auto-resolve stale actions silently.
 - Otherwise, reconcile Discord permissions and reattach a `GameEngine`.
 - Per-game isolation: one game's failed recovery must not block others.
+
+### Persistence schema
+
+`src/wolfbot/persistence/schema.py` is idempotent DDL (`CREATE TABLE/INDEX IF NOT EXISTS`), applied on every boot via `migrate()`. There is no alembic, no version table. Adding a column means editing `schema.py` with a nullable or defaulted column so existing DBs upgrade cleanly on the next boot — destructive migrations (drops, renames, type changes) have no first-class support and require a manual plan.
 
 ### Discord channel permissions
 
@@ -96,6 +103,8 @@ See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` a
 - **Heaven** (private) — dead players see+send; living players cannot see.
 
 The manager is idempotent: it only issues API calls on actual diffs. Don't send blind permission updates from other code paths.
+
+On game end, `heaven_channel_id` / `wolves_channel_id` are **deleted** (not just permission-cleared) — a deliberate fix for cross-game channel leak. Preserve this on any future game-teardown path.
 
 ### LLM integration
 
