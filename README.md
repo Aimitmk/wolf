@@ -64,11 +64,11 @@ LOG_LEVEL=INFO
 1. bot を運用する guild を 1 つ決めます。
 2. その guild に、ゲーム専用で使う既存のメイン text チャンネルと既存のメイン VC を用意します。
 3. メイン text チャンネルは、ゲーム外の投稿や観戦者の発言が混ざらないよう、専用チャンネルにするか基底権限を事前に確認します。
-4. Discord Developer Portal で対象 bot の設定を開き、Privileged Gateway Intents の `Message Content Intent` と `Server Members Intent` を有効にします。
-5. Discord クライアントで開発者モードを有効にし、guild とチャンネルの数値 ID をコピーできるようにします。
-6. サーバー ID をコピーして `DISCORD_GUILD_ID` に入れます。
-7. メイン text チャンネルの ID をコピーして `MAIN_TEXT_CHANNEL_ID` に入れます。
-8. メイン VC の ID をコピーして `MAIN_VOICE_CHANNEL_ID` に入れます。
+4. Discord Developer Portal で対象 app の `Bot` ページを開き、Privileged Gateway Intents の `Message Content Intent` と `Server Members Intent` を有効にします。
+5. 同じ `Bot` ページで `Require OAuth2 Code Grant` が有効なら無効にします。これが有効だと、通常の `Add to server` フローだけでは bot が guild に参加しません。owner 以外にも追加させたい場合は `Public Bot` も有効にしておきます。
+6. `Installation` ページを開き、`Install Link` が `Discord Provided Link` になっていることを確認します。
+7. `Installation Contexts` で `Guild Install` を有効にします。
+8. `Default Install Settings` の `Guild Install` 側で、scopes に `bot` と `applications.commands` の両方を入れます。`applications.commands` だけでは slash command app としては入っても、bot メンバーとして guild に参加しません。
 9. bot に次の権限を付与します。
 
    | 権限名 | 必須 / 補足 | 用途 |
@@ -82,8 +82,15 @@ LOG_LEVEL=INFO
    `Manage Roles` は Discord の画面によって `Manage Permissions` のように表示されることがあります。`Send Messages` がなければ公開チャンネルへの進行通知ができず、`View Channels` がなければチャンネル自体にアクセスできません。
 
    この bot は VC に参加したり発話したりしないため、音声系の権限は不要です。DM 送信は guild 権限ではなく各プレイヤーの DM 受信設定に依存します。
-10. プレイヤーが bot から DM を受け取れる状態か確認します。`/wolf start` 実行時に DM を開けない参加者がいると開始できません。
-11. `wolf-heaven` と `wolf-wolves` はゲーム作成時に bot が自動で作成し、ゲーム終了時に削除するため、管理者が事前に作る必要はありません。
+10. `Installation` ページの default Install Link を開き、`Add to server` を選んで対象 guild にインストールします。server に bot を入れたい場合は `Add to my apps` ではなく `Add to server` を選んでください。
+11. インストール後、対象 guild のメンバー一覧に bot が表示されることを確認します。
+12. メンバー一覧に bot がいない場合は `Server Settings > Integrations` を確認します。app は見えるのに bot メンバーがいない場合は、`Guild Install` や `bot` scope の設定がずれている可能性が高いので、Developer Portal の `Installation` ページを見直してから入れ直します。
+13. Discord クライアントで開発者モードを有効にし、guild とチャンネルの数値 ID をコピーできるようにします。
+14. サーバー ID をコピーして `DISCORD_GUILD_ID` に入れます。
+15. メイン text チャンネルの ID をコピーして `MAIN_TEXT_CHANNEL_ID` に入れます。
+16. メイン VC の ID をコピーして `MAIN_VOICE_CHANNEL_ID` に入れます。
+17. プレイヤーが bot から DM を受け取れる状態か確認します。`/wolf start` 実行時に DM を開けない参加者がいると開始できません。
+18. `wolf-heaven` と `wolf-wolves` はゲーム作成時に bot が自動で作成し、ゲーム終了時に削除するため、管理者が事前に作る必要はありません。
 
 ### 4. bot を起動する
 
@@ -110,8 +117,10 @@ uv run wolfbot
 
 - メイン text チャンネルとメイン VC は、bot が新規作成するのではなく既存チャンネルを使います。
 - slash command は `/wolf` グループで提供され、設定された 1 つの guild に同期されます。
+- bot を guild へ入れるときは `Add to server` を選びます。`Add to my apps` は user install で、server member としては参加しません。
 - bot はゲーム作成時に秘密 text チャンネル `wolf-heaven` と `wolf-wolves` を自動作成し、ゲーム終了時に削除します。
 - bot は進行に応じてチャンネル権限の上書きを更新します。必要な権限はセットアップ手順 3 の表を参照してください。
+- `Server Settings > Integrations` にだけ app が見えて bot メンバーがいない場合は、`Installation` ページの `Guild Install` と `bot` scope を見直してください。
 - メイン text チャンネルの基底権限と、プレイヤーの DM 受信設定は事前に管理者が確認してください。
 
 ## 使い方
