@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -668,6 +668,64 @@ class SqliteRepo:
                             last_guard_day=excluded.last_guard_day
                         """,
                         (game_id, knight_seat, target_seat, transition.next_day),
+                    )
+        except _OptimisticLockMiss:
+            return False
+        return True
+
+    # -------------------------------------------------- claim lobby start
+    async def claim_start_and_backfill(
+        self,
+        game_id: str,
+        *,
+        expected_phase: Phase,
+        llm_seats: Sequence[tuple[str, str]],
+    ) -> bool:
+        """Atomically claim LOBBY→SETUP and insert LLM seats in one transaction.
+
+        `llm_seats` is a sequence of (display_name, persona_key) to insert into
+        the next free seat numbers 1..9. Returns False (rollback, no writes) if
+        expected_phase no longer matches. Any insert failure also rolls back.
+        """
+        try:
+            async with self._tx() as db:
+                cur = await db.execute(
+                    "UPDATE games SET phase=?, day_number=?, deadline_epoch=? "
+                    "WHERE id=? AND phase=?",
+                    (Phase.SETUP.value, 0, None, game_id, expected_phase.value),
+                )
+                if cur.rowcount != 1:
+                    raise _OptimisticLockMiss()
+
+                async with db.execute(
+                    "SELECT seat_no FROM seats WHERE game_id=?", (game_id,)
+                ) as scur:
+                    rows = await scur.fetchall()
+                used = {int(r["seat_no"]) for r in rows}
+                free_slots = [i for i in range(1, 10) if i not in used]
+                if len(llm_seats) > len(free_slots):
+                    raise ValueError(
+                        f"not enough free seats: need {len(llm_seats)}, "
+                        f"have {len(free_slots)}"
+                    )
+
+                for (display_name, persona_key), seat_no in zip(
+                    llm_seats, free_slots, strict=False
+                ):
+                    await db.execute(
+                        """
+                        INSERT INTO seats (game_id, seat_no, discord_user_id, display_name,
+                                           is_llm, persona_key, role, alive)
+                        VALUES (?, ?, NULL, ?, 1, ?, NULL, 1)
+                        """,
+                        (game_id, seat_no, display_name, persona_key),
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO persona_assignments (game_id, seat_no, persona_key)
+                        VALUES (?, ?, ?)
+                        """,
+                        (game_id, seat_no, persona_key),
                     )
         except _OptimisticLockMiss:
             return False

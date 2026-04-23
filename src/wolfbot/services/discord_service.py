@@ -41,6 +41,29 @@ from wolfbot.ui.views import NightActionView, VoteView
 log = logging.getLogger(__name__)
 
 
+def render_pending_host_lines(
+    pending: PendingDecision,
+    seat_name: dict[int, str],
+) -> list[str]:
+    """Per-submission lines for the /wolf status ホスト待ち field.
+
+    Mirrors announce_waiting: shows missing_seats and unresolved_seats on
+    separate lines so split wolf attacks don't hide behind an empty missing
+    list.
+    """
+    lines: list[str] = []
+    for sub in pending.effective_submissions():
+        if sub.missing_seats:
+            names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
+            lines.append(f"`{sub.submission_type.value}` 未提出: {names}")
+        if sub.unresolved_seats:
+            names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.unresolved_seats)
+            lines.append(
+                f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): {names}"
+            )
+    return lines
+
+
 # --------------------------------------------------------------- DiscordBotAdapter
 class DiscordBotAdapter:
     """Implements the DiscordAdapter protocol by operating on a live discord.Client."""
@@ -475,16 +498,13 @@ class WolfCog(commands.Cog):
             return
 
         shortfall = 9 - len(humans)
-        if shortfall > 0:
-            await _backfill_llm_seats(self.repo, game.id, shortfall, self.rng)
+        picks = pick_personas(shortfall, self.rng) if shortfall > 0 else []
+        llm_seats = [(p.display_name, p.key) for p in picks]
 
-        # Move to SETUP; engine picks it up
-        from wolfbot.domain.models import Transition
-
-        ok = await self.repo.apply_transition(
+        ok = await self.repo.claim_start_and_backfill(
             game.id,
-            Transition(next_phase=Phase.SETUP, next_day=0, new_deadline_epoch=None),
             expected_phase=Phase.LOBBY,
+            llm_seats=llm_seats,
         )
         if not ok:
             await interaction.followup.send(
@@ -534,15 +554,9 @@ class WolfCog(commands.Cog):
             inline=False,
         )
         if pending is not None:
-            lines: list[str] = []
-            for sub in pending.effective_submissions():
-                missing = ", ".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
-                lines.append(f"`{sub.submission_type.value}`: {missing if missing else '(なし)'}")
-            embed.add_field(
-                name="未提出",
-                value="\n".join(lines),
-                inline=False,
-            )
+            lines = render_pending_host_lines(pending, seat_name)
+            if lines:
+                embed.add_field(name="ホスト待ち", value="\n".join(lines), inline=False)
         await interaction.response.send_message(embed=embed)
 
     # --------------------------------------------------------------- /wolf extend
@@ -680,31 +694,3 @@ def _next_seat_no(existing: Sequence[Seat]) -> int:
     return 9
 
 
-async def _backfill_llm_seats(
-    repo: SqliteRepo,
-    game_id: str,
-    shortfall: int,
-    rng: Random,
-) -> None:
-    """Insert `shortfall` LLM seats into the game using the next free seat numbers.
-
-    Factored out of /wolf start so the seat-number assignment can be unit tested
-    without a Discord interaction. Re-reads seats between inserts so the next
-    free seat (1..9) is always correct even when starting from a partial lineup.
-    """
-    if shortfall <= 0:
-        return
-    picks = pick_personas(shortfall, rng)
-    seats = await repo.load_seats(game_id)
-    for persona in picks:
-        seat_no = _next_seat_no(seats)
-        llm_seat = Seat(
-            seat_no=seat_no,
-            display_name=persona.display_name,
-            discord_user_id=None,
-            is_llm=True,
-            persona_key=persona.key,
-        )
-        await repo.insert_seat(game_id, llm_seat)
-        await repo.insert_persona_assignment(game_id, seat_no, persona.key)
-        seats = await repo.load_seats(game_id)
