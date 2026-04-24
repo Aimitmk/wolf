@@ -86,7 +86,9 @@ async def test_partial_channel_failure_rolls_back_heaven(repo) -> None:
     heaven = FakeChannel(id=1)
     queue: list[FakeChannel | None] = [heaven, None]  # wolves fails
 
-    async def fake_create(guild: Any, name: str) -> FakeChannel | None:
+    async def fake_create(
+        guild: Any, name: str, *, safe_to_delete_ids: set[str]
+    ) -> FakeChannel | None:
         return queue.pop(0)
 
     cog._create_private_channel = fake_create  # type: ignore[method-assign]
@@ -104,7 +106,7 @@ async def test_concurrent_create_serializes_and_skips_loser(repo) -> None:
     next_id = [0]
     call_log: list[str] = []
 
-    async def fake_create(guild: Any, name: str) -> FakeChannel:
+    async def fake_create(guild: Any, name: str, *, safe_to_delete_ids: set[str]) -> FakeChannel:
         call_log.append(f"start:{name}")
         # Yield so an unlocked scenario would interleave A and B.
         await asyncio.sleep(0)
@@ -149,7 +151,7 @@ async def test_different_guilds_have_independent_locks(repo) -> None:
     cog = _build_cog(repo)
     next_id = [0]
 
-    async def fake_create(guild: Any, name: str) -> FakeChannel:
+    async def fake_create(guild: Any, name: str, *, safe_to_delete_ids: set[str]) -> FakeChannel:
         next_id[0] += 1
         return FakeChannel(id=next_id[0])
 
@@ -168,3 +170,106 @@ async def test_different_guilds_have_independent_locks(repo) -> None:
     # Per-guild semantics: distinct lock objects — a global lock would regress
     # multi-guild throughput.
     assert cog._create_locks["1"] is not cog._create_locks["2"]
+
+
+# -----------------------------------------------------------------------
+# Stale-purge safety (the review finding): _create_private_channel must only
+# delete a same-named pre-existing channel if it was created by the bot in a
+# prior game — i.e. its Discord id is in the guild's recorded channel history.
+# -----------------------------------------------------------------------
+
+
+class _FakeExistingChannel:
+    def __init__(self, channel_id: int, name: str) -> None:
+        self.id = channel_id
+        self.name = name
+        self.deleted = False
+
+    async def delete(self, reason: str = "") -> None:
+        self.deleted = True
+
+
+class _FakeCreatedChannel:
+    def __init__(self, channel_id: int, name: str) -> None:
+        self.id = channel_id
+        self.name = name
+
+
+class _FakeGuildWithChannels:
+    def __init__(self, guild_id: int, text_channels: list[_FakeExistingChannel]) -> None:
+        self.id = guild_id
+        self.text_channels = text_channels
+        self.default_role = object()
+        self.me = object()
+        self._next_created = 7000
+
+    async def create_text_channel(
+        self, name: str, overwrites: Any = None, reason: str = ""
+    ) -> _FakeCreatedChannel:
+        self._next_created += 1
+        return _FakeCreatedChannel(channel_id=self._next_created, name=name)
+
+
+async def _seed_prior_game(
+    repo: Any,
+    *,
+    guild_id: str,
+    heaven_channel_id: str,
+    wolves_channel_id: str,
+) -> None:
+    """Insert a past (ended) game so its channel IDs are in history."""
+    from wolfbot.domain.models import Game
+    from wolfbot.services.game_service import new_game_id
+
+    game = Game(
+        id=new_game_id(),
+        guild_id=guild_id,
+        host_user_id="h",
+        main_text_channel_id="100",
+        main_vc_channel_id="200",
+        heaven_channel_id=heaven_channel_id,
+        wolves_channel_id=wolves_channel_id,
+        created_at=0,
+        ended_at=1,
+    )
+    await repo.create_game(game)
+    await repo.end_game(game.id, ended_at_epoch=1)
+
+
+async def test_create_refuses_to_delete_foreign_same_named_channel(repo) -> None:
+    """Admin-created `wolf-heaven` with an ID unknown to the bot must survive
+    /wolf create untouched; the method must signal failure via None."""
+    cog = _build_cog(repo)
+    await _seed_prior_game(repo, guild_id="42", heaven_channel_id="999", wolves_channel_id="888")
+    foreign = _FakeExistingChannel(channel_id=12345, name="wolf-heaven")
+    guild = _FakeGuildWithChannels(guild_id=42, text_channels=[foreign])
+
+    safe_ids = await repo.load_private_channel_ids_for_guild("42")
+    result = await cog._create_private_channel(
+        guild,  # type: ignore[arg-type]
+        name="wolf-heaven",
+        safe_to_delete_ids=safe_ids,
+    )
+
+    assert result is None
+    assert foreign.deleted is False
+
+
+async def test_create_deletes_channel_matching_past_bot_game(repo) -> None:
+    """If a same-named channel's ID is in the bot's own history, it's safely
+    recognized as a stale bot channel and purged so the new game can proceed."""
+    cog = _build_cog(repo)
+    await _seed_prior_game(repo, guild_id="42", heaven_channel_id="999", wolves_channel_id="888")
+    stale = _FakeExistingChannel(channel_id=999, name="wolf-heaven")
+    guild = _FakeGuildWithChannels(guild_id=42, text_channels=[stale])
+
+    safe_ids = await repo.load_private_channel_ids_for_guild("42")
+    result = await cog._create_private_channel(
+        guild,  # type: ignore[arg-type]
+        name="wolf-heaven",
+        safe_to_delete_ids=safe_ids,
+    )
+
+    assert stale.deleted is True
+    assert result is not None
+    assert result.name == "wolf-heaven"

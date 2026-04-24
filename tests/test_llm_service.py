@@ -1048,9 +1048,7 @@ async def test_ask_system_prompt_speech_profile_per_seat(repo: SqliteRepo) -> No
 async def test_ask_system_prompt_kukrushka_uses_silent_gesture(repo: SqliteRepo) -> None:
     """Kukrushka's prompt renders in silent_gesture mode — gesture examples
     replace the normal `一人称` line."""
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.VILLAGER, persona_key="kukrushka"
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER, persona_key="kukrushka")
     assert "叙述モード" in system_prompt
     assert "所作" in system_prompt
 
@@ -1074,9 +1072,7 @@ async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy_even_with_speec
     for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
         for pkey in ("setsu", "sq", "yuriko", "kukrushka"):
             system_prompt = await _capture_ask_system_prompt(repo, role, persona_key=pkey)
-            assert "相方" not in system_prompt, (
-                f"{role.name}/{pkey} saw '相方' in system prompt"
-            )
+            assert "相方" not in system_prompt, f"{role.name}/{pkey} saw '相方' in system prompt"
             assert "襲撃先を揃える" not in system_prompt, (
                 f"{role.name}/{pkey} saw '襲撃先を揃える' in system prompt"
             )

@@ -383,3 +383,48 @@ async def test_post_failure_does_not_consume_speech_quota(repo) -> None:
     count, _, last = await repo.load_llm_speech(game.id, day=1, seat_no=2)
     assert count == 0
     assert last is None
+
+
+class SlowDecider(FakeLLMActionDecider):
+    """Simulates an xAI round-trip that takes `delta` seconds by advancing the
+    shared clock holder inside `decide()`. Used to verify that cooldown
+    anchors land at the post-completion time, not the pre-inference time."""
+
+    def __init__(self, clock_holder: list[int], delta: int, **kw: Any) -> None:
+        super().__init__(**kw)
+        self._clock_holder = clock_holder
+        self._delta = delta
+
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        self._clock_holder[0] += self._delta
+        return await super().decide(system_prompt, user_context)
+
+
+async def test_last_spoke_epoch_reflects_post_time_not_inference_start(repo) -> None:
+    """If xAI takes 25 s, `last_spoke_epoch` must be set to 1025 (post time),
+    not 1000 (pre-inference time). Otherwise the cooldown window opens 25 s
+    earlier than reality and a fast follow-up would slip through."""
+    game, seats = await _seed(repo)
+    poster = FakePoster()
+    clock_val = [1000]
+    decider = SlowDecider(
+        clock_holder=clock_val,
+        delta=25,
+        default=LLMAction(intent="speak", public_message="遅延投稿", reason_summary="slow"),
+    )
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=decider,
+        message_poster=poster,
+        rng=random.Random(0),
+        clock=lambda: clock_val[0],
+    )
+    adapter.set_game_service(FakeGS())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="セツ 発言して")
+
+    assert len(poster.messages) == 1
+    count, _, last = await repo.load_llm_speech(game.id, day=1, seat_no=2)
+    assert count == 1
+    assert last == 1025  # post-completion time, not pre-inference (1000)

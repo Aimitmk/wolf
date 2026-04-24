@@ -683,6 +683,12 @@ class LLMAdapter:
                 except Exception:
                     log.exception("post_public for LLM speech failed")
             if posted:
+                # Use the post-completion time as both the log timestamp and
+                # the cooldown anchor. A slow xAI round-trip would otherwise
+                # leave last_spoke_epoch pointing at the pre-inference now,
+                # letting the cooldown window expire earlier than the actual
+                # post time and enabling unintended back-to-back speeches.
+                posted_at = self._clock()
                 try:
                     await self.repo.insert_log_public(
                         LogEntry(
@@ -693,13 +699,13 @@ class LLMAdapter:
                             actor_seat=player.seat_no,
                             visibility="PUBLIC",
                             text=message,
-                            created_at=now,
+                            created_at=posted_at,
                         )
                     )
                 except Exception:
                     log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
                 await self.repo.increment_llm_normal_speech(
-                    game.id, game.day_number, player.seat_no, now
+                    game.id, game.day_number, player.seat_no, posted_at
                 )
 
     # ------------------------------------------------------ helpers

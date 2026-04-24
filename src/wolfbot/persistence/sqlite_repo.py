@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from enum import StrEnum
@@ -15,7 +16,7 @@ from typing import Any
 
 import aiosqlite
 
-from wolfbot.domain.enums import DeathCause, Phase, Role, SubmissionType
+from wolfbot.domain.enums import VILLAGE_SIZE, DeathCause, Phase, Role, SubmissionType
 from wolfbot.domain.errors import ActiveGameExistsError
 from wolfbot.domain.models import (
     Game,
@@ -29,6 +30,8 @@ from wolfbot.domain.models import (
     Transition,
     Vote,
 )
+
+log = logging.getLogger(__name__)
 
 
 class JoinLobbyResult(StrEnum):
@@ -255,6 +258,27 @@ class SqliteRepo:
         ) as cur:
             row = await cur.fetchone()
         return _row_to_game(row) if row else None
+
+    async def load_private_channel_ids_for_guild(self, guild_id: str) -> set[str]:
+        """Return every heaven/wolves channel id ever recorded for this guild.
+
+        Used by /wolf create to decide whether a same-named existing channel is
+        a stale bot channel (safe to purge) or an unrelated channel (must not
+        touch). Does NOT filter by ended_at — if a prior on_game_end failed to
+        delete, the id is still only discoverable via the games table.
+        """
+        async with self._db.execute(
+            """
+            SELECT heaven_channel_id AS ch FROM games
+             WHERE guild_id=? AND heaven_channel_id IS NOT NULL
+            UNION
+            SELECT wolves_channel_id AS ch FROM games
+             WHERE guild_id=? AND wolves_channel_id IS NOT NULL
+            """,
+            (guild_id, guild_id),
+        ) as cur:
+            rows = await cur.fetchall()
+        return {str(row["ch"]) for row in rows}
 
     async def end_game(self, game_id: str, ended_at_epoch: int) -> None:
         async with self._tx() as db:
@@ -802,6 +826,19 @@ class SqliteRepo:
                 ) as scur:
                     rows = await scur.fetchall()
                 used = {int(r["seat_no"]) for r in rows}
+                # The caller precomputes llm_seats against a seat snapshot taken
+                # outside this tx. If join_lobby/leave_lobby won the race in
+                # between, the snapshot is stale and the final roster would end
+                # up != VILLAGE_SIZE. Validate in-tx so the phase UPDATE rolls
+                # back with the seat layout untouched.
+                if len(used) + len(llm_seats) != VILLAGE_SIZE:
+                    log.warning(
+                        "backfill seat count mismatch game=%s used=%d llm=%d — rolling back",
+                        game_id,
+                        len(used),
+                        len(llm_seats),
+                    )
+                    raise _BackfillSeatCountMismatch()
                 free_slots = [i for i in range(1, 10) if i not in used]
                 if len(llm_seats) > len(free_slots):
                     raise ValueError(
@@ -826,16 +863,31 @@ class SqliteRepo:
                         """,
                         (game_id, seat_no, persona_key),
                     )
-        except _OptimisticLockMiss:
+        except _LobbyClaimAborted:
             return False
         return True
 
 
-class _OptimisticLockMiss(Exception):
+class _LobbyClaimAborted(Exception):
+    """Base for conditions that roll back a LOBBY-claim tx to False.
+
+    `async with self._tx()` catches any exception, rolls back, and re-raises;
+    the outer boundary narrows to this base to convert "expected failures" into
+    a False return while still letting genuine errors propagate.
+    """
+
+
+class _OptimisticLockMiss(_LobbyClaimAborted):
     """Raised inside _tx when the expected_phase no longer matches.
 
-    The `async with self._tx()` context catches it, rolls back, and re-raises.
     SqliteRepo.apply_transition catches at the outer boundary and returns False.
+    """
+
+
+class _BackfillSeatCountMismatch(_LobbyClaimAborted):
+    """Raised when the seat roster shifted between /wolf start preflight and
+    the atomic LOBBY→SETUP claim. Triggers a full tx rollback so the lobby
+    remains untouched and the host can retry /wolf start with a fresh count.
     """
 
 

@@ -86,6 +86,19 @@ def render_pending_host_lines(
     return lines
 
 
+def _main_channel_should_llm_react(author_seat: int | None, players: Sequence[Player]) -> bool:
+    """Gate keeping LLM reactions in DAY_DISCUSSION to in-game living players.
+
+    Mirrors the wolves-channel alive-check at on_message: a non-participant
+    (spectator, admin) or a dead player must not be able to steer the LLMs by
+    dropping keywords into the main channel.
+    """
+    if author_seat is None:
+        return False
+    author = next((p for p in players if p.seat_no == author_seat), None)
+    return author is not None and author.alive
+
+
 # --------------------------------------------------------------- DiscordBotAdapter
 class DiscordBotAdapter:
     """Implements the DiscordAdapter protocol by operating on a live discord.Client."""
@@ -462,16 +475,17 @@ class WolfCog(commands.Cog):
                     )
                 except Exception:
                     log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
-            try:
-                await self.llm_adapter.maybe_react_to_message(
-                    game,
-                    players,
-                    seats,
-                    author_seat=author_seat,
-                    text=message.content,
-                )
-            except Exception:
-                log.exception("llm_adapter reaction failed for %s", game.id)
+            if _main_channel_should_llm_react(author_seat, players):
+                try:
+                    await self.llm_adapter.maybe_react_to_message(
+                        game,
+                        players,
+                        seats,
+                        author_seat=author_seat,
+                        text=message.content,
+                    )
+                except Exception:
+                    log.exception("llm_adapter reaction failed for %s", game.id)
             return
 
         if is_wolves and game.phase is Phase.NIGHT and author_seat is not None:
@@ -534,21 +548,31 @@ class WolfCog(commands.Cog):
                 )
                 return
 
-            heaven = await self._create_private_channel(interaction.guild, name="wolf-heaven")
+            # Snapshot the set of channel IDs the bot has previously owned in
+            # this guild. `_create_private_channel` will only purge same-named
+            # existing channels whose ID is in this set — a manually-made
+            # `wolf-heaven` / `wolf-wolves` lacking a matching history row
+            # gets refused rather than silently deleted.
+            safe_ids = await self.repo.load_private_channel_ids_for_guild(guild_id)
+            create_failed_msg = (
+                "チャンネル作成に失敗しました。"
+                "Bot の権限、または同名の `wolf-heaven` / `wolf-wolves` が手動作成されていないかを確認してください。"
+            )
+            heaven = await self._create_private_channel(
+                interaction.guild, name="wolf-heaven", safe_to_delete_ids=safe_ids
+            )
             if heaven is None:
-                await interaction.followup.send(
-                    "チャンネル作成に失敗しました。Bot の権限を確認してください。"
-                )
+                await interaction.followup.send(create_failed_msg)
                 return
-            wolves = await self._create_private_channel(interaction.guild, name="wolf-wolves")
+            wolves = await self._create_private_channel(
+                interaction.guild, name="wolf-wolves", safe_to_delete_ids=safe_ids
+            )
             if wolves is None:
                 try:
                     await heaven.delete(reason="wolfbot: partial /wolf create rollback")
                 except discord.DiscordException:
                     log.exception("cleanup of heaven %s failed", heaven.id)
-                await interaction.followup.send(
-                    "チャンネル作成に失敗しました。Bot の権限を確認してください。"
-                )
+                await interaction.followup.send(create_failed_msg)
                 return
 
             game = Game(
@@ -852,14 +876,30 @@ class WolfCog(commands.Cog):
         return failures
 
     async def _create_private_channel(
-        self, guild: discord.Guild, name: str
+        self,
+        guild: discord.Guild,
+        name: str,
+        *,
+        safe_to_delete_ids: set[str],
     ) -> discord.TextChannel | None:
         # Paranoia layer for secrecy: if a same-named channel lingers (previous
-        # game's on_game_end failed, or it was created manually), delete it so we
-        # never reuse history across games. Refuse to fall back to reuse on
-        # failure — secrecy trumps availability.
+        # game's on_game_end failed, or it was created manually), delete it so
+        # we never reuse history across games. `safe_to_delete_ids` must match
+        # a channel the bot itself created (tracked via heaven/wolves
+        # channel_ids in the games table). A same-name match with a foreign ID
+        # — e.g. an admin-made channel that happens to collide — is refused:
+        # returning None aborts /wolf create so the admin can resolve the
+        # collision manually.
         existing = discord.utils.get(guild.text_channels, name=name)
         if existing is not None:
+            if str(existing.id) not in safe_to_delete_ids:
+                log.error(
+                    "refusing to delete %s (id=%s) — not in bot-managed history for guild=%s",
+                    name,
+                    existing.id,
+                    guild.id,
+                )
+                return None
             try:
                 await existing.delete(reason="wolfbot: purge stale private channel from prior game")
             except discord.DiscordException:

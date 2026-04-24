@@ -191,3 +191,53 @@ async def test_backfill_concurrent_calls_only_winner_writes(
     assert len(llm_seats) == 4
     persona_keys = await repo.load_persona_keys(game_id)
     assert len(persona_keys) == 4
+
+
+async def test_backfill_rolls_back_when_leave_makes_seats_underfilled(
+    repo: SqliteRepo,
+) -> None:
+    """Guards the /wolf start vs /wolf leave race: if someone leaves after the
+    caller snapshotted seat count but before the atomic claim runs, the final
+    roster would be < 9. The in-tx invariant must reject this and roll back."""
+    game_id = await _seed_game_with_humans(repo, 8)
+    specs = _picks_as_specs(1, seed=9)  # preflight saw 8 humans → expects 1 LLM
+
+    # Someone leaves between preflight and claim.
+    leave_result = await repo.leave_lobby(game_id, discord_user_id="u8")
+    assert leave_result.value == "accepted"
+
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
+    assert ok is False
+
+    game_after = await repo.load_game(game_id)
+    assert game_after is not None and game_after.phase is Phase.LOBBY
+    seats = await repo.load_seats(game_id)
+    assert len(seats) == 7
+    assert all(not s.is_llm for s in seats)
+    persona_keys = await repo.load_persona_keys(game_id)
+    assert persona_keys == {}
+
+
+async def test_backfill_rolls_back_when_join_makes_seats_overfilled(
+    repo: SqliteRepo,
+) -> None:
+    """Mirror race: a late /wolf join after preflight makes humans+llm > 9.
+    Must abort atomically so the lobby stays intact for a retry."""
+    game_id = await _seed_game_with_humans(repo, 7)
+    specs = _picks_as_specs(2, seed=10)  # preflight saw 7 humans → expects 2 LLMs
+
+    # Two late joins between preflight and claim.
+    r1, _ = await repo.join_lobby(game_id, discord_user_id="u8", display_name="H8")
+    r2, _ = await repo.join_lobby(game_id, discord_user_id="u9", display_name="H9")
+    assert r1.value == "accepted" and r2.value == "accepted"
+
+    ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
+    assert ok is False
+
+    game_after = await repo.load_game(game_id)
+    assert game_after is not None and game_after.phase is Phase.LOBBY
+    seats = await repo.load_seats(game_id)
+    assert len(seats) == 9
+    assert all(not s.is_llm for s in seats)
+    persona_keys = await repo.load_persona_keys(game_id)
+    assert persona_keys == {}
