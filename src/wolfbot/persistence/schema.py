@@ -162,6 +162,19 @@ async def migrate(db_path: str | Path) -> None:
             await db.execute(stmt)
         # Additive column migrations: SQLite doesn't support
         # `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we guard with PRAGMA.
+        # Each new column added to a CREATE TABLE above must also be guarded
+        # here, otherwise old DBs upgraded in place keep the pre-add schema
+        # and subsequent INSERTs fail with "no column named ...".
+        async with db.execute("PRAGMA table_info(games)") as cur:
+            cols = {row[1] async for row in cur}
+        if "force_skip_pending" not in cols:
+            await db.execute(
+                "ALTER TABLE games ADD COLUMN force_skip_pending INTEGER NOT NULL DEFAULT 0"
+            )
+        async with db.execute("PRAGMA table_info(seats)") as cur:
+            cols = {row[1] async for row in cur}
+        if "dm_channel_id" not in cols:
+            await db.execute("ALTER TABLE seats ADD COLUMN dm_channel_id TEXT")
         async with db.execute("PRAGMA table_info(pending_decisions)") as cur:
             cols = {row[1] async for row in cur}
         if "submissions_json" not in cols:

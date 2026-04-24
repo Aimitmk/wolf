@@ -34,6 +34,7 @@ from wolfbot.domain.rules import (
     legal_attack_targets,
     legal_divine_targets,
     legal_guard_targets,
+    resolve_wolf_attack,
 )
 from wolfbot.domain.state_machine import (
     plan_day_discussion_to_vote,
@@ -488,25 +489,39 @@ class GameService:
                 game_id,
             )
             return SubmitResult.ROLE_MISMATCH
-        if target_seat is not None:
-            if kind is SubmissionType.WOLF_ATTACK:
-                legal = legal_attack_targets(players, actor_seat)
-            elif kind is SubmissionType.SEER_DIVINE:
-                legal = legal_divine_targets(players, actor_seat)
-            else:  # KNIGHT_GUARD
-                prev = await self.repo.load_previous_guard(game_id)
-                prev_target = prev[1] if prev is not None else None
-                legal = legal_guard_targets(players, actor_seat, prev_target)
-            if target_seat not in legal:
-                log.info(
-                    "illegal night target seat=%s kind=%s target=%s legal=%s ignored (game=%s)",
-                    actor_seat,
-                    kind,
-                    target_seat,
-                    legal,
-                    game_id,
-                )
-                return SubmitResult.ILLEGAL_TARGET
+        # Service-boundary defense: night actions never legitimately carry
+        # target_seat=None. UI requires a Select pick; LLM resolves with
+        # allow_none=False (fallback to random legal target). A null target
+        # would otherwise be saved and later make plan_night_resolve treat
+        # the actor as "submitted" while silently dropping the effect.
+        # force-skip "no action" is handled by plan_night_resolve(force_skip=True)
+        # via missing_seats — it does not flow through this submission path.
+        if target_seat is None:
+            log.info(
+                "night action with null target rejected: seat=%s kind=%s (game=%s)",
+                actor_seat,
+                kind,
+                game_id,
+            )
+            return SubmitResult.ILLEGAL_TARGET
+        if kind is SubmissionType.WOLF_ATTACK:
+            legal = legal_attack_targets(players, actor_seat)
+        elif kind is SubmissionType.SEER_DIVINE:
+            legal = legal_divine_targets(players, actor_seat)
+        else:  # KNIGHT_GUARD
+            prev = await self.repo.load_previous_guard(game_id)
+            prev_target = prev[1] if prev is not None else None
+            legal = legal_guard_targets(players, actor_seat, prev_target)
+        if target_seat not in legal:
+            log.info(
+                "illegal night target seat=%s kind=%s target=%s legal=%s ignored (game=%s)",
+                actor_seat,
+                kind,
+                target_seat,
+                legal,
+                game_id,
+            )
+            return SubmitResult.ILLEGAL_TARGET
         await self.repo.insert_night_action(
             NightAction(
                 game_id=game_id,
@@ -653,7 +668,17 @@ class GameService:
             elif p.role is Role.WEREWOLF:
                 expected.add((p.seat_no, SubmissionType.WOLF_ATTACK))
         got = {(a.actor_seat, a.kind) for a in actions}
-        return expected.issubset(got)
+        if not expected.issubset(got):
+            return False
+        # All required actors submitted, but if wolves picked different
+        # targets, hold off on the early wake — the spec keeps the split
+        # "未確定" until the deadline so wolves can still self-correct.
+        # plan_night_resolve at the deadline detects the same split and
+        # routes to WAITING_HOST_DECISION.
+        wolf_actions = [a for a in actions if a.kind is SubmissionType.WOLF_ATTACK]
+        alive_wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+        attack = resolve_wolf_attack(wolf_actions, alive_wolves, force_skip=False)
+        return not attack.split
 
     # ------------------------------------------------------ host commands
     async def host_extend(self, game_id: str, extra_seconds: int) -> bool:

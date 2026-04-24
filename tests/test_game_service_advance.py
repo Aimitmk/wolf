@@ -1157,3 +1157,192 @@ async def test_game_over_posts_role_reveal_to_main_channel(
         assert f"- 席{sn} " in reveal_text
     assert "(生存)" in reveal_text
     assert "(死亡)" in reveal_text
+
+
+async def _advance_to_night(
+    repo: SqliteRepo,
+    service: GameService,
+    clock: FakeClock,
+) -> tuple[Game, list[int], int, int, list[int]] | None:
+    """Drive a freshly-set-up game through to NIGHT day 1, returning role seats.
+
+    Returns (game, alive_wolf_seats, seer_seat, knight_seat, alive_villager_pool).
+    `alive_villager_pool` contains alive seats that are NOT wolf/seer/knight —
+    safe defaults for "pick a victim" / "pick a guard target" without colliding
+    with the role under test. Returns None when seat 1's execution coincidentally
+    ends the game before NIGHT.
+    """
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for v in range(1, 10):
+        target = 1 if v != 1 else 2
+        await service.submit_vote(game.id, v, target, round_=0, day=1)
+    await service.advance(game.id)  # -> NIGHT (assuming game not over)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return None
+    players = await repo.load_players(game.id)
+    wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+    seer = next(p.seat_no for p in players if p.alive and p.role is Role.SEER)
+    knight = next(p.seat_no for p in players if p.alive and p.role is Role.KNIGHT)
+    villager_pool = [
+        p.seat_no
+        for p in players
+        if p.alive and p.seat_no not in wolves and p.seat_no != seer and p.seat_no != knight
+    ]
+    return loaded, wolves, seer, knight, villager_pool
+
+
+async def test_split_wolf_attack_does_not_early_wake(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """When 2 wolves submit different targets, _all_night_actions_in must not early-wake.
+
+    Spec (state_machine.py): a 1-vs-1 split stays "未確定" until the deadline so
+    wolves can self-correct. Without this guard the engine wakes the moment the
+    second wolf submits, jumping straight to WAITING_HOST_DECISION before the
+    night clock runs out.
+    """
+    service, _, _, reg, clock = svc
+    setup = await _advance_to_night(repo, service, clock)
+    if setup is None:
+        return
+    game, wolves, seer, knight, villager_pool = setup
+    if len(wolves) < 2 or len(villager_pool) < 2:
+        return  # need both wolves alive and 2 distinct legal attack targets
+
+    wakes: list[str] = []
+    reg.wake = lambda gid: wakes.append(gid)  # type: ignore[method-assign]
+
+    target_a, target_b = villager_pool[0], villager_pool[1]
+    assert target_a != target_b
+
+    # Seer + knight + two wolves: every required action submitted, but wolves split.
+    await service.submit_night_action(
+        game.id, seer, SubmissionType.SEER_DIVINE, wolves[0], day=game.day_number
+    )
+    await service.submit_night_action(
+        game.id, knight, SubmissionType.KNIGHT_GUARD, wolves[0], day=game.day_number
+    )
+    await service.submit_night_action(
+        game.id, wolves[0], SubmissionType.WOLF_ATTACK, target_a, day=game.day_number
+    )
+    await service.submit_night_action(
+        game.id, wolves[1], SubmissionType.WOLF_ATTACK, target_b, day=game.day_number
+    )
+
+    assert wakes == [], "split wolf attack must not trigger early wake"
+
+    # After the deadline expires, the regular advance path detects the split
+    # and routes into WAITING_HOST_DECISION as before.
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None and loaded.deadline_epoch is not None
+    clock.now = loaded.deadline_epoch + 1
+    await service.advance(game.id)
+    after = await repo.load_game(game.id)
+    assert after is not None
+    assert after.phase is Phase.WAITING_HOST_DECISION
+
+
+async def test_aligned_wolf_attack_still_early_wakes(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Positive regression: when both wolves agree, the early-wake path must still fire."""
+    service, _, _, reg, clock = svc
+    setup = await _advance_to_night(repo, service, clock)
+    if setup is None:
+        return
+    game, wolves, seer, knight, villager_pool = setup
+    if len(wolves) < 2 or not villager_pool:
+        return
+
+    wakes: list[str] = []
+    reg.wake = lambda gid: wakes.append(gid)  # type: ignore[method-assign]
+
+    target = villager_pool[0]
+    await service.submit_night_action(
+        game.id, seer, SubmissionType.SEER_DIVINE, wolves[0], day=game.day_number
+    )
+    await service.submit_night_action(
+        game.id, knight, SubmissionType.KNIGHT_GUARD, wolves[0], day=game.day_number
+    )
+    await service.submit_night_action(
+        game.id, wolves[0], SubmissionType.WOLF_ATTACK, target, day=game.day_number
+    )
+    await service.submit_night_action(
+        game.id, wolves[1], SubmissionType.WOLF_ATTACK, target, day=game.day_number
+    )
+
+    assert wakes == [game.id]
+
+
+async def test_submit_night_action_rejects_none_target_for_seer(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """target_seat=None on SEER_DIVINE must be rejected; nothing persisted."""
+    service, _, _, _, clock = svc
+    setup = await _advance_to_night(repo, service, clock)
+    if setup is None:
+        return
+    game, _, seer, _, _ = setup
+
+    result = await service.submit_night_action(
+        game.id, seer, SubmissionType.SEER_DIVINE, target_seat=None, day=game.day_number
+    )
+    assert result is SubmitResult.ILLEGAL_TARGET
+    actions = await repo.load_night_actions(game.id, day=game.day_number)
+    assert not any(
+        a.actor_seat == seer and a.kind is SubmissionType.SEER_DIVINE for a in actions
+    )
+
+
+async def test_submit_night_action_rejects_none_target_for_knight(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """target_seat=None on KNIGHT_GUARD must be rejected; nothing persisted."""
+    service, _, _, _, clock = svc
+    setup = await _advance_to_night(repo, service, clock)
+    if setup is None:
+        return
+    game, _, _, knight, _ = setup
+
+    result = await service.submit_night_action(
+        game.id, knight, SubmissionType.KNIGHT_GUARD, target_seat=None, day=game.day_number
+    )
+    assert result is SubmitResult.ILLEGAL_TARGET
+    actions = await repo.load_night_actions(game.id, day=game.day_number)
+    assert not any(
+        a.actor_seat == knight and a.kind is SubmissionType.KNIGHT_GUARD for a in actions
+    )
+
+
+async def test_submit_night_action_rejects_none_target_for_wolf(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """target_seat=None on WOLF_ATTACK must be rejected; nothing persisted."""
+    service, _, _, _, clock = svc
+    setup = await _advance_to_night(repo, service, clock)
+    if setup is None:
+        return
+    game, wolves, _, _, _ = setup
+    if not wolves:
+        return
+
+    result = await service.submit_night_action(
+        game.id, wolves[0], SubmissionType.WOLF_ATTACK, target_seat=None, day=game.day_number
+    )
+    assert result is SubmitResult.ILLEGAL_TARGET
+    actions = await repo.load_night_actions(game.id, day=game.day_number)
+    assert not any(
+        a.actor_seat == wolves[0] and a.kind is SubmissionType.WOLF_ATTACK for a in actions
+    )
