@@ -698,9 +698,9 @@ class LLMAdapter:
                     )
                 except Exception:
                     log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
-            await self.repo.increment_llm_normal_speech(
-                game.id, game.day_number, player.seat_no, now
-            )
+                await self.repo.increment_llm_normal_speech(
+                    game.id, game.day_number, player.seat_no, now
+                )
 
     # ------------------------------------------------------ helpers
     async def _ask(

@@ -349,3 +349,37 @@ async def test_skip_intent_means_no_post(repo) -> None:
     # Count NOT incremented since no speech happened
     count, _, _ = await repo.load_llm_speech(game.id, day=1, seat_no=2)
     assert count == 0
+
+
+@dataclass
+class FailingPoster:
+    calls: int = 0
+
+    async def post_public(self, game: Any, text: str, kind: str) -> None:
+        self.calls += 1
+        raise RuntimeError("simulated Discord outage")
+
+
+async def test_post_failure_does_not_consume_speech_quota(repo) -> None:
+    game, seats = await _seed(repo)
+    poster = FailingPoster()
+    decider = FakeLLMActionDecider(
+        default=LLMAction(intent="speak", public_message="挨拶します", reason_summary="reactive"),
+    )
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=decider,
+        message_poster=poster,
+        rng=random.Random(0),
+        clock=lambda: 7000,
+    )
+    adapter.set_game_service(FakeGS())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.maybe_react_to_message(game, players, seats, author_seat=1, text="セツ どう？")
+
+    assert poster.calls == 1  # post attempted
+    # Count and last_spoke_epoch must stay empty — the LLM did not actually speak.
+    count, _, last = await repo.load_llm_speech(game.id, day=1, seat_no=2)
+    assert count == 0
+    assert last is None

@@ -12,6 +12,7 @@ Two classes live here:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Sequence
@@ -414,6 +415,14 @@ class WolfCog(commands.Cog):
         self.registry = registry
         self.settings = settings
         self.rng = rng or Random()
+        self._create_locks: dict[str, asyncio.Lock] = {}
+
+    def _create_lock_for(self, guild_id: str) -> asyncio.Lock:
+        lock = self._create_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._create_locks[guild_id] = lock
+        return lock
 
     # ----------------------------------------------------------- on_message
     @commands.Cog.listener()
@@ -513,42 +522,67 @@ class WolfCog(commands.Cog):
             return
         await interaction.response.defer(thinking=True)
 
-        heaven = await self._create_private_channel(interaction.guild, name="wolf-heaven")
-        wolves = await self._create_private_channel(interaction.guild, name="wolf-wolves")
-        if heaven is None or wolves is None:
-            await interaction.followup.send(
-                "チャンネル作成に失敗しました。Bot の権限を確認してください。"
-            )
-            return
+        async with self._create_lock_for(guild_id):
+            # Re-check under the lock: a concurrent /wolf create may have
+            # claimed this guild while we were deferring, and serialize
+            # channel creation so the stale-channel purge in
+            # _create_private_channel can't eat a sibling's fresh channel.
+            existing = await self.repo.load_active_game_for_guild(guild_id)
+            if existing is not None:
+                await interaction.followup.send(
+                    f"既に進行中のゲームがあります (id: `{existing.id}`)。"
+                )
+                return
 
-        game = Game(
-            id=new_game_id(),
-            guild_id=guild_id,
-            host_user_id=str(interaction.user.id),
-            phase=Phase.LOBBY,
-            day_number=0,
-            main_text_channel_id=str(self.settings.MAIN_TEXT_CHANNEL_ID),
-            main_vc_channel_id=str(self.settings.MAIN_VOICE_CHANNEL_ID),
-            heaven_channel_id=str(heaven.id),
-            wolves_channel_id=str(wolves.id),
-            created_at=int(time.time()),
-        )
-        try:
-            await self.repo.create_game(game)
-        except ActiveGameExistsError:
-            # Concurrent /wolf create won the race; drop the channels we just made.
-            for ch in (heaven, wolves):
+            heaven = await self._create_private_channel(interaction.guild, name="wolf-heaven")
+            if heaven is None:
+                await interaction.followup.send(
+                    "チャンネル作成に失敗しました。Bot の権限を確認してください。"
+                )
+                return
+            wolves = await self._create_private_channel(interaction.guild, name="wolf-wolves")
+            if wolves is None:
                 try:
-                    await ch.delete(reason="wolfbot: duplicate /wolf create race")
+                    await heaven.delete(reason="wolfbot: partial /wolf create rollback")
                 except discord.DiscordException:
-                    log.exception("cleanup of %s failed", ch.id)
-            winner = await self.repo.load_active_game_for_guild(guild_id)
-            winner_id = winner.id if winner else "?"
-            await interaction.followup.send(f"既に進行中のゲームがあります (id: `{winner_id}`)。")
-            return
-        await interaction.followup.send(
-            f"🎲 ゲーム作成 (id: `{game.id}`)。`/wolf join` で参加してください。"
-        )
+                    log.exception("cleanup of heaven %s failed", heaven.id)
+                await interaction.followup.send(
+                    "チャンネル作成に失敗しました。Bot の権限を確認してください。"
+                )
+                return
+
+            game = Game(
+                id=new_game_id(),
+                guild_id=guild_id,
+                host_user_id=str(interaction.user.id),
+                phase=Phase.LOBBY,
+                day_number=0,
+                main_text_channel_id=str(self.settings.MAIN_TEXT_CHANNEL_ID),
+                main_vc_channel_id=str(self.settings.MAIN_VOICE_CHANNEL_ID),
+                heaven_channel_id=str(heaven.id),
+                wolves_channel_id=str(wolves.id),
+                created_at=int(time.time()),
+            )
+            try:
+                await self.repo.create_game(game)
+            except ActiveGameExistsError:
+                # Belt-and-suspenders for bot-restart-mid-create: the in-process
+                # lock normally prevents this, but a restart between create and
+                # claim leaves the DB uniqueness check as the only guard.
+                for ch in (heaven, wolves):
+                    try:
+                        await ch.delete(reason="wolfbot: duplicate /wolf create race")
+                    except discord.DiscordException:
+                        log.exception("cleanup of %s failed", ch.id)
+                winner = await self.repo.load_active_game_for_guild(guild_id)
+                winner_id = winner.id if winner else "?"
+                await interaction.followup.send(
+                    f"既に進行中のゲームがあります (id: `{winner_id}`)。"
+                )
+                return
+            await interaction.followup.send(
+                f"🎲 ゲーム作成 (id: `{game.id}`)。`/wolf join` で参加してください。"
+            )
 
     # ---------------------------------------------------------------- /wolf join
     @wolf.command(name="join", description="ロビーに参加")
