@@ -419,6 +419,86 @@ async def test_wolf_chat_skipped_no_wolves_channel(repo: SqliteRepo) -> None:
     assert poster.wolves == []  # no wolf chat
 
 
+class _WolfChatGuardDecider:
+    """Blocks inside _ask until the test releases, signals entry via an event.
+
+    The entry event lets the test wait until a wolf is reliably stuck inside
+    `_ask` before flipping the game phase — so we deterministically exercise
+    the post-`_ask` guard rather than the pre-`_ask` one.
+    """
+
+    def __init__(
+        self,
+        action: LLMAction,
+        entered: asyncio.Event,
+        release: asyncio.Event,
+    ) -> None:
+        self._action = action
+        self.entered = entered
+        self.release = release
+        self.call_count = 0
+
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        self.call_count += 1
+        self.entered.set()
+        await self.release.wait()
+        return self._action
+
+
+async def test_wolf_chat_skipped_when_phase_advances_during_ask(repo: SqliteRepo) -> None:
+    """Post-ask stale guard: if deadline / force-skip / abort / victory moves
+    the game on while _ask() is awaiting the LLM, the wolf-chat post and its
+    private log must be suppressed — otherwise a stale speech lands in the
+    wolves channel after night has ended.
+    """
+    game, seats = await _seed_night_game(repo, wolves_channel="w1")
+    gs = _FakeGameService()
+    poster = _FakePoster()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    decider = _WolfChatGuardDecider(
+        action=LLMAction(
+            intent="speak",
+            public_message="席1 H1 を襲撃しよう",
+            reason_summary="",
+            confidence=0.8,
+        ),
+        entered=entered,
+        release=release,
+    )
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    # Kick off the night pipeline. `_run_wolf_chat` calls `_ask` for wolf A,
+    # which blocks on `release` inside the decider.
+    await adapter.submit_llm_night_actions(game, players, seats)
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+    # Simulate force-skip / deadline advance while the LLM is still thinking.
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET phase=? WHERE id=?",
+        (Phase.DAY_DISCUSSION.value, game.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+
+    release.set()
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # Decider was called exactly once (wolf A). Post-ask guard must have
+    # short-circuited before posting; wolf B must never be asked because
+    # the outer loop returns on stale.
+    assert decider.call_count == 1
+    assert poster.wolves == []
+
+    # No WOLF_CHAT private log was written for either wolf audience.
+    priv_for_seat2 = await repo.load_private_logs_for_audience(game.id, audience_seat=2, limit=40)
+    priv_for_seat3 = await repo.load_private_logs_for_audience(game.id, audience_seat=3, limit=40)
+    assert [r for r in priv_for_seat2 if r.get("kind") == "WOLF_CHAT"] == []
+    assert [r for r in priv_for_seat3 if r.get("kind") == "WOLF_CHAT"] == []
+
+
 async def test_run_night_actions_skips_seat_with_existing_action(repo: SqliteRepo) -> None:
     """Fix 1: night re-dispatch won't double-submit for a seat that already
     has a submission (unless it's in unresolved_seats for a wolf split)."""

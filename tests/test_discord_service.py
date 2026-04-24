@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import discord
+
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, Player, Seat
 from wolfbot.persistence.sqlite_repo import SqliteRepo
-from wolfbot.services.discord_service import DiscordBotAdapter
+from wolfbot.services.discord_service import DiscordBotAdapter, WolfCog
 from wolfbot.ui.views import NightActionView
 
 
@@ -327,3 +329,93 @@ async def test_announce_waiting_vote_pending_retains_names(repo: SqliteRepo) -> 
     assert "Alice" in adapter.main_sent[0]
     # No wolves-channel post for pure vote-pending state.
     assert adapter.wolves_sent == []
+
+
+class _ProbeUser:
+    """Minimal duck-typed discord.User for _preflight_dms probing.
+
+    Controls whether create_dm / send succeed so tests can exercise the two
+    failure modes (channel open OK, send rejected) independently.
+    """
+
+    def __init__(self, *, fail_create: bool = False, fail_send: bool = False) -> None:
+        self.fail_create = fail_create
+        self.fail_send = fail_send
+        self.sent: list[str] = []
+
+    async def create_dm(self) -> None:
+        if self.fail_create:
+            raise discord.DiscordException("create_dm failed")
+
+    async def send(self, text: str) -> None:
+        if self.fail_send:
+            raise discord.DiscordException("send failed")
+        self.sent.append(text)
+
+
+def _preflight_cog(users: dict[int, _ProbeUser]) -> WolfCog:
+    """Build a WolfCog with just enough state for _preflight_dms to run.
+
+    Bypasses __init__ since _preflight_dms only needs self.bot.get_user /
+    self.bot.fetch_user; wiring up a real bot / repo / adapters would dwarf
+    the test.
+    """
+    cog: WolfCog = object.__new__(WolfCog)
+    cog.bot = MagicMock()  # type: ignore[attr-defined]
+    cog.bot.get_user = lambda uid: users.get(int(uid))  # type: ignore[attr-defined]
+    return cog
+
+
+async def test_preflight_dms_rejects_when_send_fails() -> None:
+    """create_dm() can succeed while send() is rejected by DM privacy settings.
+
+    Preflight must probe send() so a preflight-pass can't hide a player whose
+    post-start role/vote/night DMs will never arrive.
+    """
+    seats = [
+        Seat(
+            seat_no=1,
+            display_name="Alice",
+            discord_user_id="1001",
+            is_llm=False,
+            persona_key=None,
+        ),
+        Seat(
+            seat_no=2,
+            display_name="Bob",
+            discord_user_id="1002",
+            is_llm=False,
+            persona_key=None,
+        ),
+    ]
+    users = {
+        1001: _ProbeUser(),
+        1002: _ProbeUser(fail_send=True),
+    }
+    cog = _preflight_cog(users)
+
+    failures = await cog._preflight_dms(seats)
+
+    assert failures == ["Bob"]
+    # Alice must have actually received the probe message — not just had her DM opened.
+    assert users[1001].sent == ["人狼bot DM疎通確認です。まもなく役職をお伝えします。"]
+
+
+async def test_preflight_dms_passes_when_send_succeeds() -> None:
+    """Happy path: both create_dm and send succeed, no failures reported."""
+    seats = [
+        Seat(
+            seat_no=1,
+            display_name="Alice",
+            discord_user_id="1001",
+            is_llm=False,
+            persona_key=None,
+        ),
+    ]
+    users = {1001: _ProbeUser()}
+    cog = _preflight_cog(users)
+
+    failures = await cog._preflight_dms(seats)
+
+    assert failures == []
+    assert users[1001].sent == ["人狼bot DM疎通確認です。まもなく役職をお伝えします。"]

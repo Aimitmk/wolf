@@ -380,6 +380,18 @@ class LLMAdapter:
             message = action.public_message.strip()
             if not message:
                 continue
+            # Re-verify after slow LLM call — deadline / force-skip / abort /
+            # victory can advance the game while _ask() is in flight. Mirrors
+            # the guard in _maybe_speak(). Stale is a global condition (phase
+            # or day has moved on for *all* wolves), so exit the loop entirely.
+            fresh = await self.repo.load_game(game.id)
+            if (
+                fresh is None
+                or fresh.ended_at is not None
+                or fresh.phase is not Phase.NIGHT
+                or fresh.day_number != game.day_number
+            ):
+                return
             try:
                 await self.message_poster.post_wolves_chat(
                     fresh, f"**{seat.display_name}**: {message}", kind="WOLF_CHAT"

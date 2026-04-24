@@ -857,7 +857,14 @@ class WolfCog(commands.Cog):
         return game
 
     async def _preflight_dms(self, human_seats: Sequence[Seat]) -> list[str]:
-        """Try to open a DM to each human; report display names that failed."""
+        """Try to open a DM AND send a probe to each human; report failed display names.
+
+        `create_dm()` alone only opens the channel; Discord privacy rejections
+        (Forbidden) surface only on `send()`. Sending a short confirmation here
+        guarantees that post-start role/vote/night DMs will actually reach the
+        player — otherwise preflight passes but the game locks up waiting on a
+        submission that can never arrive.
+        """
         failures: list[str] = []
         for seat in human_seats:
             if seat.discord_user_id is None:
@@ -871,6 +878,7 @@ class WolfCog(commands.Cog):
                     continue
             try:
                 await user.create_dm()
+                await user.send("人狼bot DM疎通確認です。まもなく役職をお伝えします。")
             except discord.DiscordException:
                 failures.append(seat.display_name)
         return failures
