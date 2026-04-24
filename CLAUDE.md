@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `wolfbot` — a Discord bot that hosts synchronous 9-player Werewolf (人狼) games. 1–9 humans join via slash commands; any unfilled seats are played by xAI Grok LLM personas. Python 3.11 (strict pin `>=3.11,<3.12`), uv-managed, async-first (discord.py + aiosqlite + pydantic v2 + openai client pointed at the xAI endpoint).
 
-Full game spec (Japanese) lives at `prompts/IMPLEMENTATION_PROMPT.md` — consult it for roles, phase order, and event ordering rules before changing domain logic.
+Full game spec (Japanese) lives at `prompts/IMPLEMENTATION_PROMPT.md` — consult it for roles, phase order, and event ordering rules before changing domain logic. Note: the top-level `prompts/` directory holds authoring/spec docs for humans and Claude (not loaded at runtime); the runtime LLM template is a separate file at `src/wolfbot/prompts/llm_system_prompt.md`, composed dynamically by `llm/prompt_builder.py` — see the LLM integration section.
 
 Contributor-facing conventions (commit style, test naming, PR expectations) live separately in `AGENTS.md`; this file focuses on architecture and repo-specific gotchas.
 
@@ -40,6 +40,8 @@ From `.env.example`. All must be set for the bot to start:
 - `DISCORD_GUILD_ID`, `MAIN_TEXT_CHANNEL_ID`, `MAIN_VOICE_CHANNEL_ID` — ints
 - `WOLFBOT_DB_PATH` — SQLite path (default `./wolfbot.db`)
 - `LOG_LEVEL` — default `INFO`
+
+Loaded at boot by `src/wolfbot/config.py::Settings` (pydantic-settings, reads `.env`, instantiated once in `main.py`). Adding a new env var = adding a typed field to `Settings` — do not parse `os.environ` directly from code paths.
 
 ## Architecture
 
@@ -132,7 +134,14 @@ During wolf-attack splits, the main channel announces only `未確定: N件` (hi
 
 `src/wolfbot/services/llm_service.py` uses the `openai` client pointed at `https://api.x.ai/v1/chat/completions`. `response_format` enforces the `LLMAction` JSON schema strictly, and `tenacity` retries on transient errors.
 
-Personas in `src/wolfbot/llm/personas.py` are **Gnosia-flavored archetypes**; `style_guide` describes only judgment tendency and tone. Hard rules enforced by the system prompt (`src/wolfbot/prompts/llm_system_prompt.md`):
+The system prompt is **composed per actor** by `src/wolfbot/llm/prompt_builder.py`, not loaded verbatim. Three programmatically-generated blocks are layered onto `src/wolfbot/prompts/llm_system_prompt.md`: `_build_game_rules_block()` (9-player ruleset derived from `ROLE_DISTRIBUTION` + `VILLAGE_SIZE` so the canonical numbers aren't duplicated), `_ROLE_STRATEGIES[role]` (role-scoped tactical hints — wolf/madman/seer/etc.), and `_build_speech_profile_block(persona)` (the persona's 話法 section). Change role-specific strategy in `_ROLE_STRATEGIES`; change the base framing / hard invariants in the markdown template. The markdown is a template, not the whole prompt.
+
+Personas in `src/wolfbot/llm/personas.py` are **Gnosia-flavored archetypes** with two parallel fields, kept semantically separate:
+
+- `style_guide` — free-form prose: judgment tendency, stance, tone register (判断/トーン).
+- `speech_profile: SpeechProfile` (frozen dataclass) — structured speech reproduction (喋り方/語彙/文体): `first_person`, `self_reference_aliases`, `address_style`, `sentence_style`, `pause_style`, `signature_phrases`, `forbidden_overuse`, `narration_mode`. Kukrushka alone uses `narration_mode="silent_gesture"` — her block renders gesture descriptions instead of a normal speech profile. Do not bleed speech data into `style_guide` or vice versa.
+
+Hard rules enforced by the system prompt (`src/wolfbot/prompts/llm_system_prompt.md`):
 
 - Never quote original Gnosia dialogue; imitate personality via tone only.
 - No meta-commentary (no "as an AI", no referring to inputs as data).
