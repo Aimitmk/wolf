@@ -11,7 +11,9 @@ from pathlib import Path
 
 from wolfbot.domain.enums import (
     FACTION_JA,
+    ROLE_DISTRIBUTION,
     ROLE_JA,
+    VILLAGE_SIZE,
     Phase,
     Role,
     SubmissionType,
@@ -24,6 +26,106 @@ SYSTEM_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "prompts" / "llm_sy
 
 def _load_template() -> str:
     return SYSTEM_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+def _build_game_rules_block() -> str:
+    """Return the fixed 9-player ruleset shared by every LLM seat.
+
+    Includes role distribution (derived from ROLE_DISTRIBUTION + ROLE_JA so we
+    don't duplicate the canonical numbers), win conditions matching
+    `rules.check_victory`, and the invariants the LLM must never violate
+    (NIGHT_0 random white is non-wolf, seer/medium see only real wolves as
+    black, wolves split → attack fails, knight can't guard the same target
+    twice, `target_name` must match a candidate token).
+    """
+    distribution = " / ".join(
+        f"{ROLE_JA[role]}{count}" for role, count in ROLE_DISTRIBUTION.items()
+    )
+    return (
+        f"- この村は {VILLAGE_SIZE} 人村固定。プレイヤーは 9 名。\n"
+        f"- 初期配役は {distribution} (合計 {VILLAGE_SIZE} 名) で固定。途中で配役は変わらない。\n"
+        "- 陣営: 人狼・狂人は人狼陣営、占い師・霊媒師・騎士・村人は村人陣営。\n"
+        "- 村人陣営勝利: 生存人狼数が 0 になった時点。\n"
+        "- 人狼陣営勝利: 生存人狼数が生存非人狼人数以上になった時点 "
+        "(狂人はこの計算で非人狼として数えるが、勝敗判定は人狼陣営の勝利)。\n"
+        "- 昼の発言は、公開ログと自分が知る私的情報だけを根拠にする。"
+        "他プレイヤーの役職・夜行動・占い/霊媒判定・人狼同士の仲間関係など、"
+        "自分に公開されていない情報を事実として断言してはならない。\n"
+        "- 占い師と霊媒師の判定は、本物の人狼だけを黒と表示する。"
+        "狂人は黒判定されない (白として扱われる)。\n"
+        "- NIGHT_0 に占い師へ提示されるランダム白は、本物の人狼ではない相手が選ばれる。"
+        "ただし真に村であることは保証されない (狂人の可能性はある)。\n"
+        "- 人狼同士で夜の襲撃対象の意見が割れると襲撃は空振りになる。"
+        "人狼は人狼専用チャットで襲撃先を 1 人に揃える必要がある。\n"
+        "- 騎士は同じ相手を連続で護衛できない (前夜と同じ対象は選べない)。\n"
+        "- 投票先や夜行動対象は、プロンプトで提示された合法な候補トークン "
+        "(例: `席3 Alice`) の中からだけ選ぶ。候補外の名前を返してはならない。"
+    )
+
+
+# Role-specific tips. Each string contains vocabulary unique to that role so
+# the cross-leak tests can assert isolation. Keep the wolf strategy's `相方` /
+# `襲撃先を揃える` out of every other role; keep `本物の人狼位置を知っている前提`
+# out of the madman's tips.
+_ROLE_STRATEGIES: dict[Role, str] = {
+    Role.WEREWOLF: (
+        "- 相方の人狼と襲撃先を揃えることを最優先にする。意見が割れると襲撃は失敗する。\n"
+        "- 昼の主張・投票理由・夜の襲撃意図に一貫性を持たせ、視点漏れを避ける。\n"
+        "- 相方を露骨に庇いすぎない。無理筋な擁護は狼ラインを疑われる原因になる。\n"
+        "- 占い師・霊媒師などの情報役、信頼されている位置、盤面整理を主導する相手を"
+        "優先的に脅威として評価する。"
+    ),
+    Role.MADMAN: (
+        "- あなたは人狼陣営の勝利に貢献するが、本物の人狼位置を知っている前提で話してはならない。"
+        "人狼が誰かは公開情報からは分からない立場として振る舞う。\n"
+        "- 偽 CO や偽の判定結果を出す場合でも、公開ログ・投票・処刑結果との矛盾を避け、"
+        "破綻しない範囲に留める。\n"
+        "- 知り得ない確定情報 (夜行動の内訳・他プレイヤーの属性など) を事実として断言しない。\n"
+        "- 真占い・真霊媒に疑いを向け、村陣営の情報整理を妨げる方向に投票や発言を運ぶ。"
+    ),
+    Role.SEER: (
+        "- 自分の判定履歴を時系列で一貫して扱う。過去の白黒と矛盾する発言はしない。\n"
+        "- 黒結果は強い根拠として扱ってよい。ただし対抗 (偽占い) がいる場合は整合性を比較する。\n"
+        "- 白結果は『本物の人狼ではない』ことしか保証しない。狂人は白に出るため、"
+        "完全な村置きとしては扱わない。\n"
+        "- CO タイミング・対抗 CO の有無・投票と判定の噛み合いを重視し、"
+        "偽占い視点の破綻を探す。"
+    ),
+    Role.MEDIUM: (
+        "- 処刑結果と占い師の主張・投票の流れを照合し、占い視点の真贋を見極める。\n"
+        "- 自分の霊媒結果が占い視点に与える影響 (真占い補強、偽占い否定など) を整理して発言する。\n"
+        "- 処刑がまだ発生していない段階では断定を増やしすぎず、"
+        "占い師 CO への反応を観察する。\n"
+        "- 対抗霊媒が出た場合は、自分と相手どちらが真として整合するかを論理的に示す。"
+    ),
+    Role.KNIGHT: (
+        "- 守る価値の高い情報役 (真占い・真霊媒) や、信頼されている位置を護衛対象として意識する。\n"
+        "- 同じ相手を連続で護衛してはならない。前夜と違う相手を選ぶ。\n"
+        "- 自分の護衛先を不用意に公開しない。公開すると翌夜の噛み筋のヒントを"
+        "人狼側に与えてしまう。\n"
+        "- 騎士 CO は原則として追い詰められた局面に温存し、必要なら霊媒結果や"
+        "盤面の整合を優先する。"
+    ),
+    Role.VILLAGER: (
+        "- 公開発言の矛盾、視点漏れ、投票理由、占い/霊媒結果との整合性を重視して推理する。\n"
+        "- 不確実なときは候補を絞り、理由を添えて話す。曖昧な決めつけや"
+        "『なんとなく怪しい』だけの発言は避ける。\n"
+        "- 自分に私的情報があるふりをしない。占い/霊媒/騎士の CO 騙りは村陣営としては行わない。\n"
+        "- 情報役を守り、人狼陣営が狙いやすい位置 (真 CO、盤面整理役) を"
+        "投票で落とさないようにする。"
+    ),
+}
+
+
+def _build_strategy_block(role: Role) -> str:
+    """Return role-specific tips for the given role only.
+
+    Caller must pass a non-None Role; `build_system_prompt` is invoked after
+    SETUP so `player.role` is already assigned. Strictly role-scoped — never
+    returns other roles' tips, so the system prompt cannot leak strategy
+    between LLM seats.
+    """
+    return _ROLE_STRATEGIES[role]
 
 
 def build_system_prompt(
@@ -44,8 +146,10 @@ def build_system_prompt(
     )
     phase_block = f"`{phase.value}` / day {day_number}"
     return (
-        template.replace("{persona_block}", persona_block)
+        template.replace("{game_rules_block}", _build_game_rules_block())
+        .replace("{persona_block}", persona_block)
         .replace("{role_block}", role_block)
+        .replace("{strategy_block}", _build_strategy_block(role))
         .replace("{phase_block}", phase_block)
         .replace("{task_block}", task_text)
     )

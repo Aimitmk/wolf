@@ -897,3 +897,120 @@ async def test_daystart_speech_inserts_public_log(repo: SqliteRepo) -> None:
     assert len(speech_rows) == 1
     assert speech_rows[0].get("actor_seat") == 2
     assert speech_rows[0].get("text") == "おはようございます"
+
+
+# ---------------------------------- system prompt enrichment via _ask
+async def _capture_ask_system_prompt(repo: SqliteRepo, role: Role) -> str:
+    """Seed a tiny game with one LLM seat of the given role, invoke `_ask`,
+    and return the captured system prompt. The role-specific strategy and the
+    shared rules block are injected inside `build_system_prompt`, which `_ask`
+    calls per-seat, so this exercises the exact production path.
+
+    Uses a role-scoped `guild_id` so multiple calls in one test don't trip the
+    "at most one active game per guild" partial-unique-index constraint.
+    """
+    seats = [
+        Seat(
+            seat_no=1,
+            display_name="H1",
+            discord_user_id="u1",
+            is_llm=False,
+            persona_key=None,
+        ),
+        Seat(
+            seat_no=2,
+            display_name="L2",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    game = _game_with_id(f"game-for-{role.value}", guild_id=f"guild-{role.value}")
+    await repo.create_game(game)
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    me = next(p for p in players if p.seat_no == 2)
+    my_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._ask(game, me, my_seat, players, seats, task_text="test-task")
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    return system_prompt
+
+
+async def test_ask_system_prompt_contains_game_rules_for_any_role(repo: SqliteRepo) -> None:
+    """Every LLM seat, regardless of role, must receive the fixed 9-player
+    rules block in its system prompt (role distribution, win conditions,
+    candidate-token rule)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "人狼2" in system_prompt
+    assert "村人3" in system_prompt
+    assert "生存人狼数が 0" in system_prompt
+    assert "生存人狼数が生存非人狼人数以上" in system_prompt
+    assert "候補トークン" in system_prompt
+
+
+async def test_ask_system_prompt_wolf_seat_includes_wolf_strategy(repo: SqliteRepo) -> None:
+    """A werewolf LLM must receive wolf-coordination tips in its system
+    prompt (`相方`, `襲撃先を揃える`)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "相方" in system_prompt
+    assert "襲撃先を揃える" in system_prompt
+
+
+async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy(repo: SqliteRepo) -> None:
+    """A non-wolf LLM must NOT receive wolf-coordination tips. This guards
+    against strategy leakage through `build_system_prompt`."""
+    for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "相方" not in system_prompt, f"{role.name} saw '相方' in system prompt"
+        assert "襲撃先を揃える" not in system_prompt, (
+            f"{role.name} saw '襲撃先を揃える' in system prompt"
+        )
+
+
+async def test_ask_system_prompt_madman_excludes_wolf_positions_assumption(
+    repo: SqliteRepo,
+) -> None:
+    """The madman must be told explicitly NOT to assume real wolf positions,
+    and must NOT receive wolf-coordination tips. The prohibition phrase must
+    be present; the wolf playbook vocabulary must not."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt
+    assert "相方" not in system_prompt
+    assert "襲撃先を揃える" not in system_prompt
+
+
+async def test_ask_system_prompt_role_strategy_isolated_between_roles(
+    repo: SqliteRepo,
+) -> None:
+    """A role's own strategy phrase appears in its system prompt; other roles'
+    unique phrases must not. Integration-level analog of
+    `test_strategy_block_no_cross_role_leak` in test_llm_prompt_builder.py."""
+    unique_phrases = {
+        Role.WEREWOLF: "相方を露骨に庇いすぎない",
+        Role.MADMAN: "人狼位置を知っている前提で話してはならない",
+        Role.SEER: "判定履歴を時系列で一貫",
+        Role.MEDIUM: "対抗霊媒が出た場合",
+        Role.KNIGHT: "前夜と違う相手を選ぶ",
+        Role.VILLAGER: "CO 騙りは村陣営としては行わない",
+    }
+    for role, own_phrase in unique_phrases.items():
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert own_phrase in system_prompt, (
+            f"{role.name} did not see its own phrase in system prompt"
+        )
+        for other_role, other_phrase in unique_phrases.items():
+            if other_role is role:
+                continue
+            assert other_phrase not in system_prompt, (
+                f"{other_role.name}'s tip leaked into {role.name}'s system prompt"
+            )
