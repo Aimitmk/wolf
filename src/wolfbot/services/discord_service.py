@@ -691,12 +691,21 @@ class WolfCog(commands.Cog):
             )
             return
 
+        final_seats = await self.repo.load_seats(game.id)
+        roster_lines = [f"席{seat.seat_no} {seat.display_name}" for seat in final_seats]
+
         engine = GameEngine(game_id=game.id, repo=self.repo, advance=self.gs.advance)
         await self.registry.attach(engine)
         engine.start()
 
         await interaction.followup.send(
-            f"🎮 ゲーム開始。参加者: {len(humans)} 人 + LLM {shortfall} 人。"
+            "\n".join(
+                [
+                    f"🎮 ゲーム開始。参加者: {len(humans)} 人 + LLM {shortfall} 人。",
+                    "参加者一覧:",
+                    *roster_lines,
+                ]
+            )
         )
 
     # --------------------------------------------------------------- /wolf status
