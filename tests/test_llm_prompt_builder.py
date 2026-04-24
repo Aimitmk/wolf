@@ -428,6 +428,35 @@ def test_game_rules_block_states_fake_co_legality() -> None:
     assert "死亡済み対象への護衛" in block
 
 
+def test_game_rules_block_states_day1_fake_seer_must_be_white() -> None:
+    """NIGHT_0 random-white provenance forces day-1 fake-seer first result
+    to be white. The shared rules must say so explicitly so any fake CO seat
+    sees it."""
+    block = _build_game_rules_block()
+    assert "NIGHT_0" in block
+    assert "初回" in block
+    assert "day 1" in block
+    assert "必ず白を主張" in block
+
+
+def test_game_rules_block_states_day1_black_claim_is_breakdown() -> None:
+    """A day-1 first-result-black claim contradicts NIGHT_0 timeline and must
+    be framed as breakdown so wolves/madmen don't try it."""
+    block = _build_game_rules_block()
+    assert "初回結果を黒" in block
+    assert "NIGHT_0 タイムラインと矛盾" in block
+    assert "破綻" in block
+    assert "day 1 で初回黒主張はしない" in block
+
+
+def test_game_rules_block_defers_fake_black_to_day_2_plus() -> None:
+    """Fake black is allowed only from day 2+, with timeline integrity checks."""
+    block = _build_game_rules_block()
+    assert "偽占い師の黒結果主張は day 2 以降" in block
+    assert "前夜に占ったという想定" in block
+    assert "対抗 CO の発表内容と矛盾しない" in block
+
+
 def test_game_rules_block_contains_enthusiast_checklist() -> None:
     """Shared rules must carry the 発言の根拠チェックリスト so every seat sees
     CO history / divination history / vote history / attack pattern / rope
@@ -605,6 +634,55 @@ def test_fake_strategy_describes_conditional_seer_fake(role: Role) -> None:
         assert "複数の占い師 CO" in block
         assert "相方" not in block
         assert "襲撃先を揃える" not in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_anchors_day1_first_result_to_white(role: Role) -> None:
+    """Both wolf and madman fake-seer guidance must anchor the day-1 first
+    divination result to white per the NIGHT_0 timeline."""
+    block = _build_strategy_block(role)
+    assert "NIGHT_0 ランダム白" in block
+    assert "必ず白を主張" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_prohibits_day1_black_claim(role: Role) -> None:
+    """Both wolf and madman must be told day-1 first-result black breaks the
+    NIGHT_0 timeline and must not be claimed."""
+    block = _build_strategy_block(role)
+    assert "初日に黒を出す主張" in block
+    assert "破綻" in block
+    assert "絶対にしない" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_defers_black_call_to_day_2_plus(role: Role) -> None:
+    """Both wolf and madman defer fake black to day 2+ with night-divination
+    framing."""
+    block = _build_strategy_block(role)
+    assert "黒出しは day 2 以降" in block
+    assert "前夜に占ったという想定" in block
+
+
+def test_wolf_day1_white_target_integrates_partner_and_attack_pattern() -> None:
+    """Wolf-only: day-1 white-target selection must integrate partner position,
+    framing risk, and attack-pattern coordination."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "白先選び" in block
+    assert "相方の位置" in block
+    assert "囲いリスク" in block
+    assert "噛み筋" in block
+    assert "襲撃計画" in block
+
+
+def test_madman_day_2_plus_black_still_carries_misfire_awareness() -> None:
+    """Madman-only: even when deferred to day 2+, the black-out misfire risk
+    persists because the madman never knows real wolf positions."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "誤爆リスクは day 2 以降の黒出しでも常に残る" in block
+    # Existing misfire guidance must still be present (no regression).
+    assert "誤爆リスク" in block
+    assert "白先が本物の狼とは限らない" in block
 
 
 def test_seer_strategy_covers_proactive_and_counter_co() -> None:

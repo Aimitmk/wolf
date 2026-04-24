@@ -1116,6 +1116,24 @@ async def test_ask_system_prompt_contains_fake_co_legality_for_any_role(
     assert "襲撃先を揃える" not in system_prompt
 
 
+async def test_ask_system_prompt_contains_day1_fake_seer_must_white_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """The NIGHT_0 day-1 fake-seer-must-white rule lives in the shared rules
+    block so every seat sees it. Exercising via VILLAGER (no wolf-strategy
+    leak) doubles as a non-leak guard."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "NIGHT_0" in system_prompt
+    assert "初回" in system_prompt
+    assert "day 1" in system_prompt
+    assert "必ず白を主張" in system_prompt
+    assert "day 1 で初回黒主張はしない" in system_prompt
+    assert "偽占い師の黒結果主張は day 2 以降" in system_prompt
+    # Wolf-coordination guard still holds for the villager seat.
+    assert "相方" not in system_prompt
+    assert "襲撃先を揃える" not in system_prompt
+
+
 async def test_ask_system_prompt_wolf_seat_includes_wolf_strategy(repo: SqliteRepo) -> None:
     """A werewolf LLM must receive wolf-coordination tips in its system
     prompt (`相方`, `襲撃先を揃える`)."""
@@ -1367,6 +1385,12 @@ async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRe
     assert "無条件" in system_prompt
     assert "潜伏" in system_prompt
     assert "相方が危険位置" in system_prompt
+    # Day-1 first-result-white anchor + day-1 black prohibition + day-2+ deferral.
+    assert "NIGHT_0 ランダム白" in system_prompt
+    assert "必ず白を主張" in system_prompt
+    assert "初日に黒を出す主張" in system_prompt
+    assert "黒出しは day 2 以降" in system_prompt
+    assert "前夜に占ったという想定" in system_prompt
 
 
 async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coordination(
@@ -1393,3 +1417,9 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "複数の占い師 CO" in system_prompt
     assert "誤爆リスク" in system_prompt
     assert "白先が本物の狼とは限らない" in system_prompt
+    # Day-1 first-result-white anchor + day-1 black prohibition + day-2+ deferral.
+    assert "NIGHT_0 ランダム白" in system_prompt
+    assert "必ず白を主張" in system_prompt
+    assert "初日に黒を出す主張" in system_prompt
+    assert "黒出しは day 2 以降" in system_prompt
+    assert "誤爆リスクは day 2 以降の黒出しでも常に残る" in system_prompt
