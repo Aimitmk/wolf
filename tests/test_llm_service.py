@@ -900,14 +900,19 @@ async def test_daystart_speech_inserts_public_log(repo: SqliteRepo) -> None:
 
 
 # ---------------------------------- system prompt enrichment via _ask
-async def _capture_ask_system_prompt(repo: SqliteRepo, role: Role) -> str:
+async def _capture_ask_system_prompt(
+    repo: SqliteRepo, role: Role, *, persona_key: str = "setsu"
+) -> str:
     """Seed a tiny game with one LLM seat of the given role, invoke `_ask`,
     and return the captured system prompt. The role-specific strategy and the
     shared rules block are injected inside `build_system_prompt`, which `_ask`
     calls per-seat, so this exercises the exact production path.
 
-    Uses a role-scoped `guild_id` so multiple calls in one test don't trip the
-    "at most one active game per guild" partial-unique-index constraint.
+    `persona_key` lets callers capture the prompt for any persona; the default
+    preserves behavior for all pre-existing callers. Both `game_id` and
+    `guild_id` are scoped by (role, persona_key) so multiple calls in one test
+    don't collide on the shared repo or trip the partial-unique-index
+    ("at most one active game per guild").
     """
     seats = [
         Seat(
@@ -922,10 +927,13 @@ async def _capture_ask_system_prompt(repo: SqliteRepo, role: Role) -> str:
             display_name="L2",
             discord_user_id=None,
             is_llm=True,
-            persona_key="setsu",
+            persona_key=persona_key,
         ),
     ]
-    game = _game_with_id(f"game-for-{role.value}", guild_id=f"guild-{role.value}")
+    game = _game_with_id(
+        f"game-for-{role.value}-{persona_key}",
+        guild_id=f"guild-{role.value}-{persona_key}",
+    )
     await repo.create_game(game)
     for s in seats:
         await repo.insert_seat(game.id, s)
@@ -1013,4 +1021,62 @@ async def test_ask_system_prompt_role_strategy_isolated_between_roles(
                 continue
             assert other_phrase not in system_prompt, (
                 f"{other_role.name}'s tip leaked into {role.name}'s system prompt"
+            )
+
+
+async def test_ask_system_prompt_includes_speech_profile_section(repo: SqliteRepo) -> None:
+    """Every LLM seat's system prompt carries the new `## 話法` section with
+    the persona's first-person and the static common rule from the template."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER, persona_key="setsu")
+    assert "## 話法" in system_prompt
+    assert "『私』" in system_prompt
+    assert "1 発話に入れてよい特徴語は多くても 1 個" in system_prompt
+
+
+async def test_ask_system_prompt_speech_profile_per_seat(repo: SqliteRepo) -> None:
+    """Different persona_keys produce different speech blocks via _ask —
+    setsu's prompt carries『私』, yuriko's carries『この身』, and neither
+    block cross-contaminates the other's first person."""
+    setsu_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER, persona_key="setsu")
+    yuriko_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER, persona_key="yuriko")
+    assert "『私』" in setsu_prompt
+    assert "『この身』" not in setsu_prompt
+    assert "『この身』" in yuriko_prompt
+    assert "『私』" not in yuriko_prompt.split("## 話法")[1]
+
+
+async def test_ask_system_prompt_kukrushka_uses_silent_gesture(repo: SqliteRepo) -> None:
+    """Kukrushka's prompt renders in silent_gesture mode — gesture examples
+    replace the normal `一人称` line."""
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.VILLAGER, persona_key="kukrushka"
+    )
+    assert "叙述モード" in system_prompt
+    assert "所作" in system_prompt
+
+
+async def test_ask_system_prompt_sq_flags_death_as_low_frequency(repo: SqliteRepo) -> None:
+    """SQ's `DEATH` signature phrase must reach the LLM together with the
+    low-frequency advisory — otherwise the LLM would pepper every utterance
+    with it."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER, persona_key="sq")
+    assert "DEATH" in system_prompt
+    assert "低頻度" in system_prompt
+
+
+async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy_even_with_speech_block(
+    repo: SqliteRepo,
+) -> None:
+    """The non-wolf isolation invariant must hold across all personas, not
+    just the default. If a future `forbidden_overuse` or other speech-profile
+    string ever contains wolf-coordination vocabulary (`相方` /
+    `襲撃先を揃える`), this regression guard fires."""
+    for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
+        for pkey in ("setsu", "sq", "yuriko", "kukrushka"):
+            system_prompt = await _capture_ask_system_prompt(repo, role, persona_key=pkey)
+            assert "相方" not in system_prompt, (
+                f"{role.name}/{pkey} saw '相方' in system prompt"
+            )
+            assert "襲撃先を揃える" not in system_prompt, (
+                f"{role.name}/{pkey} saw '襲撃先を揃える' in system prompt"
             )

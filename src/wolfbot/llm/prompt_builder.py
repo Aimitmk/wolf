@@ -128,6 +128,41 @@ def _build_strategy_block(role: Role) -> str:
     return _ROLE_STRATEGIES[role]
 
 
+def _build_speech_profile_block(persona: Persona) -> str:
+    """Render the persona's structured speech profile as a bullet block.
+
+    Dispatches on `narration_mode`: silent-gesture personas (kukrushka) get a
+    structurally different block — no `一人称` line, gesture examples instead —
+    so callers can assert the structural difference in tests. Per-persona
+    `forbidden_overuse` carries character-specific overuse bans only; generic
+    rules (``1 発話に 1 個まで`` etc.) live in the markdown template.
+    """
+    sp = persona.speech_profile
+    if sp.narration_mode == "silent_gesture":
+        forbidden = "、".join(sp.forbidden_overuse) if sp.forbidden_overuse else "(なし)"
+        return (
+            "- 叙述モード: 原作準拠で『ほぼ無言』。通常の会話文体では発話しない。\n"
+            "- `public_message` は短い所作・身振り・表情の叙述文として書く。\n"
+            "  例: 『微笑む』『首をかしげる』『手を引く』『うなずく』『見つめる』。\n"
+            "- 必要最低限の極短い言語化は許容するが、他キャラのような会話調にはしない。\n"
+            f"- 使ってはいけないもの: {forbidden}"
+        )
+    aliases = "、".join(sp.self_reference_aliases) if sp.self_reference_aliases else "(なし)"
+    signatures = (
+        "、".join(f"『{p}』" for p in sp.signature_phrases) if sp.signature_phrases else "(なし)"
+    )
+    forbidden = "、".join(sp.forbidden_overuse) if sp.forbidden_overuse else "(なし)"
+    return (
+        f"- 一人称: 『{sp.first_person}』\n"
+        f"- 自己呼称の例外 (低頻度で使ってよい): {aliases}\n"
+        f"- 他者呼称: {sp.address_style}\n"
+        f"- 文体とテンポ: {sp.sentence_style}\n"
+        f"- 間の取り方: {sp.pause_style}\n"
+        f"- 使える短い特徴語 (低頻度、1 発話に多くて 1 個): {signatures}\n"
+        f"- 使いすぎ禁止: {forbidden}"
+    )
+
+
 def build_system_prompt(
     persona: Persona,
     role: Role,
@@ -148,6 +183,7 @@ def build_system_prompt(
     return (
         template.replace("{game_rules_block}", _build_game_rules_block())
         .replace("{persona_block}", persona_block)
+        .replace("{speech_profile_block}", _build_speech_profile_block(persona))
         .replace("{role_block}", role_block)
         .replace("{strategy_block}", _build_strategy_block(role))
         .replace("{phase_block}", phase_block)
