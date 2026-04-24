@@ -225,6 +225,37 @@ def test_execution_triggering_victory_ends_game() -> None:
     assert t.new_deadline_epoch is None
 
 
+def test_execution_victory_emits_role_reveal_after_victory() -> None:
+    """On execution-path victory, ROLE_REVEAL follows VICTORY with every seat listed."""
+    game = _game(phase=Phase.DAY_VOTE, day=3)
+    alive = [True, False, False, False, False, True, True, True, True]
+    players = _players(STANDARD_ROLES, alive=alive)
+    seats = _seats()
+    votes = [_v(1, 1), _v(6, 1), _v(7, 1), _v(8, 1), _v(9, 1)]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=3000)
+    assert t.next_phase is Phase.GAME_OVER
+
+    kinds = [lg.kind for lg in t.public_logs]
+    assert "VICTORY" in kinds
+    assert "ROLE_REVEAL" in kinds
+    # VICTORY must precede ROLE_REVEAL and be the immediate neighbor.
+    victory_idx = kinds.index("VICTORY")
+    reveal_idx = kinds.index("ROLE_REVEAL")
+    assert reveal_idx == victory_idx + 1
+
+    reveal = t.public_logs[reveal_idx]
+    assert reveal.text.startswith("最終配役:\n")
+    # Every seat (1–9) appears exactly once with role + alive/dead tag.
+    for seat_no in range(1, 10):
+        assert f"- 席{seat_no} P{seat_no}:" in reveal.text
+    # Seat 1 (wolf) was the one executed just now → must show 死亡.
+    assert "- 席1 P1: 人狼 (死亡)" in reveal.text
+    # Seat 3 (madman) was already dead before this execution → 死亡.
+    assert "- 席3 P3: 狂人 (死亡)" in reveal.text
+    # Seat 6 (knight) is alive.
+    assert "- 席6 P6: 騎士 (生存)" in reveal.text
+
+
 # ---------------------------------------------------------------- vote tally
 def test_execution_log_includes_grouped_vote_tally() -> None:
     """EXECUTION text appends 🗳 投票結果 block grouped by target, sorted by count."""

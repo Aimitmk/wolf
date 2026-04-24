@@ -12,7 +12,7 @@ import asyncio
 import random
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
-from wolfbot.domain.models import Game, NightAction, Seat, Vote
+from wolfbot.domain.models import Game, LogEntry, NightAction, Seat, Vote
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.llm_service import LLMAction, LLMAdapter
 
@@ -120,43 +120,32 @@ async def test_submit_llm_votes_returns_before_decider_completes(repo: SqliteRep
     assert len(gs.votes) == 2
 
 
-async def test_run_votes_aborts_when_phase_advances_midway(repo: SqliteRepo) -> None:
-    """If the game advances out of DAY_VOTE between per-player iterations
-    (e.g. all humans submitted and a wake fired), later LLM iterations must
-    stop submitting. Otherwise a stale vote lands in the next round."""
+async def test_run_votes_aborts_when_phase_stale_at_dispatch(repo: SqliteRepo) -> None:
+    """Per-seat stale check: if the phase is no longer DAY_VOTE when a sub-task
+    reads the game, that sub-task returns without calling the decider. Parallel
+    dispatch keeps the check at the top of each per-seat task so the guarantee
+    still holds when all sub-tasks race each other."""
     game, seats = await _seed_vote_game(repo)
+    # Pre-flip the phase so every parallel sub-task sees the stale state at
+    # its own stale check.
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET phase=? WHERE id=?",
+        (Phase.DAY_DISCUSSION.value, game.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+
     gs = _FakeGameService()
-
-    # After the first decider call, flip the game phase to DAY_DISCUSSION in
-    # the DB so the second iteration's recheck aborts the task.
-    flipped = False
-
-    class _FlipDecider:
-        call_count = 0
-
-        async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
-            nonlocal flipped
-            self.call_count += 1
-            if not flipped:
-                flipped = True
-                async with repo._db.execute(  # type: ignore[attr-defined]
-                    "UPDATE games SET phase=? WHERE id=?",
-                    (Phase.DAY_DISCUSSION.value, game.id),
-                ):
-                    pass
-                await repo._db.commit()  # type: ignore[attr-defined]
-            return LLMAction(intent="vote", target_name="H1", reason_summary="", confidence=0.5)
-
-    adapter = LLMAdapter(repo=repo, decider=_FlipDecider(), rng=random.Random(0))
+    decider = _ScriptedDecider([])  # must not be called
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
     adapter.set_game_service(gs)  # type: ignore[arg-type]
 
     players = await repo.load_players(game.id)
     await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
     await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
 
-    # Exactly one submission — the first — because the second iteration sees
-    # the phase has moved and aborts before calling the decider again.
-    assert len(gs.votes) == 1
+    assert gs.votes == []
+    assert decider.call_count == 0
 
 
 class _ScriptedDecider:
@@ -473,6 +462,373 @@ async def test_run_night_actions_skips_seat_with_existing_action(repo: SqliteRep
     assert len(gs.nights) == 1
     assert gs.nights[0][1] == 3
     assert decider.call_count == 1
+
+
+class _ConcurrencyDecider:
+    """Tracks peak concurrent `decide` calls. Distinguishes serial vs parallel
+    dispatch: a serial-for-loop invoker reaches the decider one seat at a time
+    (peak == 1); a parallel invoker lets multiple coroutines share the sleep
+    window (peak >= 2)."""
+
+    def __init__(self, result: LLMAction) -> None:
+        self._result = result
+        self.active = 0
+        self.peak = 0
+        self.call_count = 0
+
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        self.call_count += 1
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            # Enough yields for peer sub-tasks to reach this method too under
+            # parallel dispatch; harmless under serial.
+            await asyncio.sleep(0.02)
+            return self._result
+        finally:
+            self.active -= 1
+
+
+async def _seed_many_vote_game(repo: SqliteRepo, *, llm_seats: int = 4) -> tuple[Game, list[Seat]]:
+    """DAY_VOTE game with 1 human target + N LLM voters. Everyone is a VILLAGER so
+    `_role_to_kind` is irrelevant; we only exercise vote dispatch."""
+    game = Game(
+        id="g-many",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_VOTE,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    persona_keys = ["setsu", "gina", "sq", "raqio", "stella", "shigemichi"]
+    assert llm_seats <= len(persona_keys)
+    seats: list[Seat] = [
+        Seat(
+            seat_no=1,
+            display_name="H1",
+            discord_user_id="u1",
+            is_llm=False,
+            persona_key=None,
+        ),
+    ]
+    for i in range(llm_seats):
+        seat_no = 2 + i
+        seats.append(
+            Seat(
+                seat_no=seat_no,
+                display_name=f"L{seat_no}",
+                discord_user_id=None,
+                is_llm=True,
+                persona_key=persona_keys[i],
+            )
+        )
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    for s in seats:
+        await repo.set_player_role(game.id, s.seat_no, Role.VILLAGER)
+    return game, seats
+
+
+async def test_run_votes_dispatches_llms_in_parallel(repo: SqliteRepo) -> None:
+    """Per-seat vote dispatch is parallel, not serial. With 4 LLM voters, the
+    peak concurrent `decide` call count must exceed 1 (serial) — at least 2 are
+    in-flight simultaneously."""
+    game, seats = await _seed_many_vote_game(repo, llm_seats=4)
+    gs = _FakeGameService()
+    decider = _ConcurrencyDecider(
+        LLMAction(intent="vote", target_name="席1 H1", reason_summary="", confidence=0.5)
+    )
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert decider.call_count == 4
+    assert len(gs.votes) == 4
+    # Serial dispatch would have peak==1; parallel dispatch lets all 4 sub-tasks
+    # share the decider sleep. Assert >= 2 to tolerate scheduler jitter, with
+    # the practical expectation of 4.
+    assert decider.peak >= 2, f"expected parallel dispatch (peak>=2), saw peak={decider.peak}"
+
+
+async def _seed_many_night_game(
+    repo: SqliteRepo, *, wolves_channel: str | None = None
+) -> tuple[Game, list[Seat]]:
+    """NIGHT with 3 LLM actors (wolf, seer, knight) + 1 human villager. No wolves
+    channel by default so `_run_wolf_chat` exits early and we only measure the
+    post-coordination attack/seer/knight parallel phase."""
+    game = Game(
+        id="g-multi-night",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id=wolves_channel,
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(
+            seat_no=1,
+            display_name="H1",
+            discord_user_id="u1",
+            is_llm=False,
+            persona_key=None,
+        ),
+        Seat(
+            seat_no=2,
+            display_name="Wolf",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+        Seat(
+            seat_no=3,
+            display_name="Seer",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="gina",
+        ),
+        Seat(
+            seat_no=4,
+            display_name="Knight",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="sq",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.WEREWOLF)
+    await repo.set_player_role(game.id, 3, Role.SEER)
+    await repo.set_player_role(game.id, 4, Role.KNIGHT)
+    return game, seats
+
+
+async def test_run_night_actions_dispatches_llms_in_parallel(repo: SqliteRepo) -> None:
+    """Per-seat night-action dispatch runs sub-tasks concurrently after the
+    wolf-chat prelude. Wolf (seat 2), Seer (seat 3), Knight (seat 4) all asked
+    in parallel."""
+    game, seats = await _seed_many_night_game(repo, wolves_channel=None)
+    gs = _FakeGameService()
+    decider = _ConcurrencyDecider(
+        LLMAction(
+            intent="night_action",
+            target_name="席1 H1",
+            reason_summary="",
+            confidence=0.8,
+        )
+    )
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_night_actions(game, players, seats)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert decider.call_count == 3
+    assert len(gs.nights) == 3
+    assert decider.peak >= 2, f"expected parallel dispatch (peak>=2), saw peak={decider.peak}"
+
+
+class _CapturingDecider:
+    """Records (system, user) prompts for inspection; returns a fixed skip."""
+
+    def __init__(self) -> None:
+        self.captured: list[tuple[str, str]] = []
+
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        self.captured.append((system_prompt, user_context))
+        return LLMAction(intent="skip", reason_summary="captured", confidence=0.0)
+
+
+def _game_with_id(game_id: str, *, guild_id: str = "gu", wolves_channel: str = "w1") -> Game:
+    return Game(
+        id=game_id,
+        guild_id=guild_id,
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id=wolves_channel,
+        created_at=0,
+    )
+
+
+async def test_ask_scopes_logs_to_current_game_id(repo: SqliteRepo) -> None:
+    """Regression test: an LLM asked for game B must never see logs from game A,
+    even when both games share guild / seat numbers / persona keys. This locks in
+    the invariant that `load_public_logs` / `load_private_logs_for_audience` are
+    scoped by `game_id` and that `_ask` never reaches for Discord channel history.
+    """
+    seats = [
+        Seat(
+            seat_no=1,
+            display_name="H1",
+            discord_user_id="u1",
+            is_llm=False,
+            persona_key=None,
+        ),
+        Seat(
+            seat_no=2,
+            display_name="L2",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+
+    game_a = _game_with_id("game-alpha")
+    await repo.create_game(game_a)
+    for s in seats:
+        await repo.insert_seat(game_a.id, s)
+    await repo.set_player_role(game_a.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game_a.id, 2, Role.SEER)
+    # Game A distinctive logs — must NOT leak into game B's prompt.
+    await repo.insert_log_public(
+        LogEntry(
+            game_id=game_a.id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            kind="PLAYER_SPEECH",
+            actor_seat=1,
+            visibility="PUBLIC",
+            text="LEAK_A_PUBLIC_SECRET",
+            created_at=1,
+        )
+    )
+    await repo.insert_log_private(
+        LogEntry(
+            game_id=game_a.id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            kind="SEER_RESULT",
+            actor_seat=None,
+            audience_seat=2,
+            visibility="PRIVATE",
+            text="LEAK_A_PRIVATE_SECRET",
+            created_at=1,
+        )
+    )
+
+    # End game A so its channels would normally be torn down. The test doesn't
+    # need the teardown to have run — the DB-level scoping is what we verify.
+    await repo.end_game(game_a.id, ended_at_epoch=2)
+
+    # Same guild, same seat layout, same persona key — only game_id differs.
+    game_b = _game_with_id("game-beta")
+    await repo.create_game(game_b)
+    for s in seats:
+        await repo.insert_seat(game_b.id, s)
+    await repo.set_player_role(game_b.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game_b.id, 2, Role.SEER)
+    await repo.insert_log_public(
+        LogEntry(
+            game_id=game_b.id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            kind="PLAYER_SPEECH",
+            actor_seat=1,
+            visibility="PUBLIC",
+            text="GAMEB_PUBLIC_OK",
+            created_at=10,
+        )
+    )
+    await repo.insert_log_private(
+        LogEntry(
+            game_id=game_b.id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            kind="SEER_RESULT",
+            actor_seat=None,
+            audience_seat=2,
+            visibility="PRIVATE",
+            text="GAMEB_PRIVATE_OK",
+            created_at=10,
+        )
+    )
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players_b = await repo.load_players(game_b.id)
+    me = next(p for p in players_b if p.seat_no == 2)
+    my_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._ask(game_b, me, my_seat, players_b, seats, task_text="test")
+
+    assert len(decider.captured) == 1
+    _, user_prompt = decider.captured[0]
+    assert "GAMEB_PUBLIC_OK" in user_prompt
+    assert "GAMEB_PRIVATE_OK" in user_prompt
+    assert "LEAK_A_PUBLIC_SECRET" not in user_prompt
+    assert "LEAK_A_PRIVATE_SECRET" not in user_prompt
+
+
+async def test_load_public_logs_isolated_by_game_id(repo: SqliteRepo) -> None:
+    """Repo-level invariant: logs loaded for game A never include game B's rows.
+    Companion to `test_ask_scopes_logs_to_current_game_id` — this exercises the
+    SQL `WHERE game_id=?` filter directly.
+
+    Uses distinct guild_ids so both games can be active concurrently (the DB
+    enforces at-most-one active game per guild)."""
+    game_a = _game_with_id("repo-alpha", guild_id="guild-alpha")
+    game_b = _game_with_id("repo-beta", guild_id="guild-beta")
+    await repo.create_game(game_a)
+    await repo.create_game(game_b)
+    for g, marker in ((game_a, "ONLY_ALPHA"), (game_b, "ONLY_BETA")):
+        await repo.insert_log_public(
+            LogEntry(
+                game_id=g.id,
+                day=1,
+                phase=Phase.DAY_DISCUSSION,
+                kind="PLAYER_SPEECH",
+                actor_seat=1,
+                visibility="PUBLIC",
+                text=marker,
+                created_at=1,
+            )
+        )
+        await repo.insert_log_private(
+            LogEntry(
+                game_id=g.id,
+                day=1,
+                phase=Phase.DAY_DISCUSSION,
+                kind="SEER_RESULT",
+                actor_seat=None,
+                audience_seat=2,
+                visibility="PRIVATE",
+                text=f"PRIV_{marker}",
+                created_at=1,
+            )
+        )
+
+    pub_a = await repo.load_public_logs(game_a.id)
+    pub_b = await repo.load_public_logs(game_b.id)
+    assert all(r["text"] != "ONLY_BETA" for r in pub_a)
+    assert any(r["text"] == "ONLY_ALPHA" for r in pub_a)
+    assert all(r["text"] != "ONLY_ALPHA" for r in pub_b)
+    assert any(r["text"] == "ONLY_BETA" for r in pub_b)
+
+    priv_a = await repo.load_private_logs_for_audience(game_a.id, audience_seat=2)
+    priv_b = await repo.load_private_logs_for_audience(game_b.id, audience_seat=2)
+    assert all(r["text"] != "PRIV_ONLY_BETA" for r in priv_a)
+    assert any(r["text"] == "PRIV_ONLY_ALPHA" for r in priv_a)
+    assert all(r["text"] != "PRIV_ONLY_ALPHA" for r in priv_b)
+    assert any(r["text"] == "PRIV_ONLY_BETA" for r in priv_b)
 
 
 async def test_daystart_speech_inserts_public_log(repo: SqliteRepo) -> None:

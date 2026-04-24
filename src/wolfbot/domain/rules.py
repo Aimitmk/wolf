@@ -10,7 +10,6 @@ from collections.abc import Sequence
 from random import Random
 
 from wolfbot.domain.enums import (
-    FACTION_OF_ROLE,
     ROLE_DISTRIBUTION,
     VILLAGE_SIZE,
     Faction,
@@ -151,11 +150,16 @@ def resolve_wolf_attack(
     return AttackResult(split=True, missing=missing)
 
 
-def medium_result(executed_player: Player | None) -> Faction | None:
-    """Medium sees only the executed player's faction — or None if no execution."""
+def is_detected_as_wolf(role: Role | None) -> bool:
+    """Seer and medium only see `Role.WEREWOLF` as wolf. Madmen appear white."""
+    return role is Role.WEREWOLF
+
+
+def medium_detection(executed_player: Player | None) -> bool | None:
+    """True iff the executed player was a real werewolf. None when no execution today."""
     if executed_player is None or executed_player.role is None:
         return None
-    return FACTION_OF_ROLE[executed_player.role]
+    return is_detected_as_wolf(executed_player.role)
 
 
 def check_victory(players: Sequence[Player]) -> Faction | None:

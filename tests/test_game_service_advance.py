@@ -8,8 +8,8 @@ from collections.abc import AsyncIterator
 import pytest_asyncio
 
 from tests.fakes import FakeClock, FakeDiscordAdapter, FakeLLMAdapter
-from wolfbot.domain.enums import Phase, Role, SubmissionType, SubmitResult
-from wolfbot.domain.models import Game, Seat
+from wolfbot.domain.enums import DeathCause, Phase, Role, SubmissionType, SubmitResult
+from wolfbot.domain.models import Game, PlayerUpdate, Seat, Transition
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.game_service import GameService, new_game_id
 from wolfbot.services.timer_service import EngineRegistry
@@ -1087,3 +1087,73 @@ async def test_resend_pending_dms_dispatches_llm_night_with_unresolved(
     # The resend must cover exactly the LLM subset of the split wolves.
     assert call.kwargs["restrict_to_seats"] == llm_wolves
     assert call.kwargs["unresolved_seats"] == llm_wolves
+
+
+async def test_game_over_posts_role_reveal_to_main_channel(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """On execution-path victory, the FakeDiscordAdapter receives VICTORY then ROLE_REVEAL,
+    both via post_public, naming every seat with role + alive/dead."""
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # -> NIGHT_0
+    await service.advance(game.id)  # -> DAY_DISCUSSION day 1
+
+    players = await repo.load_players(game.id)
+    wolves = sorted(p.seat_no for p in players if p.role is Role.WEREWOLF)
+    assert len(wolves) == 2
+    target_wolf = wolves[0]
+    other_wolf = wolves[1]
+    # Keep target_wolf plus 3 non-wolves alive. Killing every other seat gives us
+    # 1 wolf vs 3 non-wolves — executing the wolf clinches a VILLAGE win.
+    survivors: list[int] = [target_wolf]
+    for sn in range(1, 10):
+        if sn in (target_wolf, other_wolf):
+            continue
+        if len(survivors) < 4:
+            survivors.append(sn)
+    kill_seats = [sn for sn in range(1, 10) if sn not in survivors]
+
+    # Hand-craft a transition that kills the selected seats and jumps the game to
+    # DAY_VOTE day 3. apply_transition's optimistic lock is satisfied by passing
+    # expected_phase=DAY_DISCUSSION (the phase we're currently in).
+    jump = Transition(
+        next_phase=Phase.DAY_VOTE,
+        next_day=3,
+        new_deadline_epoch=clock.now + 60,
+        player_updates=tuple(
+            PlayerUpdate(seat_no=sn, alive=False, death_cause=DeathCause.ATTACK, death_day=2)
+            for sn in kill_seats
+        ),
+    )
+    committed = await repo.apply_transition(game.id, jump, expected_phase=Phase.DAY_DISCUSSION)
+    assert committed
+
+    # All survivors vote for the wolf; the wolf self-votes and gets dropped.
+    for voter in survivors:
+        target = target_wolf if voter != target_wolf else survivors[1]
+        result = await service.submit_vote(game.id, voter, target, round_=0, day=3)
+        assert result is SubmitResult.ACCEPTED
+
+    disc.reset()
+    await service.advance(game.id)  # execute wolf -> VICTORY + ROLE_REVEAL
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.GAME_OVER
+
+    public_posts = [c for c in disc.calls if c.name == "post_public"]
+    kinds = [c.kwargs["kind"] for c in public_posts]
+    assert "VICTORY" in kinds
+    assert "ROLE_REVEAL" in kinds
+    # ROLE_REVEAL must arrive after VICTORY on the main channel.
+    assert kinds.index("ROLE_REVEAL") > kinds.index("VICTORY")
+
+    reveal_text = public_posts[kinds.index("ROLE_REVEAL")].kwargs["text"]
+    assert reveal_text.startswith("最終配役:\n")
+    # Every seat (1–9) present with a role label and 生存/死亡 status.
+    for sn in range(1, 10):
+        assert f"- 席{sn} " in reveal_text
+    assert "(生存)" in reveal_text
+    assert "(死亡)" in reveal_text

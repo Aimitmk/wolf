@@ -187,7 +187,7 @@ def test_morning_announce_does_not_reveal_role() -> None:
 
 
 # ---------------------------------------------------------------- medium
-def test_medium_private_log_returns_faction_not_role() -> None:
+def test_medium_reports_wolf_when_wolf_executed() -> None:
     game = _game(day=1)
     players = _players(executed_today=1, day=1)  # seat 1 (wolf) was executed today
     seats = _seats()
@@ -210,10 +210,42 @@ def test_medium_private_log_returns_faction_not_role() -> None:
     assert len(medium_logs) == 1
     medium = medium_logs[0]
     assert medium.audience_seat == 5
-    # Medium should receive the faction label, not the exact role name
-    assert "人狼陣営" in medium.text
+    # Binary judgment: wolf executed → "人狼 でした"
+    assert "は 人狼 でした" in medium.text
+    # Faction label and exact role names must not appear.
+    assert "人狼陣営" not in medium.text
     for role_ja in ["占い師", "狂人", "霊媒師", "騎士"]:
         assert role_ja not in medium.text
+
+
+def test_medium_reports_madman_as_not_wolf() -> None:
+    """Madman execution must report 'not wolf', not the wolf faction."""
+    game = _game(day=1)
+    players = _players(executed_today=3, day=1)  # seat 3 is the madman
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 8),
+        _act(6, SubmissionType.KNIGHT_GUARD, 7),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    medium_logs = [lg for lg in t.private_logs if lg.kind == "MEDIUM_RESULT"]
+    assert len(medium_logs) == 1
+    medium = medium_logs[0]
+    assert medium.audience_seat == 5
+    assert "は 人狼ではありませんでした" in medium.text
+    assert "人狼陣営" not in medium.text
+    # role name must not leak
+    assert "狂人" not in medium.text
 
 
 def test_medium_no_execution_reports_none() -> None:
@@ -262,11 +294,12 @@ def test_seer_gets_result_even_if_target_dies_tonight() -> None:
     )
     seer_logs = [lg for lg in t.private_logs if lg.kind == "SEER_RESULT"]
     assert len(seer_logs) == 1
-    # Target 8 is villager → village faction
-    assert "村人陣営" in seer_logs[0].text
+    # Target 8 is villager → "not werewolf"
+    assert "は 人狼ではありません" in seer_logs[0].text
+    assert "村人陣営" not in seer_logs[0].text
 
 
-def test_seer_on_wolf_returns_wolf_faction() -> None:
+def test_seer_on_wolf_reports_wolf() -> None:
     game = _game(day=1)
     players = _players()
     seats = _seats()
@@ -286,7 +319,35 @@ def test_seer_on_wolf_returns_wolf_faction() -> None:
         now_epoch=1000,
     )
     seer_logs = [lg for lg in t.private_logs if lg.kind == "SEER_RESULT"]
-    assert "人狼陣営" in seer_logs[0].text
+    assert "は 人狼 です" in seer_logs[0].text
+    assert "人狼陣営" not in seer_logs[0].text
+
+
+def test_seer_on_madman_reports_not_wolf() -> None:
+    """Seer peeking the madman (狂人) must see 'not wolf', not the wolf faction."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 3),  # seat 3 is madman
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    seer_logs = [lg for lg in t.private_logs if lg.kind == "SEER_RESULT"]
+    assert len(seer_logs) == 1
+    assert "は 人狼ではありません" in seer_logs[0].text
+    assert "人狼陣営" not in seer_logs[0].text
+    assert "狂人" not in seer_logs[0].text
 
 
 # ---------------------------------------------------------------- missing / pause
@@ -463,6 +524,47 @@ def test_attack_killing_enough_non_wolves_triggers_wolf_victory() -> None:
     )
     assert t.next_phase is Phase.GAME_OVER
     assert t.victory is Faction.WEREWOLVES
+
+
+def test_attack_victory_emits_role_reveal_after_victory() -> None:
+    """Night-attack victory path: ROLE_REVEAL follows VICTORY and reflects post-attack deaths."""
+    game = _game(day=3)
+    alive = [True, True, False, True, False, False, True, False, False]
+    players = _players(alive=alive)
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 1),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    assert t.next_phase is Phase.GAME_OVER
+
+    kinds = [lg.kind for lg in t.public_logs]
+    assert "VICTORY" in kinds
+    assert "ROLE_REVEAL" in kinds
+    victory_idx = kinds.index("VICTORY")
+    reveal_idx = kinds.index("ROLE_REVEAL")
+    assert reveal_idx == victory_idx + 1
+
+    reveal = t.public_logs[reveal_idx]
+    assert reveal.text.startswith("最終配役:\n")
+    # Tonight's attack victim (seat 7) must show as 死亡 in the reveal.
+    assert "- 席7 P7: 村人 (死亡)" in reveal.text
+    # Surviving wolves show as 生存.
+    assert "- 席1 P1: 人狼 (生存)" in reveal.text
+    assert "- 席2 P2: 人狼 (生存)" in reveal.text
+    # All 9 seats present.
+    for seat_no in range(1, 10):
+        assert f"- 席{seat_no} P{seat_no}:" in reveal.text
 
 
 # ---------------------------------------------------------------- record_guard

@@ -23,7 +23,6 @@ from random import Random
 
 from wolfbot.domain.enums import (
     FACTION_JA,
-    FACTION_OF_ROLE,
     ROLE_JA,
     DeathCause,
     Faction,
@@ -50,7 +49,8 @@ from wolfbot.domain.rules import (
     check_victory,
     compute_vote_result,
     day_discussion_duration,
-    medium_result,
+    is_detected_as_wolf,
+    medium_detection,
     random_white_target,
     resolve_wolf_attack,
 )
@@ -109,6 +109,31 @@ def _victory_log(game: Game, v: Faction, now_epoch: int) -> LogEntry:
         game,
         kind="VICTORY",
         text=f"ゲーム終了。勝利陣営: {FACTION_JA[v]}",
+        now_epoch=now_epoch,
+        phase=Phase.GAME_OVER,
+    )
+
+
+def _role_reveal_log(
+    game: Game,
+    players_after: Sequence[Player],
+    seats_by_no: Mapping[int, Seat],
+    now_epoch: int,
+) -> LogEntry:
+    """Final roster reveal, emitted to the main public channel on GAME_OVER.
+
+    `players_after` must already reflect post-transition alive/dead state — caller
+    is responsible for applying newly-dead seat flips before handing players in.
+    """
+    lines = ["最終配役:"]
+    for p in sorted(players_after, key=lambda x: x.seat_no):
+        role_ja = ROLE_JA[p.role] if p.role is not None else "?"
+        status = "生存" if p.alive else "死亡"
+        lines.append(f"- 席{p.seat_no} {_name(seats_by_no, p.seat_no)}: {role_ja} ({status})")
+    return _public_log(
+        game,
+        kind="ROLE_REVEAL",
+        text="\n".join(lines),
         now_epoch=now_epoch,
         phase=Phase.GAME_OVER,
     )
@@ -210,8 +235,7 @@ def plan_night0(
                 audience_seat=seer_seat,
                 kind="SEER_RESULT_NIGHT0",
                 text=(
-                    f"初日ランダム白: {_name(seats_by_no, white_target)} は "
-                    f"{FACTION_JA[Faction.VILLAGE]} です。"
+                    f"初日ランダム白: {_name(seats_by_no, white_target)} は 人狼ではありません。"
                 ),
                 now_epoch=now_epoch,
                 phase=Phase.NIGHT_0,
@@ -482,7 +506,11 @@ def _apply_execution(
             next_day=game.day_number,
             new_deadline_epoch=None,
             player_updates=updates,
-            public_logs=(*public_logs, _victory_log(game, v, now_epoch)),
+            public_logs=(
+                *public_logs,
+                _victory_log(game, v, now_epoch),
+                _role_reveal_log(game, new_players, seats_by_no, now_epoch),
+            ),
             victory=v,
             newly_dead_seats=(executed_seat,),
             clear_force_skip=clear_force,
@@ -607,14 +635,16 @@ def plan_night_resolve(
             ),
             None,
         )
-        result = medium_result(executed_today)
-        if result is None:
+        is_wolf = medium_detection(executed_today)
+        if is_wolf is None:
             text = "本日の霊媒結果はありません(処刑なし)。"
         else:
             assert executed_today is not None
+            name = _name(seats_by_no, executed_today.seat_no)
             text = (
-                f"霊媒結果: {_name(seats_by_no, executed_today.seat_no)} は "
-                f"{FACTION_JA[result]} でした。"
+                f"霊媒結果: {name} は 人狼 でした。"
+                if is_wolf
+                else f"霊媒結果: {name} は 人狼ではありませんでした。"
             )
         private.append(
             _private_log(
@@ -630,16 +660,18 @@ def plan_night_resolve(
     if seer_seat is not None and seer_action is not None and seer_action.target_seat is not None:
         target = next((p for p in players if p.seat_no == seer_action.target_seat), None)
         if target is not None and target.role is not None:
-            faction = FACTION_OF_ROLE[target.role]
+            name = _name(seats_by_no, seer_action.target_seat)
+            text = (
+                f"占い結果: {name} は 人狼 です。"
+                if is_detected_as_wolf(target.role)
+                else f"占い結果: {name} は 人狼ではありません。"
+            )
             private.append(
                 _private_log(
                     game,
                     audience_seat=seer_seat,
                     kind="SEER_RESULT",
-                    text=(
-                        f"占い結果: {_name(seats_by_no, seer_action.target_seat)} は "
-                        f"{FACTION_JA[faction]} です。"
-                    ),
+                    text=text,
                     now_epoch=now_epoch,
                 )
             )
@@ -706,7 +738,11 @@ def plan_night_resolve(
             next_day=game.day_number,
             new_deadline_epoch=None,
             player_updates=tuple(updates),
-            public_logs=(*public_logs, _victory_log(game, v, now_epoch)),
+            public_logs=(
+                *public_logs,
+                _victory_log(game, v, now_epoch),
+                _role_reveal_log(game, new_players, seats_by_no, now_epoch),
+            ),
             private_logs=tuple(private),
             victory=v,
             morning_text=morning_text,

@@ -265,35 +265,37 @@ class LLMAdapter:
 
         # Wolf-chat prelude: before submitting attacks, LLM wolves post a
         # coordination message to the wolves-only channel so both wolves
-        # converge on one target.
+        # converge on one target. Runs serially — wolf B sees wolf A's just-
+        # logged message.
         await self._run_wolf_chat(game, llm_players, all_players, seats)
 
-        for player in llm_players:
-            # Re-check the game state per player — phase may have advanced
-            # (force-skip, deadline resolve) while we were asking xAI.
-            fresh = await self.repo.load_game(game.id)
-            if (
-                fresh is None
-                or fresh.ended_at is not None
-                or fresh.phase is not Phase.NIGHT
-                or fresh.day_number != game.day_number
-            ):
-                return
-            seat = seats_by_no[player.seat_no]
-            if player.role is None or seat.persona_key is None:
-                continue
-            kind, legal = self._role_to_kind(player, all_players, prev_guard_seat)
-            if kind is None or not legal:
-                continue
-            # Idempotency guard: if this seat already submitted for this kind,
-            # skip — unless it's a wolf in a split (unresolved_seats) which
-            # needs to re-ask to break the lockout.
-            existing = await self.repo.load_night_actions(game.id, day=game.day_number)
-            already = any(a.actor_seat == player.seat_no and a.kind is kind for a in existing)
-            if already and player.seat_no not in unresolved_seats:
-                continue
-            candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
+        async def _one_night_action(player: Player) -> None:
+            # Per-seat stale check, idempotency, and submission. Wrapped in
+            # try/except so one seat's failure does not cancel peers launched
+            # alongside us in the gather below.
             try:
+                fresh = await self.repo.load_game(game.id)
+                if (
+                    fresh is None
+                    or fresh.ended_at is not None
+                    or fresh.phase is not Phase.NIGHT
+                    or fresh.day_number != game.day_number
+                ):
+                    return
+                seat = seats_by_no[player.seat_no]
+                if player.role is None or seat.persona_key is None:
+                    return
+                kind, legal = self._role_to_kind(player, all_players, prev_guard_seat)
+                if kind is None or not legal:
+                    return
+                # Idempotency: skip if this seat already submitted for this
+                # kind — unless it is a split-wolf (unresolved_seats), which
+                # must re-ask to break the lockout.
+                existing = await self.repo.load_night_actions(game.id, day=game.day_number)
+                already = any(a.actor_seat == player.seat_no and a.kind is kind for a in existing)
+                if already and player.seat_no not in unresolved_seats:
+                    return
+                candidates = [seats_by_no[sn] for sn in legal if sn in seats_by_no]
                 action = await self._ask(
                     game,
                     player,
@@ -310,6 +312,10 @@ class LLMAdapter:
                 log.exception(
                     "llm night action failed for game %s seat %s", game.id, player.seat_no
                 )
+
+        # Dispatch per-seat in parallel. xAI round-trips no longer stack
+        # serially across LLM seats.
+        await asyncio.gather(*(_one_night_action(p) for p in llm_players))
 
     async def _run_wolf_chat(
         self,
@@ -448,36 +454,44 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         expected_phase = Phase.DAY_VOTE if round_ == 0 else Phase.DAY_RUNOFF
-        for voter in llm_voters:
-            fresh = await self.repo.load_game(game.id)
-            if (
-                fresh is None
-                or fresh.ended_at is not None
-                or fresh.phase is not expected_phase
-                or fresh.day_number != game.day_number
-            ):
-                return
-            seat = seats_by_no[voter.seat_no]
-            if seat.persona_key is None:
-                continue
-            # Idempotency guard: skip if this seat already has a vote row for
-            # this round. Handles the race where the original serial task
-            # eventually wins for a seat the resend also targeted.
-            existing_votes = await self.repo.load_votes(game.id, day=game.day_number, round_=round_)
-            if any(v.voter_seat == voter.seat_no for v in existing_votes):
-                continue
-            if candidates is None:
-                cand_seats = [
-                    s
-                    for s in seats
-                    if s.seat_no != voter.seat_no
-                    and any(p.seat_no == s.seat_no and p.alive for p in all_players)
-                ]
-            else:
-                cand_seats = [
-                    s for s in seats if s.seat_no in set(candidates) and s.seat_no != voter.seat_no
-                ]
+
+        async def _one_vote(voter: Player) -> None:
+            # Per-seat stale check, idempotency, and submission. try/except
+            # contains per-seat failures so peers scheduled alongside via
+            # asyncio.gather are not cancelled.
             try:
+                fresh = await self.repo.load_game(game.id)
+                if (
+                    fresh is None
+                    or fresh.ended_at is not None
+                    or fresh.phase is not expected_phase
+                    or fresh.day_number != game.day_number
+                ):
+                    return
+                seat = seats_by_no[voter.seat_no]
+                if seat.persona_key is None:
+                    return
+                # Idempotency: skip if this seat already has a vote row for
+                # this round. Also guards the resend path (restrict_to_seats)
+                # from double-submitting if the original task lands first.
+                existing_votes = await self.repo.load_votes(
+                    game.id, day=game.day_number, round_=round_
+                )
+                if any(v.voter_seat == voter.seat_no for v in existing_votes):
+                    return
+                if candidates is None:
+                    cand_seats = [
+                        s
+                        for s in seats
+                        if s.seat_no != voter.seat_no
+                        and any(p.seat_no == s.seat_no and p.alive for p in all_players)
+                    ]
+                else:
+                    cand_seats = [
+                        s
+                        for s in seats
+                        if s.seat_no in set(candidates) and s.seat_no != voter.seat_no
+                    ]
                 if not cand_seats:
                     await self.gs.submit_vote(
                         game.id,
@@ -486,7 +500,7 @@ class LLMAdapter:
                         round_=round_,
                         day=game.day_number,
                     )
-                    continue
+                    return
                 action = await self._ask(
                     game,
                     voter,
@@ -512,6 +526,9 @@ class LLMAdapter:
                     voter.seat_no,
                     round_,
                 )
+
+        # Dispatch per-seat in parallel.
+        await asyncio.gather(*(_one_vote(v) for v in llm_voters))
 
     # --------------------------------------------------- daytime speeches
     async def submit_llm_daystart_speeches(

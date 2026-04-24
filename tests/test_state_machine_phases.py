@@ -104,6 +104,7 @@ def test_plan_night0_random_white_is_non_wolf_non_self() -> None:
         9: Role.VILLAGER,
     }
     players = _players_from(seats, roles)
+    saw_madman = False
     for seed in range(50):
         rng = random.Random(seed)
         t = plan_night0(game, players, seats, rng, now_epoch=0)
@@ -113,8 +114,13 @@ def test_plan_night0_random_white_is_non_wolf_non_self() -> None:
         # Text references one of the non-wolf non-seer seats (3, 5, 6, 7, 8, 9)
         # (We don't parse the name — just check that the target is not the seer itself)
         assert "P4" not in white_log.text
-        # Text contains "村人陣営"
-        assert "村人陣営" in white_log.text
+        # Binary framing — seer learns only "not werewolf", never a faction label.
+        assert "人狼ではありません" in white_log.text
+        assert "村人陣営" not in white_log.text
+        # Madman (seat 3 → display name "P3") is a legal white target.
+        if "P3" in white_log.text:
+            saw_madman = True
+    assert saw_madman, "madman should appear in the random-white pool at least once over 50 seeds"
 
 
 def test_plan_day_discussion_to_vote_sets_vote_deadline() -> None:
