@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Full game spec (Japanese) lives at `prompts/IMPLEMENTATION_PROMPT.md` — consult it for roles, phase order, and event ordering rules before changing domain logic.
 
+Contributor-facing conventions (commit style, test naming, PR expectations) live separately in `AGENTS.md`; this file focuses on architecture and repo-specific gotchas.
+
 ## Commands
 
 ```bash
@@ -52,6 +54,7 @@ services/      orchestration: GameService, GameEngine, RecoveryService, Permissi
   ↑
 persistence/   SqliteRepo (aiosqlite)
 llm/           personas + prompt builder
+prompts/       system prompt markdown (`llm_system_prompt.md`), read at runtime by prompt_builder
 ui/            discord.ui Views (DM vote/action selects)
 main.py        wiring
 ```
@@ -69,6 +72,8 @@ Within `services/`: `discord_service.py` contains both `DiscordBotAdapter` and t
 Transient phases (`SETUP`, `NIGHT_0`) have `deadline_epoch=None` and auto-advance without sleeping. All other phases sleep until deadline or early wake. Phase duration constants live in the state machine / rules modules.
 
 **LLM submissions inside `_dispatch_submissions` are fire-and-forget.** `LLMAdapter.submit_llm_votes` / `submit_llm_night_actions` / `submit_llm_daystart_speeches` (`src/wolfbot/services/llm_service.py`) schedule one `asyncio.create_task` per LLM actor and return immediately — the `await` at the call site awaits only the scheduling, not the xAI round-trip. A slow xAI response must never block `GameEngine`'s deadline watcher. Each background task re-loads the game and re-checks `phase`, `day_number`, and `ended_at` before every per-player submission, so a force-skip or deadline advance mid-flight is safely dropped. Do **not** add timeouts or awaits expecting LLM results at the `advance()` call site.
+
+The batch tasks use two-level concurrency: a single outer `asyncio.create_task` wraps each batch (fire-and-forget from `advance()`'s perspective), and **inside** that task per-seat work runs concurrently via `asyncio.gather` — so all LLM seats hit xAI in parallel rather than serially. Wolf night-chat coordination deliberately stays serial (shared wolves-channel context, later wolves read earlier wolves' messages); preserve that distinction if you add a new submission type.
 
 ### Circular dependency resolution
 
@@ -91,6 +96,11 @@ See `src/wolfbot/main.py` lines ~44–56. `DiscordBotAdapter` and `LLMAdapter` a
 - The `LOBBY → SETUP` transition plus LLM-seat backfill goes through `SqliteRepo.claim_start_and_backfill`, which packages the phase flip and the bot-seat inserts into one optimistically-locked transaction (matches on `expected_phase=LOBBY`). `/wolf start` uses this; don't re-implement the flow with a separate phase update followed by `insert_seat` calls — a concurrent `/wolf join` / `/wolf leave` would slip in between.
 - `force_skip_pending` is set only via `Transition.set_force_skip=True` passed to `apply_transition`. That way the flag flip and the `WAITING_HOST_DECISION → paused phase` swap share a transaction — if `/wolf extend` wins the race, both roll back together. There is no standalone `repo.set_force_skip` method.
 - `GameService.host_abort` returns `bool` — `False` means the game was already ended and no work was done. The `/wolf abort` handler in `discord_service.py` branches on this: only on `True` does it detach + stop the `GameEngine` and post the public "強制終了" message; otherwise it replies ephemerally. New callers of `host_abort` must respect the same pattern or risk double-teardown.
+
+### Role reveals & detection semantics
+
+- Seer divination and medium post-mortem return **bool, not `Faction`**, via `domain/rules.py::is_detected_as_wolf(role)`. Madman is **not** detected as wolf (same result as villager). When adding a new role, decide whether it feeds this predicate rather than branching on `Role` directly in callers — the seer/medium UI copy assumes a binary.
+- At game end, `domain/state_machine.py::_role_reveal_log` appends a single `ROLE_REVEAL`-kind `LogEntry` listing every seat's final role + alive/dead status. It is emitted from **both** win paths — execution victory (~line 512) and attack victory (~line 744). Any new end-of-game transition must emit this log, or the public reveal will be missing.
 
 ### Recovery on startup
 
@@ -116,6 +126,8 @@ The manager is idempotent: it only issues API calls on actual diffs. Don't send 
 
 On game end, `heaven_channel_id` / `wolves_channel_id` are **deleted** (not just permission-cleared) — a deliberate fix for cross-game channel leak. Preserve this on any future game-teardown path.
 
+During wolf-attack splits, the main channel announces only `未確定: N件` (hiding the exact target breakdown), while the wolves-private channel sees the real split tally. This asymmetric disclosure is intentional — do not "simplify" by posting the split detail to both channels.
+
 ### LLM integration
 
 `src/wolfbot/services/llm_service.py` uses the `openai` client pointed at `https://api.x.ai/v1/chat/completions`. `response_format` enforces the `LLMAction` JSON schema strictly, and `tenacity` retries on transient errors.
@@ -126,6 +138,7 @@ Personas in `src/wolfbot/llm/personas.py` are **Gnosia-flavored archetypes**; `s
 - No meta-commentary (no "as an AI", no referring to inputs as data).
 - Japanese only, 80–300 chars per utterance.
 - `target_name` must exactly match a candidate **token** (`席{seat_no} {display_name}`) or be `null` / intent=`skip`. The seat-number prefix disambiguates duplicate display_names (e.g. two humans named "Alice", or a human colliding with a persona). `LLMAdapter._resolve_target` parses the prefix; bare display_names still resolve when unambiguous (legacy fallback).
+- Persona `display_name` is a katakana handle prefixed with a distinguishing emoji (e.g. `🌙 セツ`). The emoji is part of the stored `display_name` string — `seat_token` includes it verbatim and the target resolver handles it transparently. When adding a persona, pick an emoji not already used by another persona.
 
 ## Testing conventions
 
