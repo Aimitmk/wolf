@@ -1222,6 +1222,26 @@ async def test_ask_system_prompt_explains_medium_white_semantics_for_any_role(
     assert "偽扱いしない" in system_prompt
 
 
+async def test_ask_system_prompt_contains_advanced_terminology_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """Every LLM seat (wolf, madman, villager, info role) must receive the
+    advanced jinro terminology (グレラン / 縄計算 / スケール / 確白 / 確黒 /
+    パンダ / PP / RPP) via the shared rules block. Sampling 4 representative
+    roles exercises `build_system_prompt` for both wolf-faction and village-
+    faction paths, since the terminology is emitted independent of role."""
+    for role in (Role.VILLAGER, Role.SEER, Role.WEREWOLF, Role.MADMAN):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "グレラン" in system_prompt, f"{role.name} missed グレラン"
+        assert "縄計算" in system_prompt, f"{role.name} missed 縄計算"
+        assert "スケール" in system_prompt, f"{role.name} missed スケール"
+        assert "確白" in system_prompt, f"{role.name} missed 確白"
+        assert "確黒" in system_prompt, f"{role.name} missed 確黒"
+        assert "パンダ" in system_prompt, f"{role.name} missed パンダ"
+        assert "PP" in system_prompt, f"{role.name} missed PP"
+        assert "RPP" in system_prompt, f"{role.name} missed RPP"
+
+
 async def test_ask_system_prompt_medium_guards_against_seer_co_white_misread(
     repo: SqliteRepo,
 ) -> None:

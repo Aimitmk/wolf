@@ -218,6 +218,161 @@ def test_game_rules_block_requires_completing_medium_roller_by_default() -> None
     assert "原則として完走" in block
 
 
+# ------------------------------------- terminology (推理語彙) in rules block
+# Advanced jinro vocabulary is shared across every LLM seat via the game-rules
+# block (not per-role strategy). These assertions pin the substrings that the
+# spec requires and guard against accidental leak of wolf-coordination
+# vocabulary (`相方`, `襲撃先を揃える`) into the shared block.
+def test_game_rules_block_frames_terminology_as_reading_tool() -> None:
+    """The terminology section is introduced as a *reading* tool that does not
+    override the preceding factual rules. The framing sentence anchors this."""
+    block = _build_game_rules_block()
+    assert "推理語彙" in block
+    assert "最終判断は常に公開情報の整合性" in block
+
+
+def test_game_rules_block_defines_grey_positions() -> None:
+    """グレー / 灰 means: no role CO AND no settled seer/medium white-black on
+    the seat. Both kanji and katakana forms must appear."""
+    block = _build_game_rules_block()
+    assert "グレー" in block
+    assert "灰" in block
+    assert "白黒も十分ついていない" in block
+
+
+def test_game_rules_block_describes_guran_as_non_random() -> None:
+    """グレラン is explicitly framed as reasoned grey-voting, not pure random —
+    the spec calls out this misreading as the #1 failure mode."""
+    block = _build_game_rules_block()
+    assert "グレラン" in block
+    assert "理由を持って" in block
+    # The non-randomness must be made explicit; the word `無作為` appears only
+    # in the negation phrase.
+    assert "無作為" in block
+    assert "完全な無作為投票ではなく" in block
+
+
+def test_game_rules_block_defines_grey_scale_with_reasons() -> None:
+    """グレスケ / スケール: not just an ordering — each position must carry a
+    reason grounded in speech/vote/divination/attack consistency."""
+    block = _build_game_rules_block()
+    assert "グレスケ" in block
+    assert "スケール" in block
+    assert "白い順" in block
+    assert "黒い順" in block
+    assert "理由" in block
+
+
+def test_game_rules_block_contains_rope_calculation_formula() -> None:
+    """縄計算: remaining executions, with the standard heuristic formula
+    spelled out. 9-player village starts at 4 縄."""
+    block = _build_game_rules_block()
+    assert "縄計算" in block
+    assert "floor((生存人数 - 1) / 2)" in block
+    assert "4縄" in block
+
+
+def test_game_rules_block_clarifies_white_is_not_village_confirmed() -> None:
+    """Every LLM seat must see the contract that 白判定 ≠ 村陣営確定 because
+    the madman reads white. This also cross-references the existing rule on
+    line ~55 (`狂人は黒判定されない`) — both coexist in the same block."""
+    block = _build_game_rules_block()
+    assert "狂人も白に出る" in block
+    assert "村陣営確定ではない" in block
+    # Guard: the pre-existing rule that the new terminology must not override.
+    assert "狂人は黒判定されない" in block
+
+
+def test_game_rules_block_defines_kakushiro_with_madman_caveat() -> None:
+    """確白 = 進行役候補 but never absolute village-confirmation (狂人 reads
+    white). The caveat must be phrased as `言い切りすぎない` to avoid promoting
+    a 確白 to full 村陣営 status."""
+    block = _build_game_rules_block()
+    assert "確白" in block
+    assert "進行役候補" in block
+    assert "「村陣営確定」と言い切りすぎない" in block
+
+
+def test_game_rules_block_rejects_single_fake_black_as_kakukuro() -> None:
+    """確黒 requires multi-view corroboration. A single lone-black from a
+    potentially-fake seer is NOT 確黒 — this must be stated verbatim so LLMs
+    don't overweight single fake-seer blacks during 2-2 / counter-CO."""
+    block = _build_game_rules_block()
+    assert "確黒" in block
+    assert "単独の偽占い候補から黒を出されただけでは確黒ではない" in block
+
+
+def test_game_rules_block_defines_panda_as_both_white_and_black() -> None:
+    """パンダ = a seat that received BOTH white and black judgments (from
+    different COs). The phrase `白判定と黒判定の両方` is the canonical test
+    anchor."""
+    block = _build_game_rules_block()
+    assert "パンダ" in block
+    assert "白判定と黒判定の両方" in block
+
+
+def test_game_rules_block_defines_roller_synonyms_with_completion() -> None:
+    """Both spellings ローラー and ロラ must appear as common vocabulary, and
+    the completion rule must be restated here so it cross-references (not
+    contradicts) the existing 2-2 `原則として完走` rule."""
+    block = _build_game_rules_block()
+    assert "ローラー" in block
+    assert "ロラ" in block
+    assert "開始したら原則完走" in block
+
+
+def test_game_rules_block_defines_kimeuchi_and_hatan() -> None:
+    """決め打ち and 破綻 must both appear as first-class terminology bullets,
+    not just as word-in-sentence uses elsewhere in the block."""
+    block = _build_game_rules_block()
+    assert "- 決め打ち:" in block
+    assert "- 破綻:" in block
+
+
+def test_game_rules_block_defines_line_kakoi_minuchigiri() -> None:
+    """Wolf-pattern vocabulary (ライン / 囲い / 身内切り) reaches every seat as
+    neutral reading tools, framed as patterns to *recognize*, not execute."""
+    block = _build_game_rules_block()
+    assert "- ライン:" in block
+    assert "- 囲い:" in block
+    assert "- 身内切り:" in block
+
+
+def test_game_rules_block_defines_vote_and_attack_traces_and_shiten() -> None:
+    """Behavioral-signal vocabulary: 票筋 / 噛み筋 / 視点漏れ must each have a
+    dedicated bullet defining the term, not just appear mid-sentence."""
+    block = _build_game_rules_block()
+    assert "- 票筋:" in block
+    assert "- 噛み筋:" in block
+    assert "- 視点漏れ:" in block
+
+
+def test_game_rules_block_defines_endgame_vocabulary() -> None:
+    """Endgame terms: SG (scapegoat), GJ / 平和 (peaceful morning), PP
+    (power-play), RPP (random / lost PP) must all be defined so LLMs can
+    recognize and reason about late-game vote dynamics."""
+    block = _build_game_rules_block()
+    assert "- SG" in block
+    assert "- GJ" in block
+    assert "平和" in block
+    assert "- PP" in block
+    assert "- RPP" in block
+
+
+def test_game_rules_block_terminology_has_no_wolf_coordination_leak() -> None:
+    """Shared terminology must not bleed wolf-coordination vocabulary into
+    non-wolf prompts. `相方` and the exact phrase `襲撃先を揃える` are the two
+    anchors the existing service-level leak tests use."""
+    block = _build_game_rules_block()
+    assert "相方" not in block, (
+        "wolf-coordination '相方' leaked into shared rules block — would break "
+        "test_ask_system_prompt_non_wolf_excludes_wolf_strategy"
+    )
+    assert "襲撃先を揃える" not in block, (
+        "wolf-coordination '襲撃先を揃える' leaked into shared rules block"
+    )
+
+
 # ------------------------------------------------------- strategy block
 # A phrase that must appear in exactly one role's tips — keyed by role. Used
 # both to assert per-role content AND to assert no cross-leak into other roles.
