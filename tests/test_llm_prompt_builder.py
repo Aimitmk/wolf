@@ -91,7 +91,7 @@ _ROLE_UNIQUE_PHRASES: dict[Role, str] = {
     Role.WEREWOLF: "相方を露骨に庇いすぎない",
     Role.MADMAN: "人狼位置を知っている前提で話してはならない",
     Role.SEER: "判定履歴を時系列で一貫",
-    Role.MEDIUM: "対抗霊媒が出た場合",
+    Role.MEDIUM: "処刑された相手が狂人でも",
     Role.KNIGHT: "前夜と違う相手を選ぶ",
     Role.VILLAGER: "CO 騙りは村陣営としては行わない",
 }
@@ -140,6 +140,12 @@ def test_madman_strategy_prohibits_not_assumes_wolf_positions() -> None:
     # No wolf-coordination playbook leaks.
     assert "相方" not in block
     assert "襲撃先を揃える" not in block
+
+
+def test_medium_strategy_reinforces_madman_is_white_rule() -> None:
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "人狼ではありませんでした" in block
+    assert "白結果だけでは村置き確定にはならない" in block
 
 
 # --------------------------------------------------- build_system_prompt

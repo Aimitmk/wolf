@@ -1007,7 +1007,7 @@ async def test_ask_system_prompt_role_strategy_isolated_between_roles(
         Role.WEREWOLF: "相方を露骨に庇いすぎない",
         Role.MADMAN: "人狼位置を知っている前提で話してはならない",
         Role.SEER: "判定履歴を時系列で一貫",
-        Role.MEDIUM: "対抗霊媒が出た場合",
+        Role.MEDIUM: "処刑された相手が狂人でも",
         Role.KNIGHT: "前夜と違う相手を選ぶ",
         Role.VILLAGER: "CO 騙りは村陣営としては行わない",
     }
