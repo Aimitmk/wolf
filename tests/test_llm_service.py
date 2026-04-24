@@ -1076,3 +1076,60 @@ async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy_even_with_speec
             assert "襲撃先を揃える" not in system_prompt, (
                 f"{role.name}/{pkey} saw '襲撃先を揃える' in system prompt"
             )
+
+
+async def test_ask_system_prompt_contains_co_evaluation_rules_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """The shared CO evaluation guidance (single-CO default-truthy, conditions
+    to suspect, counter-CO comparison axes) must reach every LLM seat via the
+    rules block. `_build_game_rules_block` is role-independent so one role
+    suffices to exercise the production path."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "単独 CO" in system_prompt
+    assert "真の役職者にかなり近い" in system_prompt
+    assert "対抗 CO" in system_prompt
+    assert "噛み筋" in system_prompt
+
+
+async def test_ask_system_prompt_knight_includes_protection_success_co_strategy(
+    repo: SqliteRepo,
+) -> None:
+    """The knight LLM's system prompt must cover the peaceful-morning /
+    protection-success CO pathway with the guard target disclosure rule."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
+    assert "平和な朝" in system_prompt
+    assert "護衛成功" in system_prompt
+    assert "護衛先を添えて" in system_prompt
+
+
+async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRepo) -> None:
+    """The werewolf LLM's system prompt must carry the fake-CO playbook:
+    day-1 seer fake, day-2+ medium/knight fake, and the over-fake warning."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "day 1" in system_prompt
+    assert "占い師騙り" in system_prompt
+    assert "霊媒師騙り" in system_prompt
+    assert "騎士騙り" in system_prompt
+    assert "3 人以上" in system_prompt
+    assert "騙りすぎ" in system_prompt
+
+
+async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coordination(
+    repo: SqliteRepo,
+) -> None:
+    """The madman LLM's system prompt must carry the same fake-CO playbook as
+    the wolf (day-1 seer fake, day-2+ medium/knight fake, over-fake warning)
+    — but NO wolf-coordination vocabulary (`相方` / `襲撃先を揃える`)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "day 1" in system_prompt
+    assert "占い師騙り" in system_prompt
+    assert "霊媒師騙り" in system_prompt
+    assert "騎士騙り" in system_prompt
+    assert "3 人以上" in system_prompt
+    assert "騙りすぎ" in system_prompt
+    # Wolf-coordination vocabulary must not appear for the madman.
+    assert "相方" not in system_prompt
+    assert "襲撃先を揃える" not in system_prompt
+    # Existing prohibition phrase must also still be present.
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt

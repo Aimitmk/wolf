@@ -84,6 +84,35 @@ def test_game_rules_block_contains_candidate_token_rule() -> None:
     assert "候補トークン" in block
 
 
+def test_game_rules_block_contains_single_co_default_truthy_stance() -> None:
+    """Shared rule: a lone CO with no counter-CO should be treated as likely
+    real, and LLMs should not vote against them without grounds."""
+    block = _build_game_rules_block()
+    assert "単独 CO" in block
+    assert "真の役職者にかなり近い" in block
+    assert "対抗 CO" in block
+
+
+def test_game_rules_block_allows_single_co_suspicion_on_strong_evidence() -> None:
+    """Single CO is not absolute truth — strong evidence (speech breakdown,
+    vote contradiction, result contradiction, attack-pattern mismatch) can
+    still justify suspicion."""
+    block = _build_game_rules_block()
+    assert "発言破綻" in block
+    assert "投票矛盾" in block
+    assert "判定結果の矛盾" in block
+    assert "噛み筋" in block
+
+
+def test_game_rules_block_guides_counter_co_comparison() -> None:
+    """When a counter-CO appears, compare on results / timeline / votes /
+    attack outcomes."""
+    block = _build_game_rules_block()
+    assert "対抗 CO" in block
+    assert "時系列" in block
+    assert "整合性" in block
+
+
 # ------------------------------------------------------- strategy block
 # A phrase that must appear in exactly one role's tips — keyed by role. Used
 # both to assert per-role content AND to assert no cross-leak into other roles.
@@ -146,6 +175,59 @@ def test_medium_strategy_reinforces_madman_is_white_rule() -> None:
     block = _build_strategy_block(Role.MEDIUM)
     assert "人狼ではありませんでした" in block
     assert "白結果だけでは村置き確定にはならない" in block
+
+
+def test_knight_strategy_advises_protection_success_co() -> None:
+    """On a peaceful morning (no casualty), the knight should consider CO-ing
+    with the guard target attached — and must always attach the guard target
+    when CO-ing on a protection-success claim."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "平和な朝" in block
+    assert "護衛成功" in block
+    assert "護衛先を添えて" in block
+    # Existing guidance is preserved.
+    assert "前夜と違う相手を選ぶ" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_prioritizes_seer_fake_on_day1(role: Role) -> None:
+    """Wolf and madman both get guidance to consider faking seer on day 1."""
+    block = _build_strategy_block(role)
+    assert "day 1" in block
+    assert "占い師騙り" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_switches_to_medium_or_knight_fake_if_countered(role: Role) -> None:
+    """If a counter-seer CO is already out, both wolf and madman should
+    consider medium or knight fake on day 2+, with corresponding night-ability
+    results attached."""
+    block = _build_strategy_block(role)
+    assert "対抗占い師" in block
+    assert "day 2" in block
+    assert "霊媒師騙り" in block
+    assert "騎士騙り" in block
+    assert "夜に能力を使った想定" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_warns_against_over_faking(role: Role) -> None:
+    """Both wolf and madman are warned that piling on fake COs (3+) makes
+    non-CO seats look white by contrast."""
+    block = _build_strategy_block(role)
+    assert "3 人以上" in block
+    assert "騙りすぎ" in block
+
+
+def test_madman_fake_strategy_has_no_wolf_coordination_vocabulary() -> None:
+    """The madman's new fake-CO guidance must not introduce wolf-coordination
+    vocabulary (`相方`, `襲撃先を揃える`) — the madman does not know the real
+    wolf positions."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "相方" not in block
+    assert "襲撃先を揃える" not in block
+    # Existing prohibition phrase still present.
+    assert "人狼位置を知っている前提で話してはならない" in block
 
 
 # --------------------------------------------------- build_system_prompt
