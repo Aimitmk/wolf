@@ -85,12 +85,15 @@ def test_game_rules_block_contains_candidate_token_rule() -> None:
 
 
 def test_game_rules_block_contains_single_co_default_truthy_stance() -> None:
-    """Shared rule: a lone CO with no counter-CO should be treated as likely
-    real, and LLMs should not vote against them without grounds."""
+    """Shared rule: a lone CO with no counter-CO (never once in the public log)
+    should be treated as likely real, and LLMs should not vote against them
+    without grounds. `一度も` is the key anchor that distinguishes this case
+    from a sole-survivor whose counter-CO was executed/attacked."""
     block = _build_game_rules_block()
     assert "単独 CO" in block
     assert "真の役職者にかなり近い" in block
     assert "対抗 CO" in block
+    assert "一度も" in block
 
 
 def test_game_rules_block_allows_single_co_suspicion_on_strong_evidence() -> None:
@@ -111,6 +114,25 @@ def test_game_rules_block_guides_counter_co_comparison() -> None:
     assert "対抗 CO" in block
     assert "時系列" in block
     assert "整合性" in block
+
+
+def test_game_rules_block_rejects_sole_survivor_as_single_co() -> None:
+    """If the same role had 2+ COs in the past, a currently-surviving lone CO
+    holder is NOT treated as a lone/no-counter CO even though only one is
+    alive. Prevents the LLM from auto-trusting a survivor whose opponent was
+    executed or attacked."""
+    block = _build_game_rules_block()
+    assert "2 人以上" in block
+    assert "自動的に真置きしない" in block
+
+
+def test_game_rules_block_includes_dead_co_in_comparison() -> None:
+    """For roles with a counter-CO history, dead CO holders stay in the
+    comparison set — the LLM evaluates the survivor against the deceased
+    opponent's results, speech, votes, attack outcomes AND death timing."""
+    block = _build_game_rules_block()
+    assert "死亡済み" in block
+    assert "死亡タイミング" in block
 
 
 # ------------------------------------------------------- strategy block

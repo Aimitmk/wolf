@@ -1092,6 +1092,21 @@ async def test_ask_system_prompt_contains_co_evaluation_rules_for_any_role(
     assert "噛み筋" in system_prompt
 
 
+async def test_ask_system_prompt_distinguishes_sole_survivor_from_lone_co(
+    repo: SqliteRepo,
+) -> None:
+    """Every LLM seat must receive the refinement that distinguishes a truly-
+    lone CO (no counter ever appeared) from a sole-survivor CO (counter was
+    executed or attacked). The rules block enforces: 2+ historical COs → do
+    not auto-trust the survivor, and dead CO holders stay in the comparison
+    via death-timing integrity."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "2 人以上" in system_prompt
+    assert "自動的に真置きしない" in system_prompt
+    assert "死亡済み" in system_prompt
+    assert "死亡タイミング" in system_prompt
+
+
 async def test_ask_system_prompt_knight_includes_protection_success_co_strategy(
     repo: SqliteRepo,
 ) -> None:
