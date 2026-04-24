@@ -209,6 +209,29 @@ def test_game_rules_block_defines_2_2_formation() -> None:
     assert "霊媒ローラー" in block
 
 
+def test_game_rules_block_defines_2_1_formation() -> None:
+    """2-1 = 2 seer COs + 1 medium CO. Sole medium reads as truth-leaning
+    pivot; branch on black-out vs white-progress with rope / 囲い awareness."""
+    block = _build_game_rules_block()
+    assert "2-1" in block
+    assert "占い師 CO が 2 人・霊媒師 CO が 1 人" in block
+    assert "単独霊媒師" in block
+    assert "グレー吊り" in block
+    assert "黒吊り" in block
+
+
+def test_game_rules_block_defines_1_2_formation() -> None:
+    """1-2 = 1 seer CO + 2 medium COs. Seer reads truth-leaning while mediums
+    are treated as mixed-fake; medium roller / medium-kiri is default, grey
+    scrutiny only when medium internals read real+madman and grey is
+    wolf-heavy."""
+    block = _build_game_rules_block()
+    assert "1-2" in block
+    assert "占い師 CO が 1 人・霊媒師 CO が 2 人" in block
+    assert "霊媒ローラー" in block
+    assert "霊媒切り" in block
+
+
 def test_game_rules_block_requires_completing_medium_roller_by_default() -> None:
     """Two medium COs → don't unfoundedly trust either one; once a medium
     roller is started, complete it by default, with a high evidentiary bar
@@ -338,6 +361,24 @@ def test_game_rules_block_defines_line_kakoi_minuchigiri() -> None:
     assert "- 身内切り:" in block
 
 
+def test_game_rules_block_kakoi_does_not_treat_madman_as_known_ally() -> None:
+    """囲い must not describe the madman as a wolf-known ally. The old phrasing
+    `仲間の狼 (や狂人)` implied that wolves know the madman's seat, which is
+    false in this bot."""
+    block = _build_game_rules_block()
+    assert "仲間の狼 (や狂人)" not in block
+    assert "狼は狂人位置を知らない" in block
+
+
+def test_game_rules_block_minuchigiri_does_not_treat_madman_as_known_ally() -> None:
+    """身内切り must not phrase the madman as a known wolf ally to cut. The
+    old phrasing `仲間 (別の人狼や狂人)` incorrectly included 狂人 as a known
+    teammate."""
+    block = _build_game_rules_block()
+    assert "仲間 (別の人狼や狂人)" not in block
+    assert "狼が仲間の狼" in block
+
+
 def test_game_rules_block_defines_vote_and_attack_traces_and_shiten() -> None:
     """Behavioral-signal vocabulary: 票筋 / 噛み筋 / 視点漏れ must each have a
     dedicated bullet defining the term, not just appear mid-sentence."""
@@ -371,6 +412,35 @@ def test_game_rules_block_terminology_has_no_wolf_coordination_leak() -> None:
     assert "襲撃先を揃える" not in block, (
         "wolf-coordination '襲撃先を揃える' leaked into shared rules block"
     )
+
+
+def test_game_rules_block_states_fake_co_legality() -> None:
+    """Fake COs (seer/medium/knight) must stay within the bot's legal mechanics.
+    Shared rules call out illegal knight-guard patterns (self-guard, consecutive
+    guard, dead-seat guard) and forbid fabricating medium results on no-execution
+    days or seer results that contradict the public timeline."""
+    block = _build_game_rules_block()
+    assert "実ルール上あり得る内容" in block
+    assert "過去に自分が出した結果と矛盾しないか" in block
+    assert "処刑がなかった日に霊媒結果を捏造しない" in block
+    assert "自分護衛" in block
+    assert "同一対象連続護衛" in block
+    assert "死亡済み対象への護衛" in block
+
+
+def test_game_rules_block_contains_enthusiast_checklist() -> None:
+    """Shared rules must carry the 発言の根拠チェックリスト so every seat sees
+    CO history / divination history / vote history / attack pattern / rope
+    count / own information scope as the grounding menu, and must cap speech
+    to 1–2 concrete points rather than long internal monologue."""
+    block = _build_game_rules_block()
+    assert "CO 履歴" in block
+    assert "判定履歴" in block
+    assert "投票履歴" in block
+    assert "噛み筋" in block
+    assert "縄数" in block
+    assert "情報範囲" in block
+    assert "1〜2 点" in block
 
 
 # ------------------------------------------------------- strategy block
@@ -518,6 +588,69 @@ def test_madman_fake_strategy_has_no_wolf_coordination_vocabulary() -> None:
     assert "襲撃先を揃える" not in block
     # Existing prohibition phrase still present.
     assert "人狼位置を知っている前提で話してはならない" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_describes_conditional_seer_fake(role: Role) -> None:
+    """Day-1 seer fake is offered as a *conditional* option, not an
+    unconditional default — the wording must contain gating words
+    (無条件 / 潜伏) that signal the LLM to decide based on board state."""
+    block = _build_strategy_block(role)
+    assert "無条件" in block
+    assert "潜伏" in block
+    if role is Role.WEREWOLF:
+        assert "相方が危険位置" in block
+    else:
+        # Madman variant: no wolf-coordination vocab, but references CO creep.
+        assert "複数の占い師 CO" in block
+        assert "相方" not in block
+        assert "襲撃先を揃える" not in block
+
+
+def test_seer_strategy_covers_proactive_and_counter_co() -> None:
+    """Seer must have explicit guidance on early CO when no seer CO has
+    appeared, counter-CO against a fake seer with time-ordered history
+    disclosure, and the black-pull CO procedure."""
+    block = _build_strategy_block(Role.SEER)
+    assert "まだ占い師 CO が出ていない" in block
+    assert "対抗 CO" in block
+    assert "時系列で公開" in block
+    assert "黒を引いた場合" in block
+    assert "単独真として扱わせてしまう" in block
+
+
+def test_medium_strategy_covers_post_execution_publication_and_counter_co() -> None:
+    """Medium must publish results the day after an execution and must run
+    counter-CO against a fake medium with time-ordered history framing while
+    acknowledging self-roller vulnerability."""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "処刑が発生した翌日" in block
+    assert "対抗霊媒" in block
+    assert "ローラー" in block
+    assert "巻き込まれる可能性" in block
+
+
+def test_knight_strategy_covers_endgame_and_legal_guard_history() -> None:
+    """Knight must cover endgame / about-to-be-hung CO timing AND must
+    explicitly constrain the guard-diary to the bot's legal guard rules
+    (no self-guard, no consecutive guard, no dead-seat guard)."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "終盤" in block
+    assert "吊られそう" in block
+    assert "護衛履歴を日付順" in block
+    assert "自分護衛" in block
+    assert "同じ相手の連続護衛" in block
+    assert "死亡済み" in block
+
+
+def test_villager_strategy_anchors_in_checklist() -> None:
+    """Villager must still forbid CO fakes AND must anchor speech in the
+    shared enthusiast checklist (CO / divination / vote histories)."""
+    block = _build_strategy_block(Role.VILLAGER)
+    assert "CO 騙りは村陣営としては行わない" in block
+    assert "CO 履歴" in block
+    assert "判定履歴" in block
+    assert "1〜2 点" in block
 
 
 # --------------------------------------------------- build_system_prompt

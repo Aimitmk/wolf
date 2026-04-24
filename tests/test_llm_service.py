@@ -1069,6 +1069,53 @@ async def test_ask_system_prompt_contains_2_2_medium_roller_rules_for_any_role(
     assert "原則として完走" in system_prompt
 
 
+async def test_ask_system_prompt_contains_2_1_and_1_2_formations_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """2-1 and 1-2 progression guidance must reach every seat via the shared
+    rules block, alongside the existing 3-1 / 2-2 anchors."""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "2-1" in system_prompt, f"{role.name} missed 2-1"
+        assert "1-2" in system_prompt, f"{role.name} missed 1-2"
+
+
+async def test_ask_system_prompt_contains_enthusiast_checklist_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """Every seat must receive the 発言の根拠チェックリスト anchoring speeches
+    in CO history / divination history / vote history / rope count and capping
+    evidence to 1–2 points."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "CO 履歴" in system_prompt
+    assert "判定履歴" in system_prompt
+    assert "投票履歴" in system_prompt
+    assert "縄数" in system_prompt
+    assert "1〜2 点" in system_prompt
+
+
+async def test_ask_system_prompt_contains_fake_co_legality_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """Fake-CO legality constraints live in common rules so both wolf and
+    madman see them, and the wolf-coordination leak guards still hold when
+    exercising the madman path."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "実ルール上あり得る内容" in system_prompt
+    assert "自分護衛" in system_prompt
+    assert "同一対象連続護衛" in system_prompt
+    # Leak guards must still hold even with the new common-rules additions.
+    assert "相方" not in system_prompt
+    assert "襲撃先を揃える" not in system_prompt
+
+
 async def test_ask_system_prompt_wolf_seat_includes_wolf_strategy(repo: SqliteRepo) -> None:
     """A werewolf LLM must receive wolf-coordination tips in its system
     prompt (`相方`, `襲撃先を揃える`)."""
@@ -1265,9 +1312,50 @@ async def test_ask_system_prompt_knight_includes_protection_success_co_strategy(
     assert "護衛先を添えて" in system_prompt
 
 
+async def test_ask_system_prompt_seer_includes_counter_co_strategy(
+    repo: SqliteRepo,
+) -> None:
+    """A true seer LLM must receive proactive-CO (when no seer CO has appeared),
+    counter-CO (when a fake seer appears), and black-pull CO guidance so the
+    true seer doesn't stay silent and cede single-truth treatment to a fake."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
+    assert "まだ占い師 CO が出ていない" in system_prompt
+    assert "対抗 CO" in system_prompt
+    assert "時系列で公開" in system_prompt
+    assert "黒を引いた場合" in system_prompt
+
+
+async def test_ask_system_prompt_medium_includes_counter_co_strategy(
+    repo: SqliteRepo,
+) -> None:
+    """A true medium LLM must receive the post-execution result-publication
+    duty and the counter-CO pathway, with explicit self-roller vulnerability
+    framing so the medium doesn't stay silent against a fake medium."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
+    assert "処刑が発生した翌日" in system_prompt
+    assert "対抗霊媒" in system_prompt
+    assert "ローラー" in system_prompt
+
+
+async def test_ask_system_prompt_knight_includes_legal_guard_history_and_endgame_co(
+    repo: SqliteRepo,
+) -> None:
+    """A knight LLM's system prompt must cover endgame / about-to-be-hung CO
+    timing AND must constrain the guard-diary to the bot's legal guard rules
+    (no self-guard, no consecutive guard of the same seat, no dead-seat guard)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
+    assert "終盤" in system_prompt
+    assert "吊られそう" in system_prompt
+    assert "護衛履歴を日付順" in system_prompt
+    assert "自分護衛" in system_prompt
+    assert "同じ相手の連続護衛" in system_prompt
+
+
 async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRepo) -> None:
     """The werewolf LLM's system prompt must carry the fake-CO playbook:
-    day-1 seer fake, day-2+ medium/knight fake, and the over-fake warning."""
+    day-1 seer fake is offered as a *conditional* option (not unconditional),
+    day-2+ medium/knight fake, the over-fake warning, and medium-roller /
+    knight-legal-guard-history caveats."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
     assert "day 1" in system_prompt
     assert "占い師騙り" in system_prompt
@@ -1275,14 +1363,19 @@ async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRe
     assert "騎士騙り" in system_prompt
     assert "3 人以上" in system_prompt
     assert "騙りすぎ" in system_prompt
+    # Conditional framing — day-1 seer fake is no longer unconditional.
+    assert "無条件" in system_prompt
+    assert "潜伏" in system_prompt
+    assert "相方が危険位置" in system_prompt
 
 
 async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coordination(
     repo: SqliteRepo,
 ) -> None:
-    """The madman LLM's system prompt must carry the same fake-CO playbook as
-    the wolf (day-1 seer fake, day-2+ medium/knight fake, over-fake warning)
-    — but NO wolf-coordination vocabulary (`相方` / `襲撃先を揃える`)."""
+    """The madman LLM's system prompt must carry the fake-CO playbook
+    (day-1 seer fake, day-2+ medium/knight fake, over-fake warning) as a
+    *conditional* option with misfire caveats — and no wolf-coordination
+    vocabulary (`相方` / `襲撃先を揃える`)."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
     assert "day 1" in system_prompt
     assert "占い師騙り" in system_prompt
@@ -1295,3 +1388,8 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "襲撃先を揃える" not in system_prompt
     # Existing prohibition phrase must also still be present.
     assert "人狼位置を知っている前提で話してはならない" in system_prompt
+    # Conditional framing + misfire / white-out caveats.
+    assert "無条件ではなく" in system_prompt
+    assert "複数の占い師 CO" in system_prompt
+    assert "誤爆リスク" in system_prompt
+    assert "白先が本物の狼とは限らない" in system_prompt
