@@ -1046,6 +1046,29 @@ async def test_ask_system_prompt_contains_game_rules_for_any_role(repo: SqliteRe
     assert "候補トークン" in system_prompt
 
 
+async def test_ask_system_prompt_contains_3_1_roller_rules_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """3-1 / seer roller / black-stop guidance must reach every seat via the
+    shared rules block."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "3-1" in system_prompt
+    assert "占いローラー" in system_prompt
+    assert "黒ストップ" in system_prompt
+    assert "真狼狼" in system_prompt
+
+
+async def test_ask_system_prompt_contains_2_2_medium_roller_rules_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """2-2 / medium-roller guidance must reach every seat via the shared rules
+    block."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
+    assert "2-2" in system_prompt
+    assert "霊媒ローラー" in system_prompt
+    assert "原則として完走" in system_prompt
+
+
 async def test_ask_system_prompt_wolf_seat_includes_wolf_strategy(repo: SqliteRepo) -> None:
     """A werewolf LLM must receive wolf-coordination tips in its system
     prompt (`相方`, `襲撃先を揃える`)."""

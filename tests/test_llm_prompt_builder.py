@@ -163,6 +163,61 @@ def test_game_rules_block_flags_seer_co_as_wolf_fake_on_medium_black() -> None:
     assert "人狼の騙り" in block
 
 
+def test_game_rules_block_defines_3_1_formation() -> None:
+    """3-1 = 3 seer COs + 1 medium CO. The shared rules must name this
+    formation and note the 2-of-3 fake seer likelihood, treating the sole
+    medium as a truth-leaning progression pivot."""
+    block = _build_game_rules_block()
+    assert "3-1" in block
+    assert "占い師 CO が 3 人・霊媒師 CO が 1 人" in block
+    assert "2 人が騙り" in block
+
+
+def test_game_rules_block_names_seer_roller_and_black_stop() -> None:
+    """3-1 gives two base-plan vocabulary items: seer roller and black stop.
+    Both names must appear in the shared rules."""
+    block = _build_game_rules_block()
+    assert "占いローラー" in block
+    assert "黒ストップ" in block
+
+
+def test_game_rules_block_describes_seer_roller_procedure() -> None:
+    """Seer roller hangs from fake-looking / wolf-looking / info-leaking seer
+    COs, then cross-checks post-execution medium results against seer / vote
+    / attack consistency."""
+    block = _build_game_rules_block()
+    assert "偽っぽい・狼っぽい・視点漏れ" in block
+    assert "処刑後の霊媒結果" in block
+
+
+def test_game_rules_block_describes_black_stop_and_its_limits() -> None:
+    """Black stop (灰 scrutiny when sole medium reports black on a seer CO)
+    is the alternative to continuing the roller, but it has explicit
+    exceptions: 真狼狼, fake medium, breaking remaining seer CO, PP risk."""
+    block = _build_game_rules_block()
+    assert "灰 (役職 CO していない位置) の精査" in block
+    assert "真狼狼" in block
+    assert "PP (パワープレイ)" in block
+
+
+def test_game_rules_block_defines_2_2_formation() -> None:
+    """2-2 = 2 seer COs + 2 medium COs. Neither side is confirmed; medium
+    roller (or 霊媒切り) is the default progression."""
+    block = _build_game_rules_block()
+    assert "2-2" in block
+    assert "占い師 CO が 2 人・霊媒師 CO が 2 人" in block
+    assert "霊媒ローラー" in block
+
+
+def test_game_rules_block_requires_completing_medium_roller_by_default() -> None:
+    """Two medium COs → don't unfoundedly trust either one; once a medium
+    roller is started, complete it by default, with a high evidentiary bar
+    to stop halfway."""
+    block = _build_game_rules_block()
+    assert "根拠なく真置きせず" in block
+    assert "原則として完走" in block
+
+
 # ------------------------------------------------------- strategy block
 # A phrase that must appear in exactly one role's tips — keyed by role. Used
 # both to assert per-role content AND to assert no cross-leak into other roles.
