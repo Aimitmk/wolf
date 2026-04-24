@@ -1107,6 +1107,30 @@ async def test_ask_system_prompt_distinguishes_sole_survivor_from_lone_co(
     assert "死亡タイミング" in system_prompt
 
 
+async def test_ask_system_prompt_explains_medium_white_semantics_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """Every LLM seat must receive the shared rule that medium-white means
+    `not a real werewolf` only — not a role-claim refutation. Sampling one
+    role suffices because `_build_game_rules_block` is role-independent."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "本物の人狼ではない" in system_prompt
+    assert "真占い師だった可能性と矛盾しない" in system_prompt
+    assert "偽扱いしない" in system_prompt
+
+
+async def test_ask_system_prompt_medium_guards_against_seer_co_white_misread(
+    repo: SqliteRepo,
+) -> None:
+    """The Medium LLM's system prompt must carry the role-specific guidance:
+    medium-white on an executed Seer-CO is NOT proof of a fake seer; the
+    Medium should separate real-seer from non-wolf-fake hypotheses."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
+    assert "占い師 CO 偽の証明ではない" in system_prompt
+    assert "真占い師だった可能性" in system_prompt
+    assert "狂人" in system_prompt
+
+
 async def test_ask_system_prompt_knight_includes_protection_success_co_strategy(
     repo: SqliteRepo,
 ) -> None:

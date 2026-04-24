@@ -135,6 +135,34 @@ def test_game_rules_block_includes_dead_co_in_comparison() -> None:
     assert "死亡タイミング" in block
 
 
+def test_game_rules_block_explains_medium_white_means_not_wolf_only() -> None:
+    """Medium white = `not a real werewolf`, not a role-claim confirmation.
+    Every LLM seat must see this so that no role overreads a white result."""
+    block = _build_game_rules_block()
+    assert "人狼ではありませんでした" in block
+    assert "本物の人狼ではない" in block
+    assert "役職名" in block
+
+
+def test_game_rules_block_protects_seer_co_from_medium_white_misread() -> None:
+    """Medium-white on an executed Seer-CO does NOT invalidate the seer claim
+    — a real seer who gets executed reads white too. The block must also
+    state that suspicion of the seer CO requires non-medium-result grounds."""
+    block = _build_game_rules_block()
+    assert "占い師 CO" in block
+    assert "真占い師だった可能性と矛盾しない" in block
+    assert "偽扱いしない" in block
+
+
+def test_game_rules_block_flags_seer_co_as_wolf_fake_on_medium_black() -> None:
+    """The converse: medium-black on an executed Seer-CO is strong evidence
+    the CO was a wolf fake, because only real werewolves read black."""
+    block = _build_game_rules_block()
+    assert "霊媒結果で黒" in block
+    assert "本物の人狼" in block
+    assert "人狼の騙り" in block
+
+
 # ------------------------------------------------------- strategy block
 # A phrase that must appear in exactly one role's tips — keyed by role. Used
 # both to assert per-role content AND to assert no cross-leak into other roles.
@@ -197,6 +225,36 @@ def test_medium_strategy_reinforces_madman_is_white_rule() -> None:
     block = _build_strategy_block(Role.MEDIUM)
     assert "人狼ではありませんでした" in block
     assert "白結果だけでは村置き確定にはならない" in block
+
+
+def test_medium_strategy_guards_against_seer_co_white_misread() -> None:
+    """The Medium must be told explicitly that medium-white on an executed
+    Seer-CO is not proof of a fake seer — the role-specific analog of the
+    shared rule in `_build_game_rules_block`."""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "占い師 CO" in block
+    assert "霊媒結果が白" in block
+    assert "占い師 CO 偽の証明ではない" in block
+
+
+def test_medium_strategy_separates_real_seer_from_non_wolf_fake() -> None:
+    """When medium-white lands on a Seer-CO, the medium should partition the
+    hypothesis space: real seer vs. non-wolf fake (madman, etc.)."""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "真占い師だった可能性" in block
+    assert "狂人" in block
+    assert "非狼" in block
+
+
+def test_medium_strategy_routes_seer_co_suspicion_through_corroboration() -> None:
+    """To suspect a Seer-CO, medium must cite non-medium-result evidence:
+    counter CO, divination breakdown, speech timeline, votes, attack result,
+    death timing — NOT the white medium result itself."""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "対抗 CO" in block
+    assert "発言時系列" in block
+    assert "襲撃結果" in block
+    assert "死亡タイミング" in block
 
 
 def test_knight_strategy_advises_protection_success_co() -> None:
