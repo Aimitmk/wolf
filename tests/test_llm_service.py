@@ -1361,7 +1361,7 @@ async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRe
     assert "占い師騙り" in system_prompt
     assert "霊媒師騙り" in system_prompt
     assert "騎士騙り" in system_prompt
-    assert "3 人以上" in system_prompt
+    assert "6 人以上" in system_prompt
     assert "騙りすぎ" in system_prompt
     # Conditional framing — day-1 seer fake is no longer unconditional.
     assert "無条件" in system_prompt
@@ -1381,7 +1381,7 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "占い師騙り" in system_prompt
     assert "霊媒師騙り" in system_prompt
     assert "騎士騙り" in system_prompt
-    assert "3 人以上" in system_prompt
+    assert "6 人以上" in system_prompt
     assert "騙りすぎ" in system_prompt
     # Wolf-coordination vocabulary must not appear for the madman.
     assert "相方" not in system_prompt

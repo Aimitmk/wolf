@@ -572,10 +572,10 @@ def test_fake_strategy_switches_to_medium_or_knight_fake_if_countered(role: Role
 
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
 def test_fake_strategy_warns_against_over_faking(role: Role) -> None:
-    """Both wolf and madman are warned that piling on fake COs (3+) makes
-    non-CO seats look white by contrast."""
+    """Both wolf and madman are warned that piling on fake COs (6+) confirms
+    non-CO seats as white — at that point all wolves+madman have CO'd."""
     block = _build_strategy_block(role)
-    assert "3 人以上" in block
+    assert "6 人以上" in block
     assert "騙りすぎ" in block
 
 
