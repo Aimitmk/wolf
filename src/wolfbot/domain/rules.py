@@ -68,6 +68,28 @@ def legal_guard_targets(
     ]
 
 
+def previous_guard_seat_for_night(
+    prev: tuple[int, int | None, int | None] | None,
+    current_day: int,
+) -> int | None:
+    """Return the seat the knight must not re-guard this night, or None.
+
+    The `previous_guard` row stores `last_guard_day = next_day at recording
+    time` — i.e. a guard committed during NIGHT of day N is written with
+    `last_guard_day == N+1`. When planning / validating a guard on NIGHT of
+    day D we only forbid re-targeting when `last_guard_day == D`; a row with
+    an older `last_guard_day` means there was an intervening unresolved night
+    (e.g. a host force-skip with no knight submission) and the restriction
+    has lapsed. Also returns None if `prev` has no seat recorded yet.
+    """
+    if prev is None:
+        return None
+    _, last_seat, last_day = prev
+    if last_seat is None or last_day != current_day:
+        return None
+    return last_seat
+
+
 def random_white_target(players: Sequence[Player], seer_seat: int, rng: Random) -> int:
     """Pick a NIGHT_0 random-white target: alive, not seer, not a werewolf."""
     pool = [

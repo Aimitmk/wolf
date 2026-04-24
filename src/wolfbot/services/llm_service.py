@@ -32,6 +32,7 @@ from wolfbot.domain.rules import (
     legal_attack_targets,
     legal_divine_targets,
     legal_guard_targets,
+    previous_guard_seat_for_night,
 )
 from wolfbot.llm.personas import PERSONAS_BY_KEY
 from wolfbot.llm.prompt_builder import (
@@ -261,7 +262,7 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         prev = await self.repo.load_previous_guard(game.id)
-        prev_guard_seat = prev[1] if prev else None
+        prev_guard_seat = previous_guard_seat_for_night(prev, game.day_number)
 
         # Wolf-chat prelude: before submitting attacks, LLM wolves post a
         # coordination message to the wolves-only channel so both wolves
@@ -521,9 +522,10 @@ class LLMAdapter:
                     seats,
                     task_text=task_vote([seat_token(c) for c in cand_seats], runoff=round_ == 1),
                 )
-                target = self._resolve_target(
-                    action.target_name, cand_seats, allow_none=action.intent == "skip"
-                )
+                if action.intent == "skip":
+                    target = None
+                else:
+                    target = self._resolve_target(action.target_name, cand_seats, allow_none=False)
                 await self.gs.submit_vote(
                     game.id,
                     voter.seat_no,

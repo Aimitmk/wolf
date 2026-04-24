@@ -34,6 +34,7 @@ from wolfbot.domain.rules import (
     legal_attack_targets,
     legal_divine_targets,
     legal_guard_targets,
+    previous_guard_seat_for_night,
     resolve_wolf_attack,
 )
 from wolfbot.domain.state_machine import (
@@ -202,20 +203,25 @@ class GameService:
         new_game = await self.repo.load_game(game_id)
         assert new_game is not None
 
-        # 3. Public announcements (including morning) and private logs.
-        for entry in transition.public_logs:
-            # MORNING entries are persisted via public_logs but rendered to Discord
-            # through post_morning() below (with ☀️ decoration). Skip here to avoid
-            # double-posting. See state_machine.plan_night_resolve — kind="MORNING".
-            if entry.kind == "MORNING":
-                continue
-            await self._safe_post_public(new_game, entry.text, entry.kind)
+        # 3. Private role results, then public announcements in spec order.
+        # plan_night_resolve emits public_logs as (MORNING, [PHASE_CHANGE |
+        # VICTORY, ROLE_REVEAL]); the spec (prompts/IMPLEMENTATION_PROMPT.md
+        # #338-349) requires medium/seer results to surface BEFORE the
+        # morning announcement, and morning BEFORE victory/phase change.
+        # Sending private_logs first + iterating public_logs in their stored
+        # order satisfies both. MORNING entries are rendered via
+        # post_morning() (☀️ decoration); every other kind goes through
+        # post_public. public_logs contains exactly one MORNING entry per
+        # dawn transition, so post_morning fires at most once.
         for entry in transition.private_logs:
             if entry.audience_seat is None:
                 continue
             await self._safe_send_private(new_game, entry.audience_seat, entry.text, entry.kind)
-        if transition.morning_text is not None:
-            await self._safe_post_morning(new_game, transition.morning_text)
+        for entry in transition.public_logs:
+            if entry.kind == "MORNING":
+                await self._safe_post_morning(new_game, entry.text)
+            else:
+                await self._safe_post_public(new_game, entry.text, entry.kind)
 
         # 4. Announce WAITING status if we paused.
         if transition.requires_host_decision and transition.pending is not None:
@@ -271,7 +277,7 @@ class GameService:
         if game.phase is Phase.NIGHT:
             actions = await self.repo.load_night_actions(game.id, day=game.day_number)
             prev = await self.repo.load_previous_guard(game.id)
-            prev_seat = prev[1] if prev else None
+            prev_seat = previous_guard_seat_for_night(prev, game.day_number)
             return plan_night_resolve(
                 game,
                 players,
@@ -510,7 +516,7 @@ class GameService:
             legal = legal_divine_targets(players, actor_seat)
         else:  # KNIGHT_GUARD
             prev = await self.repo.load_previous_guard(game_id)
-            prev_target = prev[1] if prev is not None else None
+            prev_target = previous_guard_seat_for_night(prev, game.day_number)
             legal = legal_guard_targets(players, actor_seat, prev_target)
         if target_seat not in legal:
             log.info(

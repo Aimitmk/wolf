@@ -12,6 +12,7 @@ from wolfbot.domain.rules import (
     legal_attack_targets,
     legal_divine_targets,
     legal_guard_targets,
+    previous_guard_seat_for_night,
     random_white_target,
     resolve_wolf_attack,
 )
@@ -181,3 +182,26 @@ def test_random_white_raises_when_pool_empty() -> None:
     rng = random.Random(0)
     with pytest.raises(RuntimeError):
         random_white_target(players, seer_seat=4, rng=rng)
+
+
+# --------------------------------------------------------- previous_guard helper
+def test_previous_guard_none_when_row_missing() -> None:
+    assert previous_guard_seat_for_night(None, current_day=2) is None
+
+
+def test_previous_guard_none_when_last_seat_is_null() -> None:
+    # Shape of load_previous_guard when the knight row exists but last_guard_seat was never set.
+    assert previous_guard_seat_for_night((6, None, None), current_day=2) is None
+
+
+def test_previous_guard_returns_seat_when_last_day_matches() -> None:
+    # Knight guarded seat 3 on night 1 → last_guard_day stored as 2 (= next_day).
+    # On night 2 we're planning with game.day_number == 2, so the restriction applies.
+    assert previous_guard_seat_for_night((6, 3, 2), current_day=2) == 3
+
+
+def test_previous_guard_none_when_last_day_is_stale() -> None:
+    # Knight guarded seat 3 on night 1 (stored as 2), then night 2 resolved with no
+    # knight submission (force-skip) → no new record. On night 3 (day_number=3) the
+    # stored last_guard_day=2 is stale and must not forbid re-guarding seat 3.
+    assert previous_guard_seat_for_night((6, 3, 2), current_day=3) is None

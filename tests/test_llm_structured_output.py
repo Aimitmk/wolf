@@ -253,3 +253,32 @@ async def test_llm_adapter_skip_intent_abstains_on_vote(repo) -> None:
     await _drain(adapter)
     # Both LLMs abstained → target None preserved
     assert all(v[2] is None for v in gs.votes)
+
+
+async def test_llm_adapter_skip_intent_abstains_even_with_non_null_target(repo) -> None:
+    """intent=skip must win over any junk `target_name` the model emits.
+
+    Regression for 2026-04-24 v5 review Low #4: previously a skip action
+    with target_name="棄権" (or "") slipped past allow_none=True and the
+    resolver fell through to a random candidate, silently converting an
+    abstention into a real vote.
+    """
+    game, seats = await _seed_game(repo, phase=Phase.DAY_VOTE)
+    gs = FakeGameService()
+    decider = FakeLLMActionDecider(
+        scripted=[
+            LLMAction(intent="skip", target_name="棄権", reason_summary="判断保留", confidence=0.2),
+            LLMAction(intent="skip", target_name="", reason_summary="判断保留", confidence=0.2),
+        ]
+    )
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=decider,
+        rng=random.Random(0),
+    )
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+
+    players = await repo.load_players(game.id)
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await _drain(adapter)
+    assert all(v[2] is None for v in gs.votes)

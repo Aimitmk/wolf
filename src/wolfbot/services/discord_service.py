@@ -30,7 +30,12 @@ from wolfbot.domain.enums import (
 )
 from wolfbot.domain.errors import ActiveGameExistsError
 from wolfbot.domain.models import Game, LogEntry, PendingDecision, Player, Seat
-from wolfbot.domain.rules import legal_attack_targets, legal_divine_targets, legal_guard_targets
+from wolfbot.domain.rules import (
+    legal_attack_targets,
+    legal_divine_targets,
+    legal_guard_targets,
+    previous_guard_seat_for_night,
+)
 from wolfbot.llm.personas import pick_personas
 from wolfbot.persistence.sqlite_repo import (
     JoinLobbyResult,
@@ -87,11 +92,13 @@ def render_pending_host_lines(
 
 
 def _main_channel_should_llm_react(author_seat: int | None, players: Sequence[Player]) -> bool:
-    """Gate keeping LLM reactions in DAY_DISCUSSION to in-game living players.
+    """Alive-participant gate for DAY_DISCUSSION main-channel messages.
 
-    Mirrors the wolves-channel alive-check at on_message: a non-participant
-    (spectator, admin) or a dead player must not be able to steer the LLMs by
-    dropping keywords into the main channel.
+    Returns True only when the author is a living seated player. Used as the
+    common precondition for both (a) persisting the message as PLAYER_SPEECH
+    and (b) triggering an LLM reaction. A non-participant (spectator, admin)
+    or a dead player must not steer the LLMs — nor pollute the public log
+    that is fed back into every later LLM prompt via build_user_context.
     """
     if author_seat is None:
         return False
@@ -239,7 +246,7 @@ class DiscordBotAdapter:
         """
         seats_by_no = {s.seat_no: s for s in seats}
         prev = await self.repo.load_previous_guard(game.id)
-        prev_guard_seat = prev[1] if prev else None
+        prev_guard_seat = previous_guard_seat_for_night(prev, game.day_number)
 
         for p in actors:
             if p.role is None:
@@ -459,33 +466,33 @@ class WolfCog(commands.Cog):
         seats = await self.repo.load_seats(game.id)
 
         if is_main and game.phase is Phase.DAY_DISCUSSION:
-            if author_seat is not None:
-                try:
-                    await self.repo.insert_log_public(
-                        LogEntry(
-                            game_id=game.id,
-                            day=game.day_number,
-                            phase=game.phase,
-                            kind="PLAYER_SPEECH",
-                            actor_seat=author_seat,
-                            visibility="PUBLIC",
-                            text=message.content,
-                            created_at=int(time.time()),
-                        )
-                    )
-                except Exception:
-                    log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
-            if _main_channel_should_llm_react(author_seat, players):
-                try:
-                    await self.llm_adapter.maybe_react_to_message(
-                        game,
-                        players,
-                        seats,
-                        author_seat=author_seat,
+            if not _main_channel_should_llm_react(author_seat, players):
+                return
+            try:
+                await self.repo.insert_log_public(
+                    LogEntry(
+                        game_id=game.id,
+                        day=game.day_number,
+                        phase=game.phase,
+                        kind="PLAYER_SPEECH",
+                        actor_seat=author_seat,
+                        visibility="PUBLIC",
                         text=message.content,
+                        created_at=int(time.time()),
                     )
-                except Exception:
-                    log.exception("llm_adapter reaction failed for %s", game.id)
+                )
+            except Exception:
+                log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
+            try:
+                await self.llm_adapter.maybe_react_to_message(
+                    game,
+                    players,
+                    seats,
+                    author_seat=author_seat,
+                    text=message.content,
+                )
+            except Exception:
+                log.exception("llm_adapter reaction failed for %s", game.id)
             return
 
         if is_wolves and game.phase is Phase.NIGHT and author_seat is not None:

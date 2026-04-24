@@ -579,6 +579,71 @@ async def test_submit_night_action_rejected_when_target_illegal(
     ), "wolf attacking fellow wolf must be dropped"
 
 
+async def test_knight_guard_stale_previous_day_is_cleared(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Regression for 2026-04-24 v5 review Medium #2.
+
+    When a knight doesn't submit a guard on some night and the host runs
+    /wolf force-skip, `plan_night_resolve` returns `record_guard=None` and
+    the previous_guard row is left with its old (last_guard_seat,
+    last_guard_day). On subsequent nights the helper must recognize the
+    row is stale (last_guard_day != game.day_number) and re-allow that
+    seat — the bug was that `prev[1]` was used unconditionally.
+
+    We simulate the stale-row state by seeding `upsert_previous_guard`
+    with a past last_guard_day while the live game is on NIGHT day 1,
+    then verify the submission is accepted. As a positive control we
+    also check that a non-stale row (last_guard_day matching the current
+    day) still forbids the same target.
+    """
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # -> NIGHT_0
+    await service.advance(game.id)  # -> DAY_DISCUSSION day 1
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for v in range(1, 10):
+        target = 1 if v != 1 else 2
+        await service.submit_vote(game.id, v, target, round_=0, day=1)
+    await service.advance(game.id)  # -> NIGHT day 1 (unless seat 1 win triggers GAME_OVER)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return  # execution of seat 1 triggered GAME_OVER for this seed; test N/A
+
+    players = await repo.load_players(game.id)
+    knight = next((p.seat_no for p in players if p.alive and p.role is Role.KNIGHT), None)
+    if knight is None:
+        return  # knight was executed on day 1; test N/A
+
+    alive_non_knight = [p.seat_no for p in players if p.alive and p.seat_no != knight]
+    stale_target = alive_non_knight[0]
+
+    # Seed a STALE row: last_guard_day=0 < game.day_number=1 — should not block.
+    await repo.upsert_previous_guard(
+        game.id, knight_seat=knight, last_guard_seat=stale_target, last_guard_day=0
+    )
+    result = await service.submit_night_action(
+        game.id, knight, SubmissionType.KNIGHT_GUARD, stale_target, day=1
+    )
+    assert result is SubmitResult.ACCEPTED, (
+        f"stale previous_guard row (last_guard_day=0, current_day=1) wrongly blocked "
+        f"knight seat {knight} from guarding seat {stale_target}"
+    )
+
+    # Now make the row non-stale (matches current day) — must block.
+    await repo.upsert_previous_guard(
+        game.id, knight_seat=knight, last_guard_seat=stale_target, last_guard_day=1
+    )
+    result = await service.submit_night_action(
+        game.id, knight, SubmissionType.KNIGHT_GUARD, stale_target, day=1
+    )
+    assert result is SubmitResult.ILLEGAL_TARGET
+
+
 async def test_dawn_morning_not_posted_twice(
     repo: SqliteRepo,
     svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
@@ -624,6 +689,168 @@ async def test_dawn_morning_not_posted_twice(
     assert public_morning_calls == [], (
         "MORNING public_logs must not be posted via post_public — duplicate dawn announcement"
     )
+
+
+async def test_dawn_posts_in_spec_order(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Regression for 2026-04-24 v5 review Medium #1.
+
+    Spec (prompts/IMPLEMENTATION_PROMPT.md #338-349) fixes the dawn order:
+    medium result -> seer result -> guard/attack resolve -> morning -> phase
+    change / victory. On Discord that means private role results must land
+    before the morning post, which must land before PHASE_CHANGE.
+    """
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # -> NIGHT_0
+    await service.advance(game.id)  # -> DAY_DISCUSSION day 1
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for voter in range(1, 10):
+        target = 1 if voter != 1 else 2
+        await service.submit_vote(game.id, voter, target, round_=0, day=1)
+    await service.advance(game.id)  # -> NIGHT day 1 (skip if GAME_OVER)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return
+
+    players = await repo.load_players(game.id)
+    wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+    seer = next(p.seat_no for p in players if p.alive and p.role is Role.SEER)
+    knight = next(p.seat_no for p in players if p.alive and p.role is Role.KNIGHT)
+    # Attack a villager seat (not wolf, seer, knight) to keep the game going
+    victim = next(
+        p.seat_no
+        for p in players
+        if p.alive and p.seat_no not in wolves and p.seat_no != seer and p.seat_no != knight
+    )
+    for w in wolves:
+        await service.submit_night_action(game.id, w, SubmissionType.WOLF_ATTACK, victim, day=1)
+    await service.submit_night_action(game.id, seer, SubmissionType.SEER_DIVINE, wolves[0], day=1)
+    # Knight guards someone who is neither self nor attack victim → no death block
+    guard_target = next(
+        p.seat_no for p in players if p.alive and p.seat_no != knight and p.seat_no != victim
+    )
+    await service.submit_night_action(
+        game.id, knight, SubmissionType.KNIGHT_GUARD, guard_target, day=1
+    )
+
+    disc.reset()
+    await service.advance(game.id)  # NIGHT -> dawn
+
+    loaded_after = await repo.load_game(game.id)
+    assert loaded_after is not None
+    if loaded_after.phase is Phase.GAME_OVER:
+        return  # victory path is covered by the sibling test below
+
+    def first(name: str, **kwargs: str) -> int:
+        for i, c in enumerate(disc.calls):
+            if c.name != name:
+                continue
+            if all(c.kwargs.get(k) == v for k, v in kwargs.items()):
+                return i
+        raise AssertionError(
+            f"no call {name}({kwargs}) in {[(c.name, c.kwargs.get('kind')) for c in disc.calls]}"
+        )
+
+    medium_idx = next(
+        (
+            i
+            for i, c in enumerate(disc.calls)
+            if c.name == "send_private" and c.kwargs.get("kind") == "MEDIUM_RESULT"
+        ),
+        None,
+    )
+    seer_idx = first("send_private", kind="SEER_RESULT")
+    morning_idx = first("post_morning")
+    phase_change_idx = first("post_public", kind="PHASE_CHANGE")
+
+    # Medium may be absent (no execution on day 1 would mean no medium result);
+    # when present it must precede morning. Seer and morning are guaranteed.
+    if medium_idx is not None:
+        assert medium_idx < morning_idx, "MEDIUM_RESULT must come before post_morning"
+    assert seer_idx < morning_idx, "SEER_RESULT must come before post_morning"
+    assert morning_idx < phase_change_idx, "post_morning must precede PHASE_CHANGE"
+
+
+async def test_dawn_victory_posts_in_spec_order(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """When a night attack triggers GAME_OVER at dawn, the order is still
+    medium -> seer -> morning -> VICTORY -> ROLE_REVEAL (not the other
+    way around). Covers the victory-branch of plan_night_resolve.
+    """
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # -> NIGHT_0
+    await service.advance(game.id)  # -> DAY_DISCUSSION day 1
+    clock.tick(300)
+    await service.advance(game.id)  # -> DAY_VOTE
+    for voter in range(1, 10):
+        target = 1 if voter != 1 else 2
+        await service.submit_vote(game.id, voter, target, round_=0, day=1)
+    await service.advance(game.id)  # -> NIGHT day 1 (or GAME_OVER)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return
+
+    players = await repo.load_players(game.id)
+    wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+    seer = next((p.seat_no for p in players if p.alive and p.role is Role.SEER), None)
+    knight = next((p.seat_no for p in players if p.alive and p.role is Role.KNIGHT), None)
+    if seer is None or knight is None:
+        return
+    # Attack the seer so attack count shifts wolf parity high enough; game may
+    # or may not end here depending on role distribution. We only assert the
+    # order when the GAME_OVER branch fires.
+    for w in wolves:
+        await service.submit_night_action(game.id, w, SubmissionType.WOLF_ATTACK, seer, day=1)
+    await service.submit_night_action(game.id, seer, SubmissionType.SEER_DIVINE, wolves[0], day=1)
+    guard_target = next(
+        p.seat_no for p in players if p.alive and p.seat_no != knight and p.seat_no != seer
+    )
+    await service.submit_night_action(
+        game.id, knight, SubmissionType.KNIGHT_GUARD, guard_target, day=1
+    )
+
+    disc.reset()
+    await service.advance(game.id)  # NIGHT -> dawn
+
+    loaded_after = await repo.load_game(game.id)
+    assert loaded_after is not None
+    if loaded_after.phase is not Phase.GAME_OVER:
+        return  # GAME_OVER didn't trigger on this seed; the happy-path sibling covers normal dawn
+
+    def first_idx(predicate: object, label: str) -> int:
+        for i, c in enumerate(disc.calls):
+            if predicate(c):  # type: ignore[operator]
+                return i
+        raise AssertionError(
+            f"no call matching {label} in {[(c.name, c.kwargs) for c in disc.calls]}"
+        )
+
+    seer_idx = first_idx(
+        lambda c: c.name == "send_private" and c.kwargs.get("kind") == "SEER_RESULT",
+        "SEER_RESULT",
+    )
+    morning_idx = first_idx(lambda c: c.name == "post_morning", "post_morning")
+    victory_idx = first_idx(
+        lambda c: c.name == "post_public" and c.kwargs.get("kind") == "VICTORY", "VICTORY"
+    )
+    reveal_idx = first_idx(
+        lambda c: c.name == "post_public" and c.kwargs.get("kind") == "ROLE_REVEAL", "ROLE_REVEAL"
+    )
+
+    assert seer_idx < morning_idx
+    assert morning_idx < victory_idx, "post_morning must precede VICTORY"
+    assert victory_idx < reveal_idx, "VICTORY must precede ROLE_REVEAL"
 
 
 async def test_full_game_one_day_happy_path(
@@ -1299,9 +1526,7 @@ async def test_submit_night_action_rejects_none_target_for_seer(
     )
     assert result is SubmitResult.ILLEGAL_TARGET
     actions = await repo.load_night_actions(game.id, day=game.day_number)
-    assert not any(
-        a.actor_seat == seer and a.kind is SubmissionType.SEER_DIVINE for a in actions
-    )
+    assert not any(a.actor_seat == seer and a.kind is SubmissionType.SEER_DIVINE for a in actions)
 
 
 async def test_submit_night_action_rejects_none_target_for_knight(
