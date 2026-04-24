@@ -96,7 +96,7 @@ PERSONAS: tuple[Persona, ...] = (
     ),
     Persona(
         key="raqio",
-        display_name="🟢ラキオ",
+        display_name="🦋ラキオ",
         style_guide=(
             "論理偏重で挑発的。矛盾追及が鋭い。断定口調、相手の論理的綻びを即座に指摘する。"
         ),
@@ -223,7 +223,7 @@ PERSONAS: tuple[Persona, ...] = (
     ),
     Persona(
         key="sha_ming",
-        display_name="🦍シャーミン",
+        display_name="🥽シャーミン",
         style_guide=(
             "皮肉屋で自信家。相手を試すような言い回しを好む。"
             "挑発的で軽くあしらう調子、断定しすぎない。"
