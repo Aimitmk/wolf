@@ -18,7 +18,7 @@ import re
 
 import pytest
 
-from wolfbot.domain.enums import ROLE_JA, Phase, Role
+from wolfbot.domain.enums import ROLE_JA, Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, Player, Seat
 from wolfbot.llm.personas import PERSONAS_BY_KEY, Persona, SpeechProfile
 from wolfbot.llm.prompt_builder import (
@@ -27,6 +27,8 @@ from wolfbot.llm.prompt_builder import (
     _build_strategy_block,
     build_system_prompt,
     build_user_context,
+    task_night_action,
+    task_wolf_chat,
 )
 
 
@@ -801,6 +803,110 @@ def test_villager_co_prohibition_does_not_leak_to_other_roles(role: Role) -> Non
     block = _build_strategy_block(role)
     assert "村人CO" not in block
     assert "素村CO" not in block
+
+
+# --------------------------------- wolf night-attack guard-aware vocabulary
+# Wolf-only tactical phrases for night-attack reasoning. They must appear in
+# the werewolf strategy and never leak into another role's strategy or into
+# any non-WOLF_ATTACK night-action task.
+_WOLF_ATTACK_ONLY_PHRASES = (
+    "騎士候補を噛む",
+    "護衛リスクを読んで噛む",
+)
+
+
+def test_werewolf_strategy_includes_attack_evaluation_axes() -> None:
+    """The wolf gets the 4-axis comparison (value / guard-likelihood /
+    knight-candidacy / partner-fit) plus a GJ-risk hook. These are the new
+    anchors the LLM uses to weigh each candidate before locking a target."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "襲撃価値" in block
+    assert "護衛されやすさ" in block
+    assert "騎士候補度" in block
+    assert "GJ" in block or "護衛リスク" in block
+
+
+def test_werewolf_strategy_includes_attack_approach_taxonomy() -> None:
+    """The wolf must be able to label its kami as one of the five recognized
+    approaches so the per-day narrative stays consistent."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    for phrase in ("情報役噛み", "白位置噛み", "意見噛み", "騎士探し", "SG 残し"):
+        assert phrase in block, f"wolf strategy missing approach token {phrase!r}"
+
+
+def test_werewolf_strategy_preserves_partner_convergence() -> None:
+    """Adding guard-reading content must not erase the existing partner-align
+    rule. `相方` and the `1 人に揃える` directive must both still be present."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "相方" in block
+    assert "1 人に揃える" in block
+
+
+def test_werewolf_strategy_disclaims_real_role_inference() -> None:
+    """Knight-candidate inference must be framed as public-log推定, not as a
+    claim about the actual role table. Guards against future copy-paste that
+    would imply the wolf knows the real knight seat."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "実役職を知っている前提で断言してはならない" in block
+    assert "公開情報からの推定" in block
+
+
+@pytest.mark.parametrize(
+    "role", [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER]
+)
+def test_wolf_attack_only_vocabulary_never_in_non_wolf_strategy(role: Role) -> None:
+    """The new tactical phrases are wolf-private. Any leak (e.g. someone copies
+    the wolf bullet into the knight strategy by mistake) must trip this guard."""
+    block = _build_strategy_block(role)
+    for phrase in _WOLF_ATTACK_ONLY_PHRASES:
+        assert phrase not in block, (
+            f"wolf-only attack vocab {phrase!r} leaked into {role.name}"
+        )
+
+
+# ---------------------------------------------------- night-action task block
+def test_task_night_action_wolf_attack_includes_evaluation_checklist() -> None:
+    """The WOLF_ATTACK night task hands the LLM the 4-axis checklist inline so
+    even an LLM that ignored the strategy block sees the rubric on the action
+    turn."""
+    text = task_night_action(SubmissionType.WOLF_ATTACK, ["席1 A", "席2 B"])
+    assert "襲撃価値" in text
+    assert "護衛されやすさ" in text
+    assert "騎士候補度" in text
+    assert "翌日の説明しやすさ" in text
+    assert "騎士探し" in text
+    # Existing partner-align nudge is preserved.
+    assert "強い反対理由がなければ" in text
+
+
+@pytest.mark.parametrize("kind", [SubmissionType.SEER_DIVINE, SubmissionType.KNIGHT_GUARD])
+def test_task_night_action_non_wolf_excludes_attack_checklist(
+    kind: SubmissionType,
+) -> None:
+    """The seer-divine / knight-guard tasks must not inherit the wolf attack
+    checklist — only WOLF_ATTACK gets it."""
+    text = task_night_action(kind, ["席1 A", "席2 B"])
+    assert "襲撃価値" not in text
+    assert "護衛されやすさ" not in text
+    assert "騎士候補度" not in text
+    assert "騎士探し" not in text
+    assert "翌日の説明しやすさ" not in text
+
+
+# ----------------------------------------------------- wolf-chat task block
+def test_task_wolf_chat_includes_guard_and_knight_candidate_reasons() -> None:
+    """Wolf-chat coordination must elicit *why* (guard risk, knight-candidate,
+    approach taxonomy, agree/disagree) — not just *who*. The 1人に揃える
+    directive and 80–150 char budget remain so partners still converge."""
+    text = task_wolf_chat(["席3 P"], ["席1 A", "席2 B"])
+    assert "護衛リスク" in text
+    assert "騎士候補" in text
+    assert "賛否" in text
+    assert "1 人に揃える" in text
+    assert "80〜150 字" in text
+    # All five approach tokens must be offered as labels for the reason.
+    for phrase in ("情報役噛み", "白位置噛み", "意見噛み", "騎士探し", "SG 残し"):
+        assert phrase in text, f"wolf-chat task missing approach token {phrase!r}"
 
 
 # --------------------------------------------------- build_system_prompt

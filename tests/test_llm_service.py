@@ -15,6 +15,7 @@ import pytest
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, LogEntry, NightAction, Seat, Vote
+from wolfbot.llm.prompt_builder import task_night_action
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.llm_service import LLMAction, LLMAdapter
 
@@ -984,7 +985,11 @@ async def test_discussion_speech_inserts_public_log(repo: SqliteRepo) -> None:
 
 # ---------------------------------- system prompt enrichment via _ask
 async def _capture_ask_system_prompt(
-    repo: SqliteRepo, role: Role, *, persona_key: str = "setsu"
+    repo: SqliteRepo,
+    role: Role,
+    *,
+    persona_key: str = "setsu",
+    task_text: str = "test-task",
 ) -> str:
     """Seed a tiny game with one LLM seat of the given role, invoke `_ask`,
     and return the captured system prompt. The role-specific strategy and the
@@ -992,10 +997,12 @@ async def _capture_ask_system_prompt(
     calls per-seat, so this exercises the exact production path.
 
     `persona_key` lets callers capture the prompt for any persona; the default
-    preserves behavior for all pre-existing callers. Both `game_id` and
-    `guild_id` are scoped by (role, persona_key) so multiple calls in one test
-    don't collide on the shared repo or trip the partial-unique-index
-    ("at most one active game per guild").
+    preserves behavior for all pre-existing callers. `task_text` flows into the
+    `{task_block}` slot of the system prompt — pass an actual `task_night_action`
+    / `task_wolf_chat` string to assert task-specific content reaches the LLM.
+    Both `game_id` and `guild_id` are scoped by (role, persona_key) so multiple
+    calls in one test don't collide on the shared repo or trip the
+    partial-unique-index ("at most one active game per guild").
     """
     seats = [
         Seat(
@@ -1030,7 +1037,7 @@ async def _capture_ask_system_prompt(
     me = next(p for p in players if p.seat_no == 2)
     my_seat = next(s for s in seats if s.seat_no == 2)
 
-    await adapter._ask(game, me, my_seat, players, seats, task_text="test-task")
+    await adapter._ask(game, me, my_seat, players, seats, task_text=task_text)
 
     assert len(decider.captured) == 1
     system_prompt, _ = decider.captured[0]
@@ -1166,6 +1173,51 @@ async def test_ask_system_prompt_madman_excludes_wolf_positions_assumption(
     assert "人狼位置を知っている前提で話してはならない" in system_prompt
     assert "相方" not in system_prompt
     assert "襲撃先を揃える" not in system_prompt
+
+
+async def test_ask_system_prompt_wolf_seat_includes_attack_evaluation_axes(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: a werewolf LLM's system prompt carries the new 4-axis attack
+    rubric (襲撃価値 / 護衛されやすさ / 騎士候補度) and the 騎士探し approach
+    label via `_build_strategy_block(Role.WEREWOLF)`."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "襲撃価値" in system_prompt
+    assert "護衛されやすさ" in system_prompt
+    assert "騎士候補度" in system_prompt
+    assert "騎士探し" in system_prompt
+
+
+async def test_ask_system_prompt_wolf_attack_task_includes_checklist(
+    repo: SqliteRepo,
+) -> None:
+    """When the wolf's task_text is the actual WOLF_ATTACK night-action prompt,
+    the same 4-axis rubric must reach the LLM via the `{task_block}` slot — not
+    only via the strategy block. Exercises the path `_one_night_action` uses."""
+    task_text = task_night_action(SubmissionType.WOLF_ATTACK, ["席1 A", "席2 B"])
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.WEREWOLF, task_text=task_text
+    )
+    assert "襲撃価値" in system_prompt
+    assert "護衛されやすさ" in system_prompt
+    assert "騎士候補度" in system_prompt
+    assert "翌日の説明しやすさ" in system_prompt
+
+
+async def test_ask_system_prompt_non_wolf_excludes_wolf_attack_vocabulary(
+    repo: SqliteRepo,
+) -> None:
+    """Wolf-only attack-evaluation vocabulary must not bleed into any non-wolf
+    seat's system prompt via the strategy block. Anchors mirror the unit-level
+    leak guard but exercise the full prompt assembly."""
+    for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "騎士候補を噛む" not in system_prompt, (
+            f"wolf-only '騎士候補を噛む' leaked into {role.name}"
+        )
+        assert "護衛リスクを読んで噛む" not in system_prompt, (
+            f"wolf-only '護衛リスクを読んで噛む' leaked into {role.name}"
+        )
 
 
 async def test_ask_system_prompt_role_strategy_isolated_between_roles(
