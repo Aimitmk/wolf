@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 
 import pytest
 
@@ -1144,7 +1145,9 @@ async def test_ask_system_prompt_contains_fake_co_legality_for_any_role(
     assert "自分護衛" in system_prompt
     assert "同一対象連続護衛" in system_prompt
     # Leak guards must still hold even with the new common-rules additions.
-    assert "相方" not in system_prompt
+    # Bare 相方 (actor mode, partner-known) absent; 相方候補 (public-log
+    # inference noun) is allowed in the shared 2-wolf-pair-inference rules.
+    assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
 
 
@@ -1161,8 +1164,9 @@ async def test_ask_system_prompt_contains_day1_fake_seer_must_white_for_any_role
     assert "必ず白を主張" in system_prompt
     assert "day 1 で初回黒主張はしない" in system_prompt
     assert "偽占い師の黒結果主張は day 2 以降" in system_prompt
-    # Wolf-coordination guard still holds for the villager seat.
-    assert "相方" not in system_prompt
+    # Wolf-coordination guard still holds for the villager seat. Bare 相方
+    # (actor mode) absent; 相方候補 (inference) allowed.
+    assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
 
 
@@ -1176,10 +1180,15 @@ async def test_ask_system_prompt_wolf_seat_includes_wolf_strategy(repo: SqliteRe
 
 async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy(repo: SqliteRepo) -> None:
     """A non-wolf LLM must NOT receive wolf-coordination tips. This guards
-    against strategy leakage through `build_system_prompt`."""
+    against strategy leakage through `build_system_prompt`. Bare `相方`
+    (actor-mode, partner-known) and `襲撃先を揃える` are wolf-only; the
+    inference noun `相方候補` is allowed in the shared pair-inference rules
+    and non-wolf strategies."""
     for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
         system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert "相方" not in system_prompt, f"{role.name} saw '相方' in system prompt"
+        assert not re.search(r"相方(?!候補)", system_prompt), (
+            f"{role.name} saw bare '相方' (actor mode) in system prompt"
+        )
         assert "襲撃先を揃える" not in system_prompt, (
             f"{role.name} saw '襲撃先を揃える' in system prompt"
         )
@@ -1190,10 +1199,12 @@ async def test_ask_system_prompt_madman_excludes_wolf_positions_assumption(
 ) -> None:
     """The madman must be told explicitly NOT to assume real wolf positions,
     and must NOT receive wolf-coordination tips. The prohibition phrase must
-    be present; the wolf playbook vocabulary must not."""
+    be present; the wolf playbook vocabulary must not. Bare `相方` (actor
+    mode, partner-known) is forbidden; `相方候補` (public-log inference) is
+    allowed since the madman reasons about who B is from public logs."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
     assert "人狼位置を知っている前提で話してはならない" in system_prompt
-    assert "相方" not in system_prompt
+    assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
 
 
@@ -1406,7 +1417,9 @@ async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy_even_with_speec
     for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
         for pkey in ("setsu", "sq", "yuriko", "kukrushka"):
             system_prompt = await _capture_ask_system_prompt(repo, role, persona_key=pkey)
-            assert "相方" not in system_prompt, f"{role.name}/{pkey} saw '相方' in system prompt"
+            assert not re.search(r"相方(?!候補)", system_prompt), (
+                f"{role.name}/{pkey} saw bare '相方' (actor mode) in system prompt"
+            )
             assert "襲撃先を揃える" not in system_prompt, (
                 f"{role.name}/{pkey} saw '襲撃先を揃える' in system prompt"
             )
@@ -1594,8 +1607,9 @@ async def test_ask_system_prompt_knight_includes_advanced_guard_strategy(
     assert "次夜" in system_prompt
     # Knight unique anchor must remain (regression guard).
     assert "前夜と違う相手を選ぶ" in system_prompt
-    # Wolf-coordination leak guards must still hold.
-    assert "相方" not in system_prompt
+    # Wolf-coordination leak guards must still hold. Bare 相方 (actor mode)
+    # absent; 相方候補 (public-log inference) allowed in knight pair-inference.
+    assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
 
 
@@ -1666,8 +1680,9 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "騎士騙り" in system_prompt
     assert "6 人以上" in system_prompt
     assert "騙りすぎ" in system_prompt
-    # Wolf-coordination vocabulary must not appear for the madman.
-    assert "相方" not in system_prompt
+    # Wolf-coordination vocabulary must not appear for the madman. Bare 相方
+    # (actor mode, partner-known) absent; 相方候補 (public-log inference) allowed.
+    assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
     # Existing prohibition phrase must also still be present.
     assert "人狼位置を知っている前提で話してはならない" in system_prompt
@@ -1760,8 +1775,9 @@ async def test_ask_system_prompt_madman_includes_day2_round1_fake_publication(
     assert "白先が本物の狼とは限らない" in system_prompt
     assert "処刑なしの日は結果なし" in system_prompt
     assert "合法な護衛履歴" in system_prompt
-    # Wolf-coordination vocabulary must remain absent.
-    assert "相方" not in system_prompt
+    # Wolf-coordination vocabulary must remain absent. Bare 相方 (actor mode)
+    # forbidden; 相方候補 (public-log inference) allowed in pair-inference.
+    assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
 
 
@@ -2103,3 +2119,75 @@ async def test_ask_user_context_no_wolf_partner_block_for_villager(repo: SqliteR
         guild_id="guild-no-wolf",
     )
     assert "## 仲間の人狼" not in user_context
+
+
+# ----------------------------------- 2 人狼ペア推理 (wolf-pair inference)
+# Service-level analogs of the pair-inference unit tests in
+# test_llm_prompt_builder.py. Verify the new content actually reaches the LLM
+# via the full system-prompt assembly path.
+
+@pytest.mark.parametrize("role", list(Role))
+async def test_ask_system_prompt_pair_inference_reaches_any_role(
+    repo: SqliteRepo, role: Role
+) -> None:
+    """Every LLM seat must receive the shared 2-wolf-pair inference vocabulary
+    via the rules block. `相方候補` (inference noun) and `2 人狼` (the canonical
+    pair label) are the two shared anchors."""
+    system_prompt = await _capture_ask_system_prompt(repo, role)
+    assert "相方候補" in system_prompt, (
+        f"{role.name} missing pair-inference anchor '相方候補'"
+    )
+    assert "2 人狼" in system_prompt, (
+        f"{role.name} missing pair-inference anchor '2 人狼'"
+    )
+
+
+async def test_ask_system_prompt_wolf_seat_includes_two_wolf_set_framing(
+    repo: SqliteRepo,
+) -> None:
+    """The werewolf system prompt must carry the `2 人狼セット` framing — every
+    save/cut/cover/black-out/attack must be defensible as the same A-B line on
+    later days — plus the `視点漏れ` prohibition (don't leak partner-known info
+    in public speech)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "2 人狼セット" in system_prompt
+    assert "視点漏れ" in system_prompt
+
+
+async def test_ask_system_prompt_madman_pair_inference_carries_misfire(
+    repo: SqliteRepo,
+) -> None:
+    """The madman system prompt must carry the public-log pair-inference
+    framing with explicit misfire awareness — without leaking wolf-coordination
+    vocabulary. Bare `相方` (actor mode) must remain absent; `相方候補` is the
+    only allowed form. `襲撃先を揃える` and `仲間の人狼` must be absent."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "相方候補" in system_prompt
+    assert "公開ログからの推定" in system_prompt
+    assert "誤爆" in system_prompt
+    # Wolf-coordination vocab forbidden for the madman.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+    assert "仲間の人狼" not in system_prompt
+
+
+async def test_ask_system_prompt_wolf_vote_task_extends_with_two_wolf_set(
+    repo: SqliteRepo,
+) -> None:
+    """When the wolf voter's task_text is the wolf-only vote task, the
+    system prompt must contain the new `2 人狼セット` framing on top of the
+    existing partner checklist anchors (`相方` / `身内票` / `ライン切り`)."""
+    task_text = task_vote(
+        ["席1 H1"],
+        runoff=False,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席3 PartnerName"],
+    )
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.WEREWOLF, task_text=task_text
+    )
+    assert "2 人狼セット" in system_prompt
+    # Existing wolf-only vote anchors preserved.
+    assert "相方" in system_prompt
+    assert "身内票" in system_prompt
+    assert "ライン切り" in system_prompt

@@ -175,9 +175,13 @@ def test_game_rules_block_co_recognition_requires_explicit_self_declaration() ->
 def test_game_rules_block_co_recognition_no_wolf_coordination_leak() -> None:
     """Defensive duplicate of the existing terminology leak-test focused on the
     new CO-recognition bullets — guarantees the new policy text does not bleed
-    wolf-coordination vocabulary into the shared rules block."""
+    wolf-coordination vocabulary into the shared rules block. Bare `相方`
+    (actor mode, partner-known) is forbidden; `相方候補` (public-log inference)
+    is allowed in the 2-wolf-pair-inference subsection."""
     block = _build_game_rules_block()
-    assert "相方" not in block
+    assert not re.search(r"相方(?!候補)", block), (
+        "bare '相方' (actor mode) leaked into shared rules block"
+    )
     assert "襲撃先を揃える" not in block
 
 
@@ -481,19 +485,23 @@ def test_game_rules_block_clarifies_sutekogo_is_legal_target_choice_not_skip() -
 def test_game_rules_block_advanced_guard_vocab_no_wolf_coordination_leak() -> None:
     """Defensive duplicate of the existing leak guard, focused on the new
     advanced-guard bullets — they must not bleed wolf-coordination vocab into
-    the shared rules block."""
+    the shared rules block. Bare `相方` (actor mode, partner-known) must be
+    absent; the inference noun `相方候補` (candidate) is allowed."""
     block = _build_game_rules_block()
-    assert "相方" not in block
+    assert not re.search(r"相方(?!候補)", block), (
+        "bare '相方' (actor mode) leaked into shared rules block"
+    )
     assert "襲撃先を揃える" not in block
 
 
 def test_game_rules_block_terminology_has_no_wolf_coordination_leak() -> None:
     """Shared terminology must not bleed wolf-coordination vocabulary into
-    non-wolf prompts. `相方` and the exact phrase `襲撃先を揃える` are the two
-    anchors the existing service-level leak tests use."""
+    non-wolf prompts. Bare `相方` (actor mode, partner-known) and the exact
+    phrase `襲撃先を揃える` are the two anchors. The inference noun `相方候補`
+    is allowed in the shared 2-wolf-pair-inference subsection."""
     block = _build_game_rules_block()
-    assert "相方" not in block, (
-        "wolf-coordination '相方' leaked into shared rules block — would break "
+    assert not re.search(r"相方(?!候補)", block), (
+        "bare '相方' (actor mode) leaked into shared rules block — would break "
         "test_ask_system_prompt_non_wolf_excludes_wolf_strategy"
     )
     assert "襲撃先を揃える" not in block, (
@@ -592,14 +600,18 @@ def test_strategy_block_no_cross_role_leak(role: Role) -> None:
 
 @pytest.mark.parametrize("role", list(Role))
 def test_wolf_coordination_vocabulary_only_in_wolf_strategy(role: Role) -> None:
-    """`相方` and `襲撃先を揃える` are wolf-playbook vocabulary and must only
-    appear in the werewolf strategy block — never in any other role's tips."""
+    """Bare `相方` (actor mode, partner-known) and `襲撃先を揃える` are wolf-
+    playbook vocabulary and must only appear in the werewolf strategy block —
+    never in any other role's tips. The inference noun `相方候補` is allowed
+    in non-wolf strategies as public-log inference language."""
     block = _build_strategy_block(role)
     if role is Role.WEREWOLF:
         assert "相方" in block
         assert "襲撃先を揃える" in block
     else:
-        assert "相方" not in block, f"wolf coordination '相方' leaked into {role.name}"
+        assert not re.search(r"相方(?!候補)", block), (
+            f"bare '相方' (actor mode) leaked into {role.name}"
+        )
         assert "襲撃先を揃える" not in block, (
             f"wolf coordination '襲撃先を揃える' leaked into {role.name}"
         )
@@ -609,11 +621,14 @@ def test_madman_strategy_prohibits_not_assumes_wolf_positions() -> None:
     """The madman must NOT be told that wolf positions are known — only that
     the opposite is true. The strategy text phrases this as a prohibition, so
     the full prohibition phrase must be present and wolf-coordination tips
-    must still be absent (the madman does not get the wolves' playbook)."""
+    must still be absent (the madman does not get the wolves' playbook).
+    `相方候補` (inference noun) is allowed since the madman reasons from
+    public logs about who B might be if A is wolf."""
     block = _build_strategy_block(Role.MADMAN)
     assert "人狼位置を知っている前提で話してはならない" in block
-    # No wolf-coordination playbook leaks.
-    assert "相方" not in block
+    # No wolf-coordination playbook leaks: bare 相方 (known partner) absent;
+    # 相方候補 (public-log inference) allowed.
+    assert not re.search(r"相方(?!候補)", block)
     assert "襲撃先を揃える" not in block
 
 
@@ -697,10 +712,10 @@ def test_fake_strategy_warns_against_over_faking(role: Role) -> None:
 
 def test_madman_fake_strategy_has_no_wolf_coordination_vocabulary() -> None:
     """The madman's new fake-CO guidance must not introduce wolf-coordination
-    vocabulary (`相方`, `襲撃先を揃える`) — the madman does not know the real
-    wolf positions."""
+    vocabulary (bare `相方`, `襲撃先を揃える`) — the madman does not know the
+    real wolf positions. `相方候補` (public-log inference) is allowed."""
     block = _build_strategy_block(Role.MADMAN)
-    assert "相方" not in block
+    assert not re.search(r"相方(?!候補)", block)
     assert "襲撃先を揃える" not in block
     # Existing prohibition phrase still present.
     assert "人狼位置を知っている前提で話してはならない" in block
@@ -717,9 +732,10 @@ def test_fake_strategy_describes_conditional_seer_fake(role: Role) -> None:
     if role is Role.WEREWOLF:
         assert "相方が危険位置" in block
     else:
-        # Madman variant: no wolf-coordination vocab, but references CO creep.
+        # Madman variant: no wolf-coordination vocab (bare 相方 / 襲撃先を揃える),
+        # but references CO creep. 相方候補 (inference) is allowed.
         assert "複数の占い師 CO" in block
-        assert "相方" not in block
+        assert not re.search(r"相方(?!候補)", block)
         assert "襲撃先を揃える" not in block
 
 
@@ -1090,8 +1106,9 @@ def test_task_daytime_speech_day2_round1_publishes_prior_night_results() -> None
     # Trust-pressure framing — withholding lowers credibility.
     assert "信用低下" in text or "破綻" in text
     # Wolf-coordination vocabulary must NOT appear in this task block (every
-    # role sees this task text).
-    assert "相方" not in text
+    # role sees this task text). Bare 相方 (actor mode) absent; 相方候補
+    # (public-log inference noun) is allowed in the daytime speech task.
+    assert not re.search(r"相方(?!候補)", text)
     assert "襲撃先を揃える" not in text
 
 
@@ -1150,14 +1167,15 @@ def test_madman_fake_strategy_acknowledges_misfire_and_legal_constraints() -> No
     """Madman-only: the fake-result guidance must include misfire awareness
     (誤爆リスク, 白先が本物の狼とは限らない), the no-execution-no-result rule,
     and the legal-guard-history constraint. Wolf-coordination vocabulary
-    must remain absent (existing leak guard reinforced)."""
+    (bare `相方`, `襲撃先を揃える`) must remain absent; `相方候補` (public-log
+    inference) is allowed in the new pair-inference bullets."""
     block = _build_strategy_block(Role.MADMAN)
     assert "誤爆リスク" in block
     assert "白先が本物の狼とは限らない" in block
     assert "処刑なしの日は結果なし" in block
     assert "合法な護衛履歴" in block
-    # Existing leak guard.
-    assert "相方" not in block
+    # Existing leak guard: bare 相方 absent; 相方候補 (inference) allowed.
+    assert not re.search(r"相方(?!候補)", block)
     assert "襲撃先を揃える" not in block
 
 
@@ -1687,12 +1705,15 @@ def test_non_wolf_strategy_excludes_partner_action_vocabulary(role: Role) -> Non
 
 def test_task_vote_baseline_unchanged_without_role() -> None:
     """The default `task_vote(candidates, runoff)` call must keep the existing
-    base text and never inject partner vocabulary, so all pre-existing call
-    sites and non-wolf voters get the same instructions as before."""
+    base text and never inject partner-action vocabulary, so all pre-existing
+    call sites and non-wolf voters get the same instructions as before. Bare
+    `相方` (actor mode, partner-known) and `仲間の人狼` must not appear; the
+    inference noun `相方候補` is allowed in the shared pair-inference bullet
+    of the common path."""
     text = task_vote(["席1 A", "席2 B"], runoff=False)
     assert "投票先として合法な候補は: 席1 A、席2 B" in text
     assert "仲間の人狼" not in text
-    assert "相方" not in text
+    assert not re.search(r"相方(?!候補)", text)
 
 
 def test_task_vote_wolf_path_emits_partner_checklist() -> None:
@@ -1739,10 +1760,11 @@ def test_task_vote_wolf_runoff_adds_runoff_checklist() -> None:
 def test_task_vote_non_wolf_role_returns_base_text(role: Role) -> None:
     """Passing a non-wolf role to `task_vote` returns the base text — the
     wolf-specific block never reaches non-wolf voters even if a future caller
-    forgets to skip the role argument."""
+    forgets to skip the role argument. Bare `相方` (actor mode) and `仲間の人狼`
+    must be absent; the inference noun `相方候補` is allowed in the common path."""
     text = task_vote(["席1 A", "席2 B"], runoff=False, role=role)
     assert "仲間の人狼" not in text
-    assert "相方" not in text
+    assert not re.search(r"相方(?!候補)", text)
 
 
 def test_task_vote_madman_with_partner_token_does_not_leak_partner() -> None:
@@ -1761,7 +1783,9 @@ def test_task_vote_madman_with_partner_token_does_not_leak_partner() -> None:
 
 def test_task_vote_lone_wolf_returns_base_text() -> None:
     """A wolf voter with no alive partner (lone-wolf endgame) gets the base
-    text — the partner-aware checklist requires at least one partner token."""
+    text — the partner-aware checklist requires at least one partner token.
+    Bare `相方` (actor mode) and `仲間の人狼` must be absent; `相方候補`
+    (inference) is allowed in the shared pair-inference bullet."""
     text = task_vote(
         ["席1 A"],
         runoff=False,
@@ -1769,4 +1793,186 @@ def test_task_vote_lone_wolf_returns_base_text() -> None:
         wolf_partner_tokens=(),
     )
     assert "仲間の人狼" not in text
-    assert "相方" not in text
+    assert not re.search(r"相方(?!候補)", text)
+
+
+# ----------------------------------- 2 人狼ペア推理 (wolf-pair inference)
+# Pair-inference asks every LLM seat to think paired: "if A is wolf, who is
+# the natural B?" The vocabulary `相方候補` (inference noun) is shared across
+# all roles via the rules block; `相方` (actor mode, partner-known) stays
+# strictly in the werewolf strategy and the wolf-only vote/night blocks.
+
+_PAIR_INFERENCE_RULES_TOKENS = (
+    "2 人狼",
+    "相方候補",
+    "公開ログからの仮説",
+    "単体黒要素",
+    "票筋",
+    "噛み筋",
+    "ライン切り",
+    "身内票",
+)
+
+
+def test_game_rules_block_introduces_two_wolf_pair_inference() -> None:
+    """The shared rules block must teach paired-wolf inference: build an A-B
+    hypothesis from public logs (vote tracks, attack patterns, line-cuts,
+    inner-circle votes) and weigh single-wolf suspicion against partner fit."""
+    block = _build_game_rules_block()
+    for token in _PAIR_INFERENCE_RULES_TOKENS:
+        assert token in block, f"rules block missing pair-inference token {token!r}"
+    # Soft-cap on speech length must stay; the new bullets must not encourage
+    # exhaustive pair-listing speeches.
+    assert "1〜2 点" in block
+
+
+def test_villager_strategy_includes_pair_inference_vocabulary() -> None:
+    """The villager (public-information-only seat) must reason paired:
+    candidate + 相方候補 from public logs, plus observation patterns
+    (身内票, 票逸らし, ライン切り) as wolf-detection signals. Bare `相方`
+    must not appear; the villager-CO ban must remain intact."""
+    block = _build_strategy_block(Role.VILLAGER)
+    assert "相方候補" in block
+    assert "2 人狼仮説" in block
+    assert "身内票" in block
+    # Either of the observation-pattern phrases is sufficient.
+    assert "票逸ら" in block or "ライン切り" in block
+    # Bare `相方` (actor mode) must not appear.
+    assert not re.search(r"相方(?!候補)", block)
+    # Existing villager-CO ban remains.
+    assert "村人 CO 禁止" in block or "村人CO" in block
+
+
+def test_seer_strategy_includes_pair_inference_for_target_selection() -> None:
+    """Seer divine-target selection must factor in pair-inference: white-or-
+    black both organize 相方候補 hypotheses, counter-CO comparison drives the
+    strongest pair to break. Bare `相方` (actor mode) must not appear."""
+    block = _build_strategy_block(Role.SEER)
+    assert "相方候補" in block
+    assert "2 人狼仮説" in block
+    assert "対抗" in block
+    assert not re.search(r"相方(?!候補)", block)
+
+
+def test_medium_strategy_includes_pair_inference_after_execution() -> None:
+    """Medium pair-inference: medium-black narrows the executed wolf's 相方候補
+    via 票筋 / 庇い / ライン切り / 身内票; medium-white examines who pushed the
+    execution. Bare `相方` (actor mode) must not appear."""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "相方候補" in block
+    assert "票筋" in block
+    assert "身内票" in block
+    assert "2 人狼仮説" in block
+    assert not re.search(r"相方(?!候補)", block)
+
+
+def test_knight_strategy_includes_pair_inference_for_guard_selection() -> None:
+    """Knight pair-inference: guard-target selection considers which 2-wolf
+    hypothesis benefits from the kami; peaceful mornings + actual attack
+    targets feed back into the daytime pair-inference. Bare `相方` (actor
+    mode) must not appear."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "相方候補" in block
+    assert "2 人狼仮説" in block
+    assert "噛み筋" in block
+    assert not re.search(r"相方(?!候補)", block)
+
+
+def test_werewolf_strategy_includes_two_wolf_set_framing() -> None:
+    """The werewolf strategy must explicitly tell the wolf that it and its
+    partner are read as a 2-wolf set by the village — every save/cut/cover/
+    black-out/attack must be defensible as the same A-B line on later days.
+    `視点漏れ` is the absolute prohibition (don't leak partner-known info)."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "2 人狼セット" in block
+    assert "視点漏れ" in block
+    assert "ライン" in block
+    # Bare `相方` is REQUIRED in the wolf strategy (actor mode, partner-known).
+    assert "相方" in block
+
+
+def test_madman_strategy_includes_pair_inference_with_misfire() -> None:
+    """The madman, lacking real-wolf-position knowledge, must reason 2-wolf
+    hypotheses from public logs only — with explicit misfire framing. Bare
+    `相方` (actor mode) and `襲撃先を揃える` (wolf-only night coordination)
+    must remain absent."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "2 人狼仮説" in block
+    assert "公開ログからの推定" in block
+    assert "誤爆" in block
+    assert "相方候補" in block
+    # Wolf-coordination vocab forbidden.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+    # Existing prohibition phrase still present.
+    assert "人狼位置を知っている前提で話してはならない" in block
+
+
+def test_task_daytime_speech_default_includes_pair_inference_softly() -> None:
+    """The daytime speech task's base body teaches paired suspicion as a
+    soft hint — not every speech must list pairs. The softness modifiers
+    (`必要に応じて` / `1〜2 点`) guard against speech inflation. The base
+    contract (80–300 chars, intent=speak/skip) must be preserved."""
+    text = task_daytime_speech(2)
+    assert "相方候補" in text
+    assert "2 人狼セット" in text
+    # Softness anchors so every speech doesn't balloon into pair listing.
+    assert "必要に応じて" in text
+    assert "1〜2 点" in text
+    # Existing base contract preserved.
+    assert "80〜300 字" in text
+    assert "intent=speak" in text
+    assert "intent=skip" in text
+
+
+def test_task_vote_base_includes_pair_inference_for_all_roles() -> None:
+    """The common-path `task_vote` body (no role argument) must teach paired
+    suspicion as part of the single-vote-decision guidance, since every role
+    sees this body. Bare `相方` (actor mode) must not appear; only `相方候補`."""
+    text = task_vote(["席1 A", "席2 B"], runoff=False)
+    assert "相方候補" in text
+    assert "2 人狼セット" in text
+    # Existing baseline candidate list still present.
+    assert "投票先として合法な候補は: 席1 A、席2 B" in text
+    # Wolf-only block must not be appended.
+    assert "仲間の人狼" not in text
+    assert not re.search(r"相方(?!候補)", text)
+
+
+def test_task_vote_wolf_block_extends_with_two_wolf_set_framing() -> None:
+    """The wolf-only vote block must extend the existing partner checklist
+    with a `2 人狼セット` line so the wolf checks each save/cut/deflect against
+    next-day reading. Existing wolf-only tokens stay (`相方を救` / `身内票` /
+    `ライン切り`)."""
+    text = task_vote(
+        ["席1 A", "席2 B"],
+        runoff=False,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席2 B"],
+    )
+    assert "2 人狼セット" in text
+    # Existing wolf-only checklist tokens preserved.
+    assert "相方を救" in text
+    assert "身内票" in text
+    assert "ライン切り" in text
+
+
+def test_task_vote_madman_inference_present_but_no_actor_partner() -> None:
+    """The madman's vote text contains the common-path pair-inference clause
+    (`相方候補`) but never the wolf-only actor verbs (`相方を救` / `相方を切`)
+    or the partner-token block (`仲間の人狼`). Bare `相方` (actor mode) must
+    not appear even when a caller naively passes a partner token."""
+    text = task_vote(
+        ["席1 A", "席2 B"],
+        runoff=False,
+        role=Role.MADMAN,
+        wolf_partner_tokens=["席3 X"],
+    )
+    # Common-path pair-inference reaches the madman.
+    assert "相方候補" in text
+    # Wolf-only actor verbs and partner-token block must not.
+    assert "仲間の人狼" not in text
+    assert "相方を救" not in text
+    assert "相方を切" not in text
+    # Bare `相方` (actor mode) must be absent in the madman vote text.
+    assert not re.search(r"相方(?!候補)", text)
