@@ -59,6 +59,20 @@ VOTE_DURATION = 60
 RUNOFF_DURATION = 60
 NIGHT_DURATION = 90
 
+# Re-check interval used by `plan_day_discussion_wait` — engine sleeps this long
+# between checks when the discussion deadline has passed but at least one alive
+# LLM seat hasn't completed both rounds. The LLM completion path also calls
+# `wake.wake(game_id)`, so this is a fallback ceiling, not the typical wait time.
+DAY_DISCUSSION_GRACE = 30
+
+# Initial deadline for DAY_RUNOFF_SPEECH. Acts as a safety net so a hung LLM
+# task doesn't freeze the game; the LLM dispatcher's per-seat `finally` block
+# always advances `runoff_speech_done` so the engine can move on.
+RUNOFF_SPEECH_DEADLINE = 60
+
+# Re-check interval used by `plan_runoff_speech_wait`, mirroring DAY_DISCUSSION_GRACE.
+RUNOFF_SPEECH_GRACE = 30
+
 
 # ---------------------------------------------------------------- helpers
 def _name(seats: Mapping[int, Seat], seat_no: int) -> str:
@@ -139,35 +153,37 @@ def _role_reveal_log(
     )
 
 
-def _format_vote_tally(
+def _format_vote_results_by_voter(
     votes: Sequence[Vote],
     seats_by_no: Mapping[int, Seat],
     alive_seats: set[int],
 ) -> str:
-    """Grouped-by-target tally block, empty string if no valid ballots cast.
+    """Voter-keyed vote display, empty string if no valid ballots cast.
 
-    Dead-seat stale votes are filtered out to match `compute_vote_result`. Bucket
-    `target_seat=None` into 棄権. Targets sort by vote count desc then seat_no asc;
-    voters within each bucket sort by seat_no asc.
+    Output:
+        🗳 投票結果:
+        ・<voter_name> -> <target_name>
+        ・<voter_name> -> 棄権
+
+    Sorted by voter seat_no ascending. Dead-seat stale votes filtered to match
+    `compute_vote_result`. Defensive de-dup: if duplicate Vote rows exist for the
+    same voter (the DB upsert prevents this in practice), keep the latest by
+    `submitted_at`.
     """
     valid = [v for v in votes if v.voter_seat in alive_seats]
     if not valid:
         return ""
-    buckets: dict[int | None, list[int]] = {}
-    for v in sorted(valid, key=lambda x: x.voter_seat):
-        buckets.setdefault(v.target_seat, []).append(v.voter_seat)
-
-    def sort_key(item: tuple[int | None, list[int]]) -> tuple[int, int]:
-        target, voters = item
-        # 棄権 (None) sinks to the bottom regardless of count.
-        target_order = target if target is not None else 10**9
-        return (-len(voters), target_order)
-
+    by_voter: dict[int, Vote] = {}
+    for v in valid:
+        prev = by_voter.get(v.voter_seat)
+        if prev is None or v.submitted_at >= prev.submitted_at:
+            by_voter[v.voter_seat] = v
     lines = ["🗳 投票結果:"]
-    for target, voters in sorted(buckets.items(), key=sort_key):
-        label = "棄権" if target is None else _name(seats_by_no, target)
-        voter_names = "、".join(_name(seats_by_no, v) for v in voters)
-        lines.append(f"・{label} ({len(voters)}票): {voter_names}")
+    for voter_seat in sorted(by_voter):
+        v = by_voter[voter_seat]
+        voter_name = _name(seats_by_no, voter_seat)
+        target_label = "棄権" if v.target_seat is None else _name(seats_by_no, v.target_seat)
+        lines.append(f"・{voter_name} -> {target_label}")
     return "\n".join(lines)
 
 
@@ -333,7 +349,7 @@ def plan_day_vote_resolve(
 
     outcome = compute_vote_result(votes, alive_seats=alive_seats)
     seats_by_no = {s.seat_no: s for s in seats}
-    tally = _format_vote_tally(votes, seats_by_no, alive_seats)
+    tally = _format_vote_results_by_voter(votes, seats_by_no, alive_seats)
     tally_suffix = f"\n\n{tally}" if tally else ""
 
     if outcome.executed is not None:
@@ -348,6 +364,26 @@ def plan_day_vote_resolve(
         )
     if outcome.tied:
         candidates = "、".join(_name(seats_by_no, s) for s in outcome.tied)
+        tied_has_llm = any(
+            seats_by_no.get(sn) is not None and seats_by_no[sn].is_llm for sn in outcome.tied
+        )
+        if tied_has_llm:
+            # Some tied candidate is an LLM seat. Park in DAY_RUNOFF_SPEECH so
+            # the candidate LLMs each speak once before runoff voting begins.
+            pub = _public_log(
+                game,
+                kind="RUNOFF_START",
+                text=f"同票のため決選投票に移ります。候補: {candidates}{tally_suffix}",
+                now_epoch=now_epoch,
+                phase=Phase.DAY_RUNOFF_SPEECH,
+            )
+            return Transition(
+                next_phase=Phase.DAY_RUNOFF_SPEECH,
+                next_day=game.day_number,
+                new_deadline_epoch=now_epoch + RUNOFF_SPEECH_DEADLINE,
+                public_logs=(pub,),
+                clear_force_skip=True,
+            )
         pub = _public_log(
             game,
             kind="RUNOFF_START",
@@ -419,7 +455,7 @@ def plan_day_runoff_resolve(
         votes, alive_seats=alive_seats, candidate_seats=set(tied_candidates)
     )
     seats_by_no = {s.seat_no: s for s in seats}
-    tally = _format_vote_tally(votes, seats_by_no, alive_seats)
+    tally = _format_vote_results_by_voter(votes, seats_by_no, alive_seats)
     tally_suffix = f"\n\n{tally}" if tally else ""
 
     if outcome.executed is not None:
@@ -548,12 +584,20 @@ def plan_night_resolve(
     knight_seat = alive_seat_of_role(players, Role.KNIGHT)
     medium_seat = alive_seat_of_role(players, Role.MEDIUM)
     wolves = alive_werewolves(players)
+    # Human-wolf priority: when 2 wolves disagree and one is human, the
+    # human's pick wins (instead of marking the attack as split). Computed
+    # here so `resolve_wolf_attack` stays domain-pure (no Seat dependency).
+    human_wolf_seats = [
+        w for w in wolves if seats_by_no.get(w) is not None and not seats_by_no[w].is_llm
+    ]
 
     wolf_actions = [a for a in actions if a.kind is SubmissionType.WOLF_ATTACK]
     seer_action = next((a for a in actions if a.kind is SubmissionType.SEER_DIVINE), None)
     knight_action = next((a for a in actions if a.kind is SubmissionType.KNIGHT_GUARD), None)
 
-    attack = resolve_wolf_attack(wolf_actions, wolves, force_skip=force_skip)
+    attack = resolve_wolf_attack(
+        wolf_actions, wolves, force_skip=force_skip, human_wolf_seats=human_wolf_seats
+    )
 
     missing: set[int] = set()
     if seer_seat is not None and seer_action is None:
@@ -791,15 +835,81 @@ def plan_extend_deadline(game: Game, extra_seconds: int, now_epoch: int) -> Tran
     )
 
 
+# ---------------------------------------------------------------- DAY_DISCUSSION wait
+def plan_day_discussion_wait(game: Game, now_epoch: int) -> Transition:
+    """Park in DAY_DISCUSSION with a short re-check deadline.
+
+    Used when the discussion deadline has passed but at least one alive LLM seat
+    hasn't completed both rounds. The next advance fires either when the LLM
+    completion path wakes the engine or when this short grace deadline expires.
+    The same-phase transition is intentional — `apply_transition`'s optimistic
+    lock matches `expected_phase=DAY_DISCUSSION` even when next_phase equals it.
+    """
+    return Transition(
+        next_phase=Phase.DAY_DISCUSSION,
+        next_day=game.day_number,
+        new_deadline_epoch=now_epoch + DAY_DISCUSSION_GRACE,
+    )
+
+
+# ---------------------------------------------------------------- DAY_RUNOFF_SPEECH → DAY_RUNOFF
+def plan_runoff_speech_to_runoff(
+    game: Game,
+    seats_by_no: Mapping[int, Seat],
+    tied_candidates: Sequence[int],
+    now_epoch: int,
+) -> Transition:
+    """DAY_RUNOFF_SPEECH → DAY_RUNOFF after candidate LLMs have spoken.
+
+    `tied_candidates` is recomputed by the caller from round 0 votes — never
+    stored separately, since `compute_vote_result` is pure and idempotent.
+    """
+    candidates_text = "、".join(_name(seats_by_no, s) for s in tied_candidates)
+    pub = _public_log(
+        game,
+        kind="PHASE_CHANGE",
+        text=f"決選投票を開始します。候補: {candidates_text}",
+        now_epoch=now_epoch,
+        phase=Phase.DAY_RUNOFF,
+    )
+    return Transition(
+        next_phase=Phase.DAY_RUNOFF,
+        next_day=game.day_number,
+        new_deadline_epoch=now_epoch + RUNOFF_DURATION,
+        public_logs=(pub,),
+    )
+
+
+def plan_runoff_speech_wait(game: Game, now_epoch: int) -> Transition:
+    """Park in DAY_RUNOFF_SPEECH with a short grace deadline.
+
+    Mirrors `plan_day_discussion_wait` for the runoff-speech intermediate phase.
+    Triggers when the safety-net deadline expires before all candidate LLMs have
+    completed `runoff_speech_done`; the LLM dispatcher's `finally` block also
+    wakes the engine when each seat finishes.
+    """
+    return Transition(
+        next_phase=Phase.DAY_RUNOFF_SPEECH,
+        next_day=game.day_number,
+        new_deadline_epoch=now_epoch + RUNOFF_SPEECH_GRACE,
+    )
+
+
 __all__ = [
+    "DAY_DISCUSSION_GRACE",
     "NIGHT_DURATION",
     "RUNOFF_DURATION",
+    "RUNOFF_SPEECH_DEADLINE",
+    "RUNOFF_SPEECH_GRACE",
     "VOTE_DURATION",
     "plan_day_discussion_to_vote",
+    "plan_day_discussion_wait",
     "plan_day_runoff_resolve",
     "plan_day_vote_resolve",
     "plan_extend_deadline",
     "plan_night0",
     "plan_night_resolve",
+    "plan_runoff_speech_to_runoff",
+    "plan_runoff_speech_wait",
     "plan_setup",
 ]

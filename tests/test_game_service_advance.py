@@ -60,6 +60,20 @@ async def _make_game_in_setup(repo: SqliteRepo) -> Game:
     return game
 
 
+async def _seed_llm_discussion_rounds_done(repo: SqliteRepo, game_id: str, day: int) -> None:
+    """Mark every LLM seat as having completed both DAY_DISCUSSION rounds.
+
+    Tests that drive DAY_DISCUSSION → DAY_VOTE via clock.tick(300) call this
+    before ticking so the deadline-passed branch in `_plan_next` finds
+    rounds_done=True and proceeds to the vote phase. With FakeLLMAdapter
+    the actual round task is just recorded — no progress is written — so
+    the tests must seed progress themselves.
+    """
+    for seat_no in (6, 7, 8, 9):  # LLM seats per _nine_seats()
+        await repo.increment_llm_discussion_round(game_id, day=day, seat_no=seat_no)
+        await repo.increment_llm_discussion_round(game_id, day=day, seat_no=seat_no)
+
+
 @pytest_asyncio.fixture
 async def svc(
     repo: SqliteRepo,
@@ -132,6 +146,7 @@ async def test_advance_day_discussion_to_vote(
     disc.reset()
     llm.calls.clear()
 
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # DAY_DISCUSSION -> DAY_VOTE
 
@@ -159,6 +174,7 @@ async def test_submit_vote_wakes_engine_when_all_submitted(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # DAY_DISCUSSION -> DAY_VOTE
 
@@ -188,6 +204,7 @@ async def test_submit_vote_does_not_wake_when_incomplete(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)
 
@@ -208,6 +225,7 @@ async def test_day_vote_resolve_missing_enters_waiting(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # → DAY_VOTE
 
@@ -238,6 +256,7 @@ async def test_host_force_skip_resolves_vote_with_abstentions(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # DAY_VOTE
 
@@ -269,6 +288,7 @@ async def test_host_extend_resumes_phase_with_new_deadline(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # DAY_VOTE
     clock.tick(60)
@@ -379,6 +399,7 @@ async def test_submit_vote_rejected_when_voter_dead(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -408,6 +429,7 @@ async def test_submit_vote_rejected_when_target_dead(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -436,6 +458,7 @@ async def test_submit_vote_self_vote_rejected(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -454,6 +477,7 @@ async def test_submit_vote_runoff_rejects_target_outside_tied_set(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -515,6 +539,7 @@ async def test_submit_night_action_rejected_when_role_mismatch(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # -> NIGHT_0
     await service.advance(game.id)  # -> DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for v in range(1, 10):
@@ -549,6 +574,7 @@ async def test_submit_night_action_rejected_when_target_illegal(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # -> NIGHT_0
     await service.advance(game.id)  # -> DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for v in range(1, 10):
@@ -602,6 +628,7 @@ async def test_knight_guard_stale_previous_day_is_cleared(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # -> NIGHT_0
     await service.advance(game.id)  # -> DAY_DISCUSSION day 1
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for v in range(1, 10):
@@ -653,6 +680,7 @@ async def test_dawn_morning_not_posted_twice(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION day 1
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     # Everyone votes seat 1; seat 1 is executed
@@ -706,6 +734,7 @@ async def test_dawn_posts_in_spec_order(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # -> NIGHT_0
     await service.advance(game.id)  # -> DAY_DISCUSSION day 1
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for voter in range(1, 10):
@@ -789,6 +818,7 @@ async def test_dawn_victory_posts_in_spec_order(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # -> NIGHT_0
     await service.advance(game.id)  # -> DAY_DISCUSSION day 1
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for voter in range(1, 10):
@@ -862,6 +892,7 @@ async def test_full_game_one_day_happy_path(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # → NIGHT_0
     await service.advance(game.id)  # → DAY_DISCUSSION day 1
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # → DAY_VOTE
     # Everyone votes seat 1
@@ -903,6 +934,7 @@ async def test_submit_vote_returns_accepted_on_legal_vote(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -929,6 +961,7 @@ async def test_submit_night_action_returns_accepted_for_seer(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for v in range(1, 10):
@@ -959,6 +992,7 @@ async def test_resend_pending_dms_day_vote_sends_only_to_missing(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -1001,6 +1035,7 @@ async def test_resend_pending_dms_night_passes_only_missing_actors(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for v in range(1, 10):
@@ -1043,6 +1078,7 @@ async def test_host_extend_resends_dms_before_waking(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)
     await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -1081,6 +1117,7 @@ async def test_submit_vote_rejected_when_day_mismatch(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION day 1
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE day 1
 
@@ -1109,6 +1146,7 @@ async def test_submit_night_action_rejected_when_day_mismatch(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION day 1
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for v in range(1, 10):
@@ -1222,6 +1260,7 @@ async def test_resend_pending_dms_dispatches_llm_votes_for_missing_llm_seats(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
 
@@ -1255,6 +1294,7 @@ async def test_resend_pending_dms_dispatches_llm_night_with_unresolved(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     # Everyone including seat 1 must vote. Seat 1 votes seat 2; 2..9 vote seat 1
@@ -1402,6 +1442,7 @@ async def _advance_to_night(
     game = await _make_game_in_setup(repo)
     await service.advance(game.id)  # SETUP -> NIGHT_0
     await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
     clock.tick(300)
     await service.advance(game.id)  # -> DAY_VOTE
     for v in range(1, 10):
@@ -1435,6 +1476,10 @@ async def test_split_wolf_attack_does_not_early_wake(
     wolves can self-correct. Without this guard the engine wakes the moment the
     second wolf submits, jumping straight to WAITING_HOST_DECISION before the
     night clock runs out.
+
+    Skips if the random role assignment puts the two wolves on a human seat +
+    an LLM seat — in that mix `resolve_wolf_attack` applies human-wolf priority
+    instead of pausing, so the early-wake guard becomes irrelevant.
     """
     service, _, _, reg, clock = svc
     setup = await _advance_to_night(repo, service, clock)
@@ -1443,6 +1488,12 @@ async def test_split_wolf_attack_does_not_early_wake(
     game, wolves, seer, knight, villager_pool = setup
     if len(wolves) < 2 or len(villager_pool) < 2:
         return  # need both wolves alive and 2 distinct legal attack targets
+    seats = await repo.load_seats(game.id)
+    seats_by_no = {s.seat_no: s for s in seats}
+    is_llm = [seats_by_no[w].is_llm for w in wolves]
+    if is_llm.count(True) == 1:
+        # Mixed human/LLM wolves invoke the priority rule, not split.
+        return
 
     wakes: list[str] = []
     reg.wake = lambda gid: wakes.append(gid)  # type: ignore[method-assign]
@@ -1571,3 +1622,153 @@ async def test_submit_night_action_rejects_none_target_for_wolf(
     assert not any(
         a.actor_seat == wolves[0] and a.kind is SubmissionType.WOLF_ATTACK for a in actions
     )
+
+
+# ----------------------------- DAY_DISCUSSION LLM-rounds gate behaviour
+async def test_advance_day_discussion_stays_when_llms_incomplete_at_deadline(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Deadline reached but LLM rounds incomplete → stay in DAY_DISCUSSION
+    with `deadline_epoch = now + DAY_DISCUSSION_GRACE`."""
+    from wolfbot.domain.state_machine import DAY_DISCUSSION_GRACE
+
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    # Seed only one LLM seat partially — the gate sees rounds_done < 2.
+    await repo.increment_llm_discussion_round(game.id, day=1, seat_no=6)
+    clock.tick(300)
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_DISCUSSION
+    assert loaded.deadline_epoch == clock.now + DAY_DISCUSSION_GRACE
+
+
+async def test_advance_day_discussion_stays_when_llms_done_before_deadline(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """All LLMs complete both rounds before the natural deadline → no transition
+    is committed; we stay in DAY_DISCUSSION until the deadline expires."""
+    service, _, _, _, _ = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)  # → DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    # Don't tick — deadline still in the future.
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_DISCUSSION
+
+
+async def test_advance_day_discussion_grace_does_not_redispatch_llm(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Same-phase grace recommit must not call submit_llm_discussion_rounds again."""
+    service, _, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # → NIGHT_0
+    await service.advance(game.id)  # → DAY_DISCUSSION (initial dispatch)
+    initial = sum(1 for c in llm.calls if c.name == "submit_llm_discussion_rounds")
+    assert initial == 1
+    # No seed → rounds_done < 2 → tick past deadline → grace recommit.
+    clock.tick(300)
+    await service.advance(game.id)
+    assert sum(1 for c in llm.calls if c.name == "submit_llm_discussion_rounds") == 1
+
+
+# ----------------------------- DAY_RUNOFF_SPEECH branching
+async def test_advance_runoff_speech_dispatched_when_tied_includes_llm(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """DAY_VOTE tie with at least one LLM tied candidate → DAY_RUNOFF_SPEECH +
+    submit_llm_runoff_candidate_speeches dispatch."""
+    from wolfbot.domain.state_machine import RUNOFF_SPEECH_DEADLINE
+
+    service, disc, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # → NIGHT_0
+    await service.advance(game.id)  # → DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    # Build a 4-4 tie between seats 6 and 7. seat 6 is LLM (per _nine_seats),
+    # so DAY_RUNOFF_SPEECH must be entered. Voter 7 abstains so seat 7 isn't
+    # casting a self-vote, and seat 6 also can't vote for itself.
+    for v in (1, 2, 3, 4):
+        await service.submit_vote(game.id, v, target_seat=6, round_=0, day=1)
+    for v in (5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)  # all votes in → wakes & advances
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_RUNOFF_SPEECH
+    assert loaded.deadline_epoch == clock.now + RUNOFF_SPEECH_DEADLINE
+    # LLMAdapter was asked for runoff candidate speeches.
+    assert any(c.name == "submit_llm_runoff_candidate_speeches" for c in llm.calls)
+    # No round-1 vote DMs yet — those wait for DAY_RUNOFF.
+    runoff_dms = [c for c in disc.calls if c.name == "send_vote_dms" and c.kwargs["round_"] == 1]
+    assert runoff_dms == []
+
+
+async def test_advance_runoff_speech_to_runoff_after_speeches_done(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Once tied LLM candidates have runoff_speech_done, advance to DAY_RUNOFF."""
+    service, disc, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    for v in (1, 2, 3, 4):
+        await service.submit_vote(game.id, v, target_seat=6, round_=0, day=1)
+    for v in (5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)  # → DAY_RUNOFF_SPEECH
+    # Seed runoff_speech_done for tied LLM seats (6 and 7 — both are LLM in _nine_seats()).
+    await repo.mark_llm_runoff_speech_done(game.id, day=1, seat_no=6)
+    await repo.mark_llm_runoff_speech_done(game.id, day=1, seat_no=7)
+    await service.advance(game.id)  # → DAY_RUNOFF
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_RUNOFF
+    runoff_dms = [c for c in disc.calls if c.name == "send_vote_dms" and c.kwargs["round_"] == 1]
+    assert len(runoff_dms) == 1
+
+
+async def test_advance_runoff_skips_speech_when_tie_is_all_human(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Tie among only human seats → straight to DAY_RUNOFF, no DAY_RUNOFF_SPEECH."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    # Build a 4-4 tie between seats 1 and 2 (both human in _nine_seats).
+    for v in (3, 4, 5, 6):
+        await service.submit_vote(game.id, v, target_seat=1, round_=0, day=1)
+    for v in (7, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=2, round_=0, day=1)
+    await service.submit_vote(game.id, 1, target_seat=2, round_=0, day=1)
+    await service.submit_vote(game.id, 2, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_RUNOFF

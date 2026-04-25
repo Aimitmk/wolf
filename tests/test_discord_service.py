@@ -213,14 +213,13 @@ class _ChannelCapturingAdapter(DiscordBotAdapter):
 async def test_announce_waiting_censors_wolf_attack_names_on_main_channel(
     repo: SqliteRepo,
 ) -> None:
-    """Fix 3 regression: WOLF_ATTACK split seat names MUST NOT appear in the
-    main public channel; they must go to the wolves-only channel instead.
-
-    Background: the old code posted
-        `WOLF_ATTACK 再提出待ち(意見が割れました): Alice、Bob`
-    directly to the main text channel, revealing both wolves to villagers.
+    """WOLF_ATTACK pending must produce only the generic line in the main
+    channel — kind name, seat names, count, and "意見が割れました" wording all
+    withheld. The wolves channel also gets no auto-post (we resend DMs to the
+    affected wolves directly via resend_pending_dms instead).
     """
     from wolfbot.domain.models import PendingDecision, PendingSubmission
+    from wolfbot.services.discord_service import GENERIC_SECRET_PENDING_LINE
 
     game = Game(
         id="g-ann",
@@ -265,21 +264,18 @@ async def test_announce_waiting_censors_wolf_attack_names_on_main_channel(
     adapter = _ChannelCapturingAdapter(repo)
     await adapter.announce_waiting(game, pending, seats)
 
-    # Public channel got the count-only version.
+    # Public channel has only the generic line — no kind name, no count, no names.
     assert len(adapter.main_sent) == 1
     main_text = adapter.main_sent[0]
-    assert "2件" in main_text
+    assert GENERIC_SECRET_PENDING_LINE in main_text
+    assert "2件" not in main_text
     assert "Alice" not in main_text
     assert "Bob" not in main_text
-    # Public wording must not reveal it was a *split* vs a plain no-submit —
-    # "意見が割れました" implies ≥2 disagreeing wolves and leaks the count.
+    assert "WOLF_ATTACK" not in main_text
     assert "意見が割れました" not in main_text
-    assert "未確定" in main_text
 
-    # Wolves channel got the name-inclusive version (including split wording).
-    assert len(adapter.wolves_sent) == 1
-    wolves_text = adapter.wolves_sent[0]
-    assert "Alice" in wolves_text and "Bob" in wolves_text
+    # Wolves channel must NOT auto-receive split details — DMs handle the resend.
+    assert adapter.wolves_sent == []
 
 
 async def test_announce_waiting_vote_pending_retains_names(repo: SqliteRepo) -> None:

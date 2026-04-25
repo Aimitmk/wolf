@@ -145,6 +145,8 @@ DDL: list[str] = [
         normal_count INTEGER NOT NULL DEFAULT 0,
         vote_intent_done INTEGER NOT NULL DEFAULT 0,
         last_spoke_epoch INTEGER,
+        discussion_rounds_done INTEGER NOT NULL DEFAULT 0,
+        runoff_speech_done INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (game_id, day, seat_no)
     )
     """,
@@ -179,4 +181,16 @@ async def migrate(db_path: str | Path) -> None:
             cols = {row[1] async for row in cur}
         if "submissions_json" not in cols:
             await db.execute("ALTER TABLE pending_decisions ADD COLUMN submissions_json TEXT")
+        async with db.execute("PRAGMA table_info(llm_speech_counts)") as cur:
+            cols = {row[1] async for row in cur}
+        if "discussion_rounds_done" not in cols:
+            await db.execute(
+                "ALTER TABLE llm_speech_counts "
+                "ADD COLUMN discussion_rounds_done INTEGER NOT NULL DEFAULT 0"
+            )
+        if "runoff_speech_done" not in cols:
+            await db.execute(
+                "ALTER TABLE llm_speech_counts "
+                "ADD COLUMN runoff_speech_done INTEGER NOT NULL DEFAULT 0"
+            )
         await db.commit()

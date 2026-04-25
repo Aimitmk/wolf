@@ -351,3 +351,42 @@ async def test_llm_speech_count(repo: SqliteRepo, seats: list[Seat]) -> None:
     await repo.mark_llm_vote_intent(g.id, day=1, seat_no=6)
     _, vote_done, _ = await repo.load_llm_speech(g.id, day=1, seat_no=6)
     assert vote_done is True
+
+
+async def test_increment_llm_discussion_round_caps_at_two(
+    repo: SqliteRepo, seats: list[Seat]
+) -> None:
+    """SQL CASE WHEN cap defends against accidental triple-bumps."""
+    g = await _base_game(repo, seats)
+    await repo.increment_llm_discussion_round(g.id, day=1, seat_no=6)
+    progress = await repo.load_llm_speech_progress(g.id, day=1, seat_no=6)
+    assert progress[3] == 1  # discussion_rounds_done
+    await repo.increment_llm_discussion_round(g.id, day=1, seat_no=6)
+    progress = await repo.load_llm_speech_progress(g.id, day=1, seat_no=6)
+    assert progress[3] == 2
+    # Third call must NOT push past 2.
+    await repo.increment_llm_discussion_round(g.id, day=1, seat_no=6)
+    progress = await repo.load_llm_speech_progress(g.id, day=1, seat_no=6)
+    assert progress[3] == 2
+
+
+async def test_mark_llm_runoff_speech_done(repo: SqliteRepo, seats: list[Seat]) -> None:
+    """Runoff speech mark is a 0/1 idempotent UPSERT."""
+    g = await _base_game(repo, seats)
+    progress = await repo.load_llm_speech_progress(g.id, day=1, seat_no=6)
+    assert progress[4] is False
+    await repo.mark_llm_runoff_speech_done(g.id, day=1, seat_no=6)
+    progress = await repo.load_llm_speech_progress(g.id, day=1, seat_no=6)
+    assert progress[4] is True
+    # Idempotent: second call does not error.
+    await repo.mark_llm_runoff_speech_done(g.id, day=1, seat_no=6)
+    progress = await repo.load_llm_speech_progress(g.id, day=1, seat_no=6)
+    assert progress[4] is True
+
+
+async def test_load_llm_speech_progress_default_when_missing(
+    repo: SqliteRepo, seats: list[Seat]
+) -> None:
+    g = await _base_game(repo, seats)
+    progress = await repo.load_llm_speech_progress(g.id, day=2, seat_no=9)
+    assert progress == (0, False, None, 0, False)

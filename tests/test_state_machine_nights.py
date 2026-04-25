@@ -629,3 +629,138 @@ def test_llm_shortfall_padding_count() -> None:
         picks = pick_personas(9 - n, rng)
         assert len(picks) == 9 - n
         assert len({p.key for p in picks}) == 9 - n
+
+
+# ---------------------------------------------- human-wolf attack priority
+def _seats_with_llm(llm_seat_nos: set[int]) -> list[Seat]:
+    return [
+        Seat(
+            seat_no=i,
+            display_name=f"P{i}",
+            discord_user_id=None if i in llm_seat_nos else f"u{i}",
+            is_llm=i in llm_seat_nos,
+            persona_key="setsu" if i in llm_seat_nos else None,
+        )
+        for i in range(1, 10)
+    ]
+
+
+def test_human_wolf_priority_overrides_split_when_one_human_one_llm() -> None:
+    """Human wolf 1 + LLM wolf 2 disagree → human's pick (5) wins, no split."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats_with_llm(llm_seat_nos={2})
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 5),  # human picks 5
+        _act(2, SubmissionType.WOLF_ATTACK, 7),  # LLM picks 7
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    assert t.next_phase is not Phase.WAITING_HOST_DECISION
+    assert t.newly_dead_seats == (5,)
+
+
+def test_human_wolf_priority_works_when_human_is_seat2() -> None:
+    """Symmetric: LLM wolf 1 + human wolf 2 disagree → human (seat 2) target wins."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats_with_llm(llm_seat_nos={1})
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 5),  # LLM picks 5
+        _act(2, SubmissionType.WOLF_ATTACK, 7),  # human picks 7
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    assert t.next_phase is not Phase.WAITING_HOST_DECISION
+    assert t.newly_dead_seats == (7,)
+
+
+def test_split_still_pauses_when_both_wolves_human() -> None:
+    """No human-wolf priority when both are human."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats_with_llm(llm_seat_nos=set())
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 5),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    assert t.next_phase is Phase.WAITING_HOST_DECISION
+
+
+def test_split_still_pauses_when_both_wolves_llm() -> None:
+    """No human-wolf priority when both are LLMs — fall through to split."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats_with_llm(llm_seat_nos={1, 2})
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 5),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    assert t.next_phase is Phase.WAITING_HOST_DECISION
+
+
+def test_human_wolf_missing_does_not_get_priority() -> None:
+    """Human wolf missing + LLM wolf submitted → priority does NOT apply."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats_with_llm(llm_seat_nos={2})
+    actions = [
+        # Human wolf (seat 1) missing.
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    assert t.next_phase is Phase.WAITING_HOST_DECISION
+    assert t.pending is not None
+    assert 1 in t.pending.missing_seats
+    # Faction is unchanged in this branch.
+    assert Faction is Faction  # silence unused import; Faction stays imported

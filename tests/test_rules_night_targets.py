@@ -173,6 +173,56 @@ def test_wolf_attack_no_alive_wolves() -> None:
     assert not r.split
 
 
+# ---------------------------------- human-wolf priority on 1H + 1L disagreement
+def test_resolve_wolf_attack_human_priority_picks_human_target() -> None:
+    """Two wolves disagree; one is human (per human_wolf_seats). Human wins."""
+    actions = [_attack(1, 5), _attack(2, 6)]
+    r = resolve_wolf_attack(
+        actions, alive_wolf_seats=[1, 2], force_skip=False, human_wolf_seats=[1]
+    )
+    assert r.target_seat == 5
+    assert r.split is False
+
+
+def test_resolve_wolf_attack_human_priority_works_for_seat2() -> None:
+    """Symmetric: when seat 2 is the human, seat 2's pick wins."""
+    actions = [_attack(1, 5), _attack(2, 6)]
+    r = resolve_wolf_attack(
+        actions, alive_wolf_seats=[1, 2], force_skip=False, human_wolf_seats=[2]
+    )
+    assert r.target_seat == 6
+    assert r.split is False
+
+
+def test_resolve_wolf_attack_no_priority_when_both_human() -> None:
+    """Both wolves are human → no priority, classic split."""
+    actions = [_attack(1, 5), _attack(2, 6)]
+    r = resolve_wolf_attack(
+        actions, alive_wolf_seats=[1, 2], force_skip=False, human_wolf_seats=[1, 2]
+    )
+    assert r.target_seat is None
+    assert r.split is True
+
+
+def test_resolve_wolf_attack_no_priority_when_both_llm() -> None:
+    """Both wolves are LLMs (empty human_wolf_seats) → no priority, classic split."""
+    actions = [_attack(1, 5), _attack(2, 6)]
+    r = resolve_wolf_attack(actions, alive_wolf_seats=[1, 2], force_skip=False, human_wolf_seats=[])
+    assert r.target_seat is None
+    assert r.split is True
+
+
+def test_resolve_wolf_attack_human_missing_does_not_invoke_priority() -> None:
+    """Human wolf didn't submit, LLM wolf did. Missing-tuple wins; no priority."""
+    actions = [_attack(2, 6)]  # only the LLM submitted
+    r = resolve_wolf_attack(
+        actions, alive_wolf_seats=[1, 2], force_skip=False, human_wolf_seats=[1]
+    )
+    assert r.missing == (1,)
+    assert r.target_seat is None
+    assert r.split is False
+
+
 def test_random_white_raises_when_pool_empty() -> None:
     # All non-seer non-wolves are dead (contrived case)
     players = _players()

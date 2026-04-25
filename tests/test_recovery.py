@@ -598,6 +598,187 @@ async def test_pending_decision_backward_compat_synthesizes_submissions() -> Non
     assert synth[0].missing_seats == (3, 5)
 
 
+async def test_recovery_resumes_unfinished_discussion_rounds(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """DAY_DISCUSSION recovery dispatches submit_llm_discussion_rounds when any
+    LLM seat has discussion_rounds_done < 2."""
+    rec, _, _, _, clock = rec_bundle
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=clock.now + 200,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    # 5 humans + 4 LLMs.
+    for i in range(1, 10):
+        is_llm = i >= 6
+        await repo.insert_seat(
+            game.id,
+            Seat(
+                seat_no=i,
+                display_name=f"P{i}",
+                discord_user_id=None if is_llm else f"u{i}",
+                is_llm=is_llm,
+                persona_key="setsu" if is_llm else None,
+            ),
+        )
+    for p in await repo.load_players(game.id):
+        await repo.set_player_role(game.id, p.seat_no, Role.VILLAGER)
+    # Seat 6 already finished both rounds; seat 7 partial; 8/9 untouched.
+    await repo.increment_llm_discussion_round(game.id, day=1, seat_no=6)
+    await repo.increment_llm_discussion_round(game.id, day=1, seat_no=6)
+    await repo.increment_llm_discussion_round(game.id, day=1, seat_no=7)
+
+    rec.discord = rec.discord  # silence unused
+    fake_llm = rec.game_service.llm  # the FakeLLMAdapter from the bundle
+    await rec.recover_all()
+    calls = [c for c in fake_llm.calls if c.name == "submit_llm_discussion_rounds"]
+    assert len(calls) == 1
+    # All 4 alive LLM seats are in the players list (the dispatcher's per-seat
+    # rounds_done check will skip seat 6 internally — that's the contract).
+    assert sorted(calls[0].kwargs["players"]) == [6, 7, 8, 9]
+
+
+async def test_recovery_skips_dispatch_when_all_llms_done(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    rec, _, _, _, clock = rec_bundle
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=clock.now + 200,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    for i in range(1, 10):
+        is_llm = i >= 6
+        await repo.insert_seat(
+            game.id,
+            Seat(
+                seat_no=i,
+                display_name=f"P{i}",
+                discord_user_id=None if is_llm else f"u{i}",
+                is_llm=is_llm,
+                persona_key="setsu" if is_llm else None,
+            ),
+        )
+    for p in await repo.load_players(game.id):
+        await repo.set_player_role(game.id, p.seat_no, Role.VILLAGER)
+    for sn in (6, 7, 8, 9):
+        await repo.increment_llm_discussion_round(game.id, day=1, seat_no=sn)
+        await repo.increment_llm_discussion_round(game.id, day=1, seat_no=sn)
+
+    fake_llm = rec.game_service.llm
+    await rec.recover_all()
+    assert not any(c.name == "submit_llm_discussion_rounds" for c in fake_llm.calls)
+
+
+async def test_recovery_resumes_unfinished_runoff_speech(
+    repo: SqliteRepo,
+    rec_bundle: tuple[RecoveryService, GameService, FakeDiscordAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """DAY_RUNOFF_SPEECH recovery dispatches submit_llm_runoff_candidate_speeches
+    for tied LLM seats whose runoff_speech_done is False."""
+    from wolfbot.domain.models import Vote
+
+    rec, _, _, _, clock = rec_bundle
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=clock.now + 60,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="ch-h",
+        wolves_channel_id="ch-w",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    for i in range(1, 10):
+        is_llm = i >= 6
+        await repo.insert_seat(
+            game.id,
+            Seat(
+                seat_no=i,
+                display_name=f"P{i}",
+                discord_user_id=None if is_llm else f"u{i}",
+                is_llm=is_llm,
+                persona_key="setsu" if is_llm else None,
+            ),
+        )
+    for p in await repo.load_players(game.id):
+        await repo.set_player_role(game.id, p.seat_no, Role.VILLAGER)
+    # Build a 4-4 tie between seats 1 (human) and 6 (LLM) on round 0.
+    for v in (2, 3, 4, 5):
+        await repo.insert_vote(
+            Vote(
+                game_id=game.id,
+                day=1,
+                round=0,
+                voter_seat=v,
+                target_seat=1,
+                submitted_at=clock.now - 60,
+            )
+        )
+    for v in (7, 8, 9):
+        await repo.insert_vote(
+            Vote(
+                game_id=game.id,
+                day=1,
+                round=0,
+                voter_seat=v,
+                target_seat=6,
+                submitted_at=clock.now - 60,
+            )
+        )
+    await repo.insert_vote(
+        Vote(
+            game_id=game.id,
+            day=1,
+            round=0,
+            voter_seat=1,
+            target_seat=6,
+            submitted_at=clock.now - 60,
+        )
+    )
+    await repo.insert_vote(
+        Vote(
+            game_id=game.id,
+            day=1,
+            round=0,
+            voter_seat=6,
+            target_seat=None,
+            submitted_at=clock.now - 60,
+        )
+    )
+
+    fake_llm = rec.game_service.llm
+    await rec.recover_all()
+    calls = [c for c in fake_llm.calls if c.name == "submit_llm_runoff_candidate_speeches"]
+    assert len(calls) == 1
+    assert sorted(calls[0].kwargs["tied_candidates"]) == [1, 6]
+
+
 async def test_engine_registry_attach_stops_existing(
     repo: SqliteRepo,
 ) -> None:

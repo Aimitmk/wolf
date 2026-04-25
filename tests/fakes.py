@@ -170,13 +170,31 @@ class FakeLLMAdapter:
             )
         )
 
-    async def submit_llm_daystart_speeches(
+    async def submit_llm_discussion_rounds(
         self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
     ) -> None:
         self.calls.append(
             Recorded(
-                "submit_llm_daystart_speeches",
+                "submit_llm_discussion_rounds",
                 {"game_id": game.id, "players": [p.seat_no for p in players]},
+            )
+        )
+
+    async def submit_llm_runoff_candidate_speeches(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        tied_candidates: Sequence[int],
+    ) -> None:
+        self.calls.append(
+            Recorded(
+                "submit_llm_runoff_candidate_speeches",
+                {
+                    "game_id": game.id,
+                    "players": [p.seat_no for p in players],
+                    "tied_candidates": list(tied_candidates),
+                },
             )
         )
 

@@ -140,6 +140,7 @@ def resolve_wolf_attack(
     actions: Sequence[NightAction],
     alive_wolf_seats: Sequence[int],
     force_skip: bool,
+    human_wolf_seats: Sequence[int] = (),
 ) -> AttackResult:
     """Determine the night's attack target per spec.
 
@@ -149,6 +150,9 @@ def resolve_wolf_attack(
       caller can pause into WAITING_HOST_DECISION without committing a target.
     - The `missing` tuple is always reported (even with force_skip) so logs can name
       who didn't submit.
+    - When 2 wolves disagree, both submitted, and exactly one of them is a human
+      seat (per `human_wolf_seats`), the human's target wins (no split). All other
+      split shapes (both human, both LLM) keep the existing split=True behaviour.
     """
     alive = list(alive_wolf_seats)
     if not alive:
@@ -169,6 +173,15 @@ def resolve_wolf_attack(
     targets = [picks.get(w) for w in alive]
     if targets[0] is not None and targets[0] == targets[1]:
         return AttackResult(target_seat=targets[0], missing=missing)
+    # Targets differ. Check human-wolf priority: only when exactly 2 alive wolves,
+    # neither is missing, and exactly one of them is human.
+    if len(alive) == 2 and not missing:
+        humans_alive = {s for s in human_wolf_seats if s in alive}
+        if len(humans_alive) == 1:
+            human_seat = next(iter(humans_alive))
+            human_target = picks.get(human_seat)
+            if human_target is not None:
+                return AttackResult(target_seat=human_target, missing=missing)
     return AttackResult(split=True, missing=missing)
 
 

@@ -710,6 +710,72 @@ class SqliteRepo:
             row["last_spoke_epoch"],
         )
 
+    async def increment_llm_discussion_round(self, game_id: str, day: int, seat_no: int) -> None:
+        """Bump `discussion_rounds_done`, capped at 2 in SQL.
+
+        Called by the DAY_DISCUSSION LLM round runner in `finally`, so progress
+        advances regardless of decider success / skip / exception. The CAP via
+        `CASE WHEN` is defence-in-depth — the caller already skips seats whose
+        rounds_done is at the target round, so this should never push past 2.
+        """
+        async with self._tx() as db:
+            await db.execute(
+                """
+                INSERT INTO llm_speech_counts
+                    (game_id, day, seat_no, discussion_rounds_done)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(game_id, day, seat_no) DO UPDATE SET
+                    discussion_rounds_done =
+                        CASE WHEN discussion_rounds_done < 2
+                             THEN discussion_rounds_done + 1
+                             ELSE discussion_rounds_done END
+                """,
+                (game_id, day, seat_no),
+            )
+
+    async def mark_llm_runoff_speech_done(self, game_id: str, day: int, seat_no: int) -> None:
+        """Set `runoff_speech_done = 1` (idempotent UPSERT)."""
+        async with self._tx() as db:
+            await db.execute(
+                """
+                INSERT INTO llm_speech_counts (game_id, day, seat_no, runoff_speech_done)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(game_id, day, seat_no) DO UPDATE SET
+                    runoff_speech_done = 1
+                """,
+                (game_id, day, seat_no),
+            )
+
+    async def load_llm_speech_progress(
+        self, game_id: str, day: int, seat_no: int
+    ) -> tuple[int, bool, int | None, int, bool]:
+        """Return all 5 progress fields for the given seat/day.
+
+        Tuple: `(normal_count, vote_intent_done, last_spoke_epoch,
+        discussion_rounds_done, runoff_speech_done)`. Default for missing row:
+        `(0, False, None, 0, False)`. Used by `_plan_next` to decide whether
+        DAY_DISCUSSION / DAY_RUNOFF_SPEECH can advance.
+        """
+        async with self._db.execute(
+            """
+            SELECT normal_count, vote_intent_done, last_spoke_epoch,
+                   discussion_rounds_done, runoff_speech_done
+              FROM llm_speech_counts
+             WHERE game_id=? AND day=? AND seat_no=?
+            """,
+            (game_id, day, seat_no),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return (0, False, None, 0, False)
+        return (
+            int(row["normal_count"]),
+            bool(row["vote_intent_done"]),
+            row["last_spoke_epoch"],
+            int(row["discussion_rounds_done"]),
+            bool(row["runoff_speech_done"]),
+        )
+
     # ------------------------------------------------------------- apply transition
     async def apply_transition(
         self,

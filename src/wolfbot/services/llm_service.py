@@ -50,6 +50,11 @@ if TYPE_CHECKING:  # avoid importing heavy modules unless needed
     from wolfbot.persistence.sqlite_repo import SqliteRepo
     from wolfbot.services.game_service import GameService
 
+# Sleep ranges between consecutive LLM speeches inside DAY_DISCUSSION rounds.
+# Sequential per round so each LLM reads the previous one's contribution.
+DISCUSSION_INTRA_ROUND_DELAY: tuple[float, float] = (3.0, 10.0)
+DISCUSSION_INTER_ROUND_DELAY: tuple[float, float] = (5.0, 15.0)
+
 
 class MessagePoster(Protocol):
     """Subset of DiscordBotAdapter's public-post API; decoupled for testing."""
@@ -178,10 +183,6 @@ class LLMAdapter:
     `submit_*` with target_seat=None (abstain / no-action).
     """
 
-    NORMAL_SPEECH_CAP = 3
-    COOLDOWN_SECONDS = 20
-    REACTION_KEYWORDS = ("CO", "占い", "霊媒", "白", "黒", "疑", "カミングアウト")
-
     def __init__(
         self,
         repo: SqliteRepo,
@@ -200,10 +201,6 @@ class LLMAdapter:
         self.rng = rng or random.Random()
         self._clock: Callable[[], int] = clock or (lambda: int(_time.time()))
         self._background_tasks: set[asyncio.Task[None]] = set()
-        # Per-seat speech lock. Serializes read→check→write for daily cap and
-        # cooldown so concurrent triggers (multiple reactive calls, or a
-        # daystart racing with a reactive) can't both post past the cap.
-        self._speech_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
     def set_game_service(self, gs: GameService) -> None:
         self._gs_slot["gs"] = gs
@@ -545,12 +542,17 @@ class LLMAdapter:
         await asyncio.gather(*(_one_vote(v) for v in llm_voters))
 
     # --------------------------------------------------- daytime speeches
-    async def submit_llm_daystart_speeches(
+    async def submit_llm_discussion_rounds(
         self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
     ) -> None:
-        """Schedule each alive LLM's first speech of the day, sequentially with jitter.
+        """Schedule a background task that has each alive LLM speak twice.
 
-        Fire-and-forget — the caller (game_service.advance) doesn't wait.
+        Fire-and-forget. Each LLM speaks once in round 1 and once in round 2,
+        in seat-no order, with jitter between speeches. Per-seat progress is
+        persisted in `llm_speech_counts.discussion_rounds_done` regardless of
+        decider success / skip / exception, so a single failure can't freeze
+        the phase. After both rounds finish for all seats, the engine is woken
+        so `_plan_next` can advance to DAY_VOTE.
         """
         seats_by_no = {s.seat_no: s for s in seats}
         llm_players = [
@@ -561,166 +563,275 @@ class LLMAdapter:
         if not llm_players:
             return
         task = asyncio.create_task(
-            self._run_daystart(game, llm_players, seats),
-            name=f"llm-daystart-{game.id}-{game.day_number}",
+            self._run_discussion_rounds(game, llm_players, seats),
+            name=f"llm-discussion-{game.id}-d{game.day_number}",
         )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _run_daystart(
+    async def _run_discussion_rounds(
         self,
         game: Game,
         llm_players: Sequence[Player],
         seats: Sequence[Seat],
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
-        for llm in llm_players:
-            # Re-read the live phase before each speech. The loop sleeps up to
-            # 10s between LLM turns; by the time we get here the game may have
-            # moved on (discussion ended, recovery swapped phases, etc.) and
-            # posting a "daystart" line would be noise.
-            fresh = await self.repo.load_game(game.id)
-            if (
-                fresh is None
-                or fresh.phase is not Phase.DAY_DISCUSSION
-                or fresh.day_number != game.day_number
-            ):
-                return
-            seat = seats_by_no.get(llm.seat_no)
-            if seat is None:
-                continue
-            await self._maybe_speak(fresh, llm, seat, seats)
-            try:
-                await asyncio.sleep(self.rng.uniform(3, 10))
-            except asyncio.CancelledError:
-                return
+        ordered = sorted(llm_players, key=lambda p: p.seat_no)
+        for round_idx in (1, 2):
+            for llm in ordered:
+                # Re-read live game state before each per-seat attempt so a
+                # mid-round phase advance (force-skip / abort / victory) safely
+                # short-circuits remaining work.
+                fresh = await self.repo.load_game(game.id)
+                if (
+                    fresh is None
+                    or fresh.ended_at is not None
+                    or fresh.phase is not Phase.DAY_DISCUSSION
+                    or fresh.day_number != game.day_number
+                ):
+                    return
+                seat = seats_by_no.get(llm.seat_no)
+                if seat is None or not seat.is_llm:
+                    # Defensive: not really an LLM seat. Skip without bumping
+                    # progress (won't enter the gate anyway).
+                    continue
+                if seat.persona_key is None:
+                    # Misconfigured LLM seat — bump progress so the phase is
+                    # not frozen forever waiting on a seat that can't speak.
+                    await self.repo.increment_llm_discussion_round(
+                        game.id, game.day_number, llm.seat_no
+                    )
+                    continue
+                progress = await self.repo.load_llm_speech_progress(
+                    game.id, game.day_number, llm.seat_no
+                )
+                if progress[3] >= round_idx:
+                    # This seat already has this round done (recovery
+                    # re-dispatch overlap). Skip without bumping.
+                    continue
+                try:
+                    await self._do_one_discussion_speech(
+                        game=fresh, player=llm, seat=seat, seats=seats
+                    )
+                except Exception:
+                    log.exception(
+                        "discussion speech failed game=%s seat=%s round=%d",
+                        game.id,
+                        llm.seat_no,
+                        round_idx,
+                    )
+                finally:
+                    # Always advance progress: success / skip / exception alike.
+                    # Otherwise a single broken seat would freeze DAY_DISCUSSION
+                    # forever in `_plan_next`.
+                    await self.repo.increment_llm_discussion_round(
+                        game.id, game.day_number, llm.seat_no
+                    )
+                try:
+                    await asyncio.sleep(self.rng.uniform(*DISCUSSION_INTRA_ROUND_DELAY))
+                except asyncio.CancelledError:
+                    return
+            if round_idx == 1:
+                try:
+                    await asyncio.sleep(self.rng.uniform(*DISCUSSION_INTER_ROUND_DELAY))
+                except asyncio.CancelledError:
+                    return
+        # Wake the engine so `_plan_next` re-checks and advances to DAY_VOTE.
+        try:
+            gs = self._gs_slot.get("gs")
+            if gs is not None:
+                gs.wake.wake(game.id)
+        except Exception:
+            log.exception("wake after discussion rounds failed for %s", game.id)
 
-    async def maybe_react_to_message(
+    async def _do_one_discussion_speech(
         self,
-        game: Game,
-        players: Sequence[Player],
-        seats: Sequence[Seat],
-        author_seat: int | None,
-        text: str,
-    ) -> None:
-        """Called on every main-text human message. Alive LLMs may react."""
-        if game.phase is not Phase.DAY_DISCUSSION:
-            return
-        seats_by_no = {s.seat_no: s for s in seats}
-        for llm in players:
-            if not llm.alive:
-                continue
-            seat = seats_by_no.get(llm.seat_no)
-            if seat is None or not seat.is_llm:
-                continue
-            if author_seat == llm.seat_no:
-                continue
-            if not self._is_triggered(seat, text):
-                continue
-            # Check cap + cooldown before even calling the LLM
-            count, _, last = await self.repo.load_llm_speech(game.id, game.day_number, llm.seat_no)
-            now = self._clock()
-            if count >= self.NORMAL_SPEECH_CAP:
-                continue
-            if last is not None and now - last < self.COOLDOWN_SECONDS:
-                continue
-            await self._maybe_speak(game, llm, seat, seats)
-
-    def _is_triggered(self, seat: Seat, text: str) -> bool:
-        if seat.display_name and seat.display_name in text:
-            return True
-        if seat.persona_key and seat.persona_key.lower() in text.lower():
-            return True
-        return any(kw in text for kw in self.REACTION_KEYWORDS)
-
-    def _speech_lock(self, game_id: str, seat_no: int) -> asyncio.Lock:
-        key = (game_id, seat_no)
-        lock = self._speech_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._speech_locks[key] = lock
-        return lock
-
-    async def _maybe_speak(
-        self,
+        *,
         game: Game,
         player: Player,
         seat: Seat,
         seats: Sequence[Seat],
     ) -> None:
-        """Ask the LLM; if intent=speak, post to main and increment the count.
+        players = await self.repo.load_players(game.id)
+        action = await self._ask(
+            game,
+            player,
+            seat,
+            players,
+            seats,
+            task_text=task_daytime_speech(game.day_number),
+        )
+        if action.intent != "speak":
+            return
+        message = action.public_message.strip()
+        if not message:
+            return
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.phase is not Phase.DAY_DISCUSSION
+            or fresh.day_number != game.day_number
+        ):
+            return
+        if self.message_poster is None:
+            return
+        try:
+            await self.message_poster.post_public(
+                fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
+            )
+        except Exception:
+            log.exception("post_public for LLM discussion speech failed seat=%s", player.seat_no)
+            return
+        posted_at = self._clock()
+        try:
+            await self.repo.insert_log_public(
+                LogEntry(
+                    game_id=fresh.id,
+                    day=fresh.day_number,
+                    phase=fresh.phase,
+                    kind="PLAYER_SPEECH",
+                    actor_seat=player.seat_no,
+                    visibility="PUBLIC",
+                    text=message,
+                    created_at=posted_at,
+                )
+            )
+        except Exception:
+            log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
 
-        The entire read(cap/cooldown) → LLM call → post → increment pipeline is
-        serialized per (game, seat) so two concurrent triggers can't both pass
-        the cap check and double-post.
+    # --------------------------------------------------- runoff candidate speech
+    async def submit_llm_runoff_candidate_speeches(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        tied_candidates: Sequence[int],
+    ) -> None:
+        """Schedule a background task that has each tied LLM candidate speak once.
+
+        Only candidates in `tied_candidates` whose seat is an LLM are scheduled;
+        non-tied LLMs and human candidates are silent here. Per-seat progress
+        marks `runoff_speech_done=1` in `finally` so the engine can advance to
+        DAY_RUNOFF even if a single decider call fails.
         """
-        async with self._speech_lock(game.id, player.seat_no):
-            count, _, last = await self.repo.load_llm_speech(
-                game.id, game.day_number, player.seat_no
-            )
-            if count >= self.NORMAL_SPEECH_CAP:
-                return
-            now = self._clock()
-            if last is not None and now - last < self.COOLDOWN_SECONDS:
-                return
-            players = await self.repo.load_players(game.id)
-            action = await self._ask(
-                game,
-                player,
-                seat,
-                players,
-                seats,
-                task_text=task_daytime_speech(game.day_number),
-            )
-            if action.intent != "speak":
-                return
-            message = action.public_message.strip()
-            if not message:
-                return
-            # Belt-and-suspenders: the LLM call itself can take seconds. Re-check
-            # phase right before posting so we don't dump a stale speech into a
-            # channel that has already moved on to voting or night.
+        seats_by_no = {s.seat_no: s for s in seats}
+        candidate_set = set(tied_candidates)
+        candidate_llm_players = [
+            p
+            for p in players
+            if p.alive
+            and p.seat_no in candidate_set
+            and seats_by_no.get(p.seat_no) is not None
+            and seats_by_no[p.seat_no].is_llm
+        ]
+        if not candidate_llm_players:
+            return
+        task = asyncio.create_task(
+            self._run_runoff_candidate_speeches(game, candidate_llm_players, seats),
+            name=f"llm-runoff-speech-{game.id}-d{game.day_number}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_runoff_candidate_speeches(
+        self,
+        game: Game,
+        llm_players: Sequence[Player],
+        seats: Sequence[Seat],
+    ) -> None:
+        seats_by_no = {s.seat_no: s for s in seats}
+        ordered = sorted(llm_players, key=lambda p: p.seat_no)
+        for llm in ordered:
             fresh = await self.repo.load_game(game.id)
             if (
                 fresh is None
-                or fresh.phase is not Phase.DAY_DISCUSSION
+                or fresh.ended_at is not None
+                or fresh.phase is not Phase.DAY_RUNOFF_SPEECH
                 or fresh.day_number != game.day_number
             ):
                 return
-            posted = False
-            if self.message_poster is not None:
-                try:
-                    await self.message_poster.post_public(
-                        fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
-                    )
-                    posted = True
-                except Exception:
-                    log.exception("post_public for LLM speech failed")
-            if posted:
-                # Use the post-completion time as both the log timestamp and
-                # the cooldown anchor. A slow xAI round-trip would otherwise
-                # leave last_spoke_epoch pointing at the pre-inference now,
-                # letting the cooldown window expire earlier than the actual
-                # post time and enabling unintended back-to-back speeches.
-                posted_at = self._clock()
-                try:
-                    await self.repo.insert_log_public(
-                        LogEntry(
-                            game_id=fresh.id,
-                            day=fresh.day_number,
-                            phase=fresh.phase,
-                            kind="PLAYER_SPEECH",
-                            actor_seat=player.seat_no,
-                            visibility="PUBLIC",
-                            text=message,
-                            created_at=posted_at,
-                        )
-                    )
-                except Exception:
-                    log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
-                await self.repo.increment_llm_normal_speech(
-                    game.id, game.day_number, player.seat_no, posted_at
+            seat = seats_by_no.get(llm.seat_no)
+            if seat is None or not seat.is_llm:
+                continue
+            if seat.persona_key is None:
+                await self.repo.mark_llm_runoff_speech_done(game.id, game.day_number, llm.seat_no)
+                continue
+            progress = await self.repo.load_llm_speech_progress(
+                game.id, game.day_number, llm.seat_no
+            )
+            if progress[4]:
+                continue  # already done — recovery overlap
+            try:
+                await self._do_one_runoff_speech(game=fresh, player=llm, seat=seat, seats=seats)
+            except Exception:
+                log.exception(
+                    "runoff candidate speech failed game=%s seat=%s",
+                    game.id,
+                    llm.seat_no,
                 )
+            finally:
+                await self.repo.mark_llm_runoff_speech_done(game.id, game.day_number, llm.seat_no)
+        try:
+            gs = self._gs_slot.get("gs")
+            if gs is not None:
+                gs.wake.wake(game.id)
+        except Exception:
+            log.exception("wake after runoff speeches failed for %s", game.id)
+
+    async def _do_one_runoff_speech(
+        self,
+        *,
+        game: Game,
+        player: Player,
+        seat: Seat,
+        seats: Sequence[Seat],
+    ) -> None:
+        players = await self.repo.load_players(game.id)
+        action = await self._ask(
+            game,
+            player,
+            seat,
+            players,
+            seats,
+            task_text=task_daytime_speech(game.day_number),
+        )
+        if action.intent != "speak":
+            return
+        message = action.public_message.strip()
+        if not message:
+            return
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.phase is not Phase.DAY_RUNOFF_SPEECH
+            or fresh.day_number != game.day_number
+        ):
+            return
+        if self.message_poster is None:
+            return
+        try:
+            await self.message_poster.post_public(
+                fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
+            )
+        except Exception:
+            log.exception("post_public for LLM runoff speech failed seat=%s", player.seat_no)
+            return
+        posted_at = self._clock()
+        try:
+            await self.repo.insert_log_public(
+                LogEntry(
+                    game_id=fresh.id,
+                    day=fresh.day_number,
+                    phase=fresh.phase,
+                    kind="PLAYER_SPEECH",
+                    actor_seat=player.seat_no,
+                    visibility="PUBLIC",
+                    text=message,
+                    created_at=posted_at,
+                )
+            )
+        except Exception:
+            log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
 
     # ------------------------------------------------------ helpers
     async def _ask(

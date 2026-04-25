@@ -10,7 +10,7 @@ pollute every later LLM's public-log context via build_user_context().
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Game, PlayerUpdate, Seat, Transition
@@ -64,14 +64,12 @@ def _build_cog(repo: SqliteRepo) -> WolfCog:
     settings = MagicMock()
     settings.MAIN_TEXT_CHANNEL_ID = 100
     settings.MAIN_VOICE_CHANNEL_ID = 200
-    llm_adapter = MagicMock()
-    llm_adapter.maybe_react_to_message = AsyncMock()
     return WolfCog(
         bot=MagicMock(),
         repo=repo,
         game_service=MagicMock(),
         discord_adapter=MagicMock(),
-        llm_adapter=llm_adapter,
+        llm_adapter=MagicMock(),
         registry=MagicMock(),
         settings=settings,
     )
@@ -101,7 +99,6 @@ async def test_dead_player_main_post_does_not_insert_public_log(repo: SqliteRepo
     assert not [log for log in logs if log.get("kind") == "PLAYER_SPEECH"], (
         "dead player's DAY_DISCUSSION post leaked into logs_public"
     )
-    cog.llm_adapter.maybe_react_to_message.assert_not_awaited()
 
 
 async def test_alive_player_main_post_still_inserts_public_log(repo: SqliteRepo) -> None:
@@ -118,7 +115,6 @@ async def test_alive_player_main_post_still_inserts_public_log(repo: SqliteRepo)
     speeches = [log for log in logs if log.get("kind") == "PLAYER_SPEECH"]
     assert len(speeches) == 1
     assert speeches[0].get("actor_seat") == 1
-    cog.llm_adapter.maybe_react_to_message.assert_awaited_once()
 
 
 async def test_non_participant_main_post_does_not_insert_public_log(repo: SqliteRepo) -> None:
@@ -133,4 +129,3 @@ async def test_non_participant_main_post_does_not_insert_public_log(repo: Sqlite
 
     logs = await repo.load_public_logs(game.id, limit=100)
     assert not [log for log in logs if log.get("kind") == "PLAYER_SPEECH"]
-    cog.llm_adapter.maybe_react_to_message.assert_not_awaited()

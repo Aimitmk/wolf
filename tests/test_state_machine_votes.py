@@ -7,6 +7,7 @@ from wolfbot.domain.models import Game, Player, Seat, Vote
 from wolfbot.domain.state_machine import (
     NIGHT_DURATION,
     RUNOFF_DURATION,
+    RUNOFF_SPEECH_DEADLINE,
     plan_day_runoff_resolve,
     plan_day_vote_resolve,
 )
@@ -257,8 +258,8 @@ def test_execution_victory_emits_role_reveal_after_victory() -> None:
 
 
 # ---------------------------------------------------------------- vote tally
-def test_execution_log_includes_grouped_vote_tally() -> None:
-    """EXECUTION text appends 🗳 投票結果 block grouped by target, sorted by count."""
+def test_execution_log_includes_voter_keyed_vote_results() -> None:
+    """EXECUTION text appends 🗳 投票結果 block keyed by voter seat asc."""
     game = _game(day=1)
     players = _players(STANDARD_ROLES)
     seats = _seats()
@@ -278,13 +279,23 @@ def test_execution_log_includes_grouped_vote_tally() -> None:
     text = exec_log.text
     assert "P7 が処刑されました。" in text
     assert "🗳 投票結果:" in text
-    # Sort rule: primary key = -count, secondary = target_seat_no (棄権 → +inf).
-    # So within count=2, P8 precedes 棄権; overall: P7(4) → P8(2) → 棄権(2) → P9(1).
-    p7_idx = text.index("・P7 (4票): P1、P2、P3、P4")
-    p8_idx = text.index("・P8 (2票): P5、P6")
-    abstain_idx = text.index("・棄権 (2票): P8、P9")
-    p9_idx = text.index("・P9 (1票): P7")
-    assert p7_idx < p8_idx < abstain_idx < p9_idx
+    # Voter-keyed format: one line per voter, sorted by voter seat_no asc.
+    expected_lines = [
+        "・P1 -> P7",
+        "・P2 -> P7",
+        "・P3 -> P7",
+        "・P4 -> P7",
+        "・P5 -> P8",
+        "・P6 -> P8",
+        "・P7 -> P9",
+        "・P8 -> 棄権",
+        "・P9 -> 棄権",
+    ]
+    for line in expected_lines:
+        assert line in text
+    # Confirm seat-no ordering.
+    indices = [text.index(line) for line in expected_lines]
+    assert indices == sorted(indices)
 
 
 def test_runoff_start_log_includes_initial_round_tally() -> None:
@@ -307,9 +318,10 @@ def test_runoff_start_log_includes_initial_round_tally() -> None:
     runoff_log = next(log for log in t.public_logs if log.kind == "RUNOFF_START")
     assert "同票のため決選投票に移ります。" in runoff_log.text
     assert "🗳 投票結果:" in runoff_log.text
-    # P7 and P9 tied at 3 votes each.
-    assert "・P7 (3票):" in runoff_log.text
-    assert "・P9 (3票):" in runoff_log.text
+    # Voter-keyed lines.
+    assert "・P1 -> P7" in runoff_log.text
+    assert "・P3 -> P8" in runoff_log.text
+    assert "・P9 -> P1" in runoff_log.text
 
 
 def test_all_abstain_no_execution_log_includes_tally() -> None:
@@ -320,4 +332,66 @@ def test_all_abstain_no_execution_log_includes_tally() -> None:
     t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
     no_exec = next(log for log in t.public_logs if log.kind == "NO_EXECUTION")
     assert "🗳 投票結果:" in no_exec.text
-    assert "・棄権 (9票): P1、P2、P3、P4、P5、P6、P7、P8、P9" in no_exec.text
+    for i in range(1, 10):
+        assert f"・P{i} -> 棄権" in no_exec.text
+
+
+# ----------------------------------------- DAY_RUNOFF_SPEECH branching
+def _llm_seats(llm_seat_nos: set[int], n: int = 9) -> list[Seat]:
+    """Same as _seats() but mark specified seat numbers as is_llm=True."""
+    out: list[Seat] = []
+    for i in range(1, n + 1):
+        is_llm = i in llm_seat_nos
+        out.append(
+            Seat(
+                seat_no=i,
+                display_name=f"P{i}",
+                discord_user_id=None if is_llm else f"u{i}",
+                is_llm=is_llm,
+                persona_key="setsu" if is_llm else None,
+            )
+        )
+    return out
+
+
+def test_tied_vote_with_llm_candidate_goes_to_runoff_speech() -> None:
+    """When a tied candidate is an LLM seat, transition to DAY_RUNOFF_SPEECH."""
+    game = _game(day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _llm_seats(llm_seat_nos={7})  # tied seat 7 is LLM
+    votes = [
+        _v(1, 7),
+        _v(2, 7),
+        _v(3, 8),
+        _v(4, 8),
+        _v(5, 9),
+        _v(6, 9),
+        _v(7, 9),
+        _v(8, 7),
+        _v(9, 1),
+    ]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
+    assert t.next_phase is Phase.DAY_RUNOFF_SPEECH
+    assert t.new_deadline_epoch == 1000 + RUNOFF_SPEECH_DEADLINE
+    assert t.player_updates == ()
+
+
+def test_tied_vote_without_llm_candidate_goes_directly_to_runoff() -> None:
+    """All tied candidates are human → skip DAY_RUNOFF_SPEECH."""
+    game = _game(day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _seats()  # all humans
+    votes = [
+        _v(1, 7),
+        _v(2, 7),
+        _v(3, 8),
+        _v(4, 8),
+        _v(5, 9),
+        _v(6, 9),
+        _v(7, 9),
+        _v(8, 7),
+        _v(9, 1),
+    ]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
+    assert t.next_phase is Phase.DAY_RUNOFF
+    assert t.new_deadline_epoch == 1000 + RUNOFF_DURATION

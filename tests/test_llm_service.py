@@ -911,10 +911,9 @@ async def test_load_public_logs_isolated_by_game_id(repo: SqliteRepo) -> None:
     assert any(r["text"] == "PRIV_ONLY_BETA" for r in priv_b)
 
 
-async def test_daystart_speech_inserts_public_log(repo: SqliteRepo) -> None:
-    """Fix 2: when an LLM speaks at daystart, the speech is persisted to
+async def test_discussion_speech_inserts_public_log(repo: SqliteRepo) -> None:
+    """When an LLM speaks during DAY_DISCUSSION, the speech is persisted to
     logs_public as PLAYER_SPEECH so subsequent LLMs see it in context."""
-    # Use DAY_DISCUSSION seed so _maybe_speak's phase checks pass.
     game = Game(
         id="g-day",
         guild_id="gu",
@@ -966,7 +965,9 @@ async def test_daystart_speech_inserts_public_log(repo: SqliteRepo) -> None:
     llm_player = next(p for p in players if p.seat_no == 2)
     llm_seat = next(s for s in seats if s.seat_no == 2)
 
-    await adapter._maybe_speak(game, llm_player, llm_seat, seats)
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats
+    )
 
     assert len(poster.public) == 1
     assert "セツ" in poster.public[0][1] and "おはようございます" in poster.public[0][1]

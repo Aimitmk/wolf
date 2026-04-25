@@ -51,12 +51,16 @@ from wolfbot.ui.views import NightActionView, VoteView
 log = logging.getLogger(__name__)
 
 
-# Role-identifying submission kinds — listing seat names for these in the public
-# channel would reveal role assignments (a seat owing WOLF_ATTACK *is* a wolf;
-# the unique seer/knight seat is trivially derived from "SEER_DIVINE 未提出: X").
+# Role-identifying submission kinds — naming seats, counts, or split state for
+# any of these in a public surface would reveal role assignments (a seat owing
+# WOLF_ATTACK is a wolf; a count of 2 confirms two wolves are alive). The
+# generic line below replaces all per-kind detail in the main channel,
+# /wolf status, and recovery announce.
 ROLE_IDENTIFYING_KINDS: frozenset[SubmissionType] = frozenset(
     {SubmissionType.WOLF_ATTACK, SubmissionType.SEER_DIVINE, SubmissionType.KNIGHT_GUARD}
 )
+
+GENERIC_SECRET_PENDING_LINE = "秘密行動の未確定があります。該当者へ DM を送信しました。"
 
 
 def render_pending_host_lines(
@@ -66,28 +70,27 @@ def render_pending_host_lines(
     """Per-submission lines for the /wolf status ホスト待ち field.
 
     For role-identifying kinds (WOLF_ATTACK/SEER_DIVINE/KNIGHT_GUARD) we emit
-    the count only — naming seats here leaks roles to every viewer of /wolf
-    status. For VOTE/RUNOFF_VOTE names stay (who's voting is public info).
-    Mirrors announce_waiting's censoring so the two views stay consistent.
+    a single generic line regardless of which kinds are pending — kind name,
+    seat names, count, and split language are all withheld because any of
+    them would let villagers infer wolf count or pinpoint the seer/knight.
+    For VOTE/RUNOFF_VOTE the names stay (who's voting is public info).
     """
     lines: list[str] = []
+    has_role_id = False
     for sub in pending.effective_submissions():
         is_role_id = sub.submission_type in ROLE_IDENTIFYING_KINDS
         if is_role_id:
-            # Merge missing + unresolved under one 未確定 line so a wolf-split
-            # (unresolved non-empty) is indistinguishable from plain no-submit.
-            # Otherwise the "意見が割れました" wording would confirm ≥2 wolves
-            # alive and leak the exact count.
-            combined = len(sub.missing_seats) + len(sub.unresolved_seats)
-            if combined:
-                lines.append(f"`{sub.submission_type.value}` 未確定: {combined}件")
-        else:
-            if sub.missing_seats:
-                names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
-                lines.append(f"`{sub.submission_type.value}` 未提出: {names}")
-            if sub.unresolved_seats:
-                names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.unresolved_seats)
-                lines.append(f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): {names}")
+            if sub.missing_seats or sub.unresolved_seats:
+                has_role_id = True
+            continue
+        if sub.missing_seats:
+            names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.missing_seats)
+            lines.append(f"`{sub.submission_type.value}` 未提出: {names}")
+        if sub.unresolved_seats:
+            names = "、".join(seat_name.get(sn, str(sn)) for sn in sub.unresolved_seats)
+            lines.append(f"`{sub.submission_type.value}` 再提出待ち: {names}")
+    if has_role_id:
+        lines.append(GENERIC_SECRET_PENDING_LINE)
     return lines
 
 
@@ -301,56 +304,29 @@ class DiscordBotAdapter:
             "⏸ **ホスト待ち**",
             f"フェイズ: `{pending.phase.value}` (day {pending.day})",
         ]
-        wolves_lines: list[str] = []
+        has_role_id = False
         for sub in pending.effective_submissions():
             is_role_id = sub.submission_type in ROLE_IDENTIFYING_KINDS
             if is_role_id:
-                # Merge missing + unresolved into one 未確定 line; see
-                # render_pending_host_lines for rationale (avoid leaking
-                # wolf count via the "意見が割れました" wording).
-                combined = len(sub.missing_seats) + len(sub.unresolved_seats)
-                if combined:
-                    public_lines.append(f"`{sub.submission_type.value}` 未確定: {combined}件")
-            else:
-                if sub.missing_seats:
-                    names = [
-                        seats_by_no[sn].display_name
-                        for sn in sub.missing_seats
-                        if sn in seats_by_no
-                    ]
-                    public_lines.append(
-                        f"`{sub.submission_type.value}` 未提出: {'、'.join(names) or '(なし)'}"
-                    )
-                if sub.unresolved_seats:
-                    names = [
-                        seats_by_no[sn].display_name
-                        for sn in sub.unresolved_seats
-                        if sn in seats_by_no
-                    ]
-                    public_lines.append(
-                        f"`{sub.submission_type.value}` 再提出待ち(意見が割れました): "
-                        f"{'、'.join(names) or '(なし)'}"
-                    )
-            # Also relay WOLF_ATTACK details to the wolves-only channel — wolves
-            # need names to coordinate, but villagers watching main text must not
-            # see them.
-            if sub.submission_type is SubmissionType.WOLF_ATTACK:
-                if sub.missing_seats:
-                    names = [
-                        seats_by_no[sn].display_name
-                        for sn in sub.missing_seats
-                        if sn in seats_by_no
-                    ]
-                    wolves_lines.append(f"`WOLF_ATTACK` 未提出: {'、'.join(names)}")
-                if sub.unresolved_seats:
-                    names = [
-                        seats_by_no[sn].display_name
-                        for sn in sub.unresolved_seats
-                        if sn in seats_by_no
-                    ]
-                    wolves_lines.append(
-                        f"`WOLF_ATTACK` 再提出待ち(意見が割れました): {'、'.join(names)}"
-                    )
+                if sub.missing_seats or sub.unresolved_seats:
+                    has_role_id = True
+                continue
+            if sub.missing_seats:
+                names = [
+                    seats_by_no[sn].display_name for sn in sub.missing_seats if sn in seats_by_no
+                ]
+                public_lines.append(
+                    f"`{sub.submission_type.value}` 未提出: {'、'.join(names) or '(なし)'}"
+                )
+            if sub.unresolved_seats:
+                names = [
+                    seats_by_no[sn].display_name for sn in sub.unresolved_seats if sn in seats_by_no
+                ]
+                public_lines.append(
+                    f"`{sub.submission_type.value}` 再提出待ち: {'、'.join(names) or '(なし)'}"
+                )
+        if has_role_id:
+            public_lines.append(GENERIC_SECRET_PENDING_LINE)
         public_lines.append(
             "`/wolf extend <秒>` で延長、または `/wolf force-skip` で未提出を確定処理します。"
         )
@@ -361,9 +337,10 @@ class DiscordBotAdapter:
                 await channel.send(text)
             except discord.DiscordException:
                 log.exception("announce_waiting failed %s", game.id)
-        if wolves_lines:
-            wolves_text = "\n".join(["⏸ **ホスト待ち** (人狼向け)", *wolves_lines])
-            await self.post_wolves_chat(game, wolves_text, kind="HOST_WAIT_WOLVES")
+        # Wolves channel auto-relay deliberately omitted: posting split details
+        # there would itself be evidence (visible in private logs / DB) that the
+        # split happened. The existing `resend_pending_dms` path re-DMs the
+        # affected wolves directly with their re-pick options.
 
     async def announce_recovery(self, game: Game, pending: PendingDecision | None) -> None:
         channel = self._main_text(game)
@@ -371,9 +348,17 @@ class DiscordBotAdapter:
             return
         lines = [f"♻️ 復帰しました。現在フェイズ: `{game.phase.value}` / day {game.day_number}"]
         if pending:
+            has_role_id = False
             for sub in pending.effective_submissions():
+                if sub.submission_type in ROLE_IDENTIFYING_KINDS:
+                    if sub.missing_seats or sub.unresolved_seats:
+                        has_role_id = True
+                    continue
                 count = len(set(sub.missing_seats) | set(sub.unresolved_seats))
-                lines.append(f"未提出あり: `{sub.submission_type.value}` → {count} 件未確定")
+                if count:
+                    lines.append(f"未提出あり: `{sub.submission_type.value}` → {count} 件未確定")
+            if has_role_id:
+                lines.append(GENERIC_SECRET_PENDING_LINE)
         try:
             await channel.send("\n".join(lines))
         except discord.DiscordException:
@@ -463,7 +448,6 @@ class WolfCog(commands.Cog):
             return
         author_seat = await self.repo.seat_of_user(game.id, str(message.author.id))
         players = await self.repo.load_players(game.id)
-        seats = await self.repo.load_seats(game.id)
 
         if is_main and game.phase is Phase.DAY_DISCUSSION:
             if not _main_channel_should_llm_react(author_seat, players):
@@ -483,16 +467,6 @@ class WolfCog(commands.Cog):
                 )
             except Exception:
                 log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
-            try:
-                await self.llm_adapter.maybe_react_to_message(
-                    game,
-                    players,
-                    seats,
-                    author_seat=author_seat,
-                    text=message.content,
-                )
-            except Exception:
-                log.exception("llm_adapter reaction failed for %s", game.id)
             return
 
         if is_wolves and game.phase is Phase.NIGHT and author_seat is not None:

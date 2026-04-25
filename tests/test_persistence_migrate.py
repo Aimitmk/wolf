@@ -68,6 +68,18 @@ CREATE TABLE pending_decisions (
 )
 """
 
+_OLD_LLM_SPEECH_DDL = """
+CREATE TABLE llm_speech_counts (
+    game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    day INTEGER NOT NULL,
+    seat_no INTEGER NOT NULL,
+    normal_count INTEGER NOT NULL DEFAULT 0,
+    vote_intent_done INTEGER NOT NULL DEFAULT 0,
+    last_spoke_epoch INTEGER,
+    PRIMARY KEY (game_id, day, seat_no)
+)
+"""
+
 
 async def _build_old_db(db_path: Path, ddls: Iterable[str]) -> None:
     async with aiosqlite.connect(str(db_path)) as db:
@@ -153,17 +165,47 @@ async def test_migrate_then_create_game_succeeds_on_old_db() -> None:
             await repo.close()
 
 
+async def test_migrate_adds_discussion_rounds_done_to_old_llm_speech_table() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "old.db"
+        await _build_old_db(db_path, [_OLD_GAMES_DDL, _OLD_LLM_SPEECH_DDL])
+        before = await _columns_of(db_path, "llm_speech_counts")
+        assert "discussion_rounds_done" not in before
+
+        await migrate(db_path)
+
+        after = await _columns_of(db_path, "llm_speech_counts")
+        assert "discussion_rounds_done" in after
+
+
+async def test_migrate_adds_runoff_speech_done_to_old_llm_speech_table() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "old.db"
+        await _build_old_db(db_path, [_OLD_GAMES_DDL, _OLD_LLM_SPEECH_DDL])
+        before = await _columns_of(db_path, "llm_speech_counts")
+        assert "runoff_speech_done" not in before
+
+        await migrate(db_path)
+
+        after = await _columns_of(db_path, "llm_speech_counts")
+        assert "runoff_speech_done" in after
+
+
 async def test_migrate_is_idempotent() -> None:
     """Running migrate() twice on an old DB must not raise and must not duplicate columns."""
     with tempfile.TemporaryDirectory() as td:
         db_path = Path(td) / "old.db"
-        await _build_old_db(db_path, [_OLD_GAMES_DDL, _OLD_SEATS_DDL, _OLD_PENDING_DDL])
+        await _build_old_db(
+            db_path,
+            [_OLD_GAMES_DDL, _OLD_SEATS_DDL, _OLD_PENDING_DDL, _OLD_LLM_SPEECH_DDL],
+        )
 
         await migrate(db_path)
         first = (
             await _columns_of(db_path, "games"),
             await _columns_of(db_path, "seats"),
             await _columns_of(db_path, "pending_decisions"),
+            await _columns_of(db_path, "llm_speech_counts"),
         )
 
         await migrate(db_path)
@@ -171,6 +213,7 @@ async def test_migrate_is_idempotent() -> None:
             await _columns_of(db_path, "games"),
             await _columns_of(db_path, "seats"),
             await _columns_of(db_path, "pending_decisions"),
+            await _columns_of(db_path, "llm_speech_counts"),
         )
 
         assert first == second

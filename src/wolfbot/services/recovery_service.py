@@ -102,11 +102,15 @@ class RecoveryService:
         except Exception:
             log.exception("announce_recovery failed for %s", game.id)
 
-        # Step 3: attach and start engine.
+        # Step 3: attach and start engine. Pass the recovery clock so tests
+        # using FakeClock get deterministic timing — otherwise the engine
+        # uses time.time() and may race ahead of the test's logical clock,
+        # advancing the phase before assertions run.
         engine = GameEngine(
             game_id=game.id,
             repo=self.repo,
             advance=self.game_service.advance,
+            clock=self.clock,
         )
         await self.registry.attach(engine)
         engine.start()
@@ -117,3 +121,11 @@ class RecoveryService:
             await self.game_service.resend_pending_dms(game.id)
         except Exception:
             log.exception("resend_pending_dms during recovery failed for %s", game.id)
+
+        # Step 5: resume LLM speech progress for DAY_DISCUSSION /
+        # DAY_RUNOFF_SPEECH if any per-seat round/runoff_speech_done is still
+        # incomplete. Idempotent; no-op for any other phase.
+        try:
+            await self.game_service.resume_llm_speech_progress(game.id)
+        except Exception:
+            log.exception("resume_llm_speech_progress during recovery failed for %s", game.id)

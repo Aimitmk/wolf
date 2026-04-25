@@ -39,11 +39,14 @@ from wolfbot.domain.rules import (
 )
 from wolfbot.domain.state_machine import (
     plan_day_discussion_to_vote,
+    plan_day_discussion_wait,
     plan_day_runoff_resolve,
     plan_day_vote_resolve,
     plan_extend_deadline,
     plan_night0,
     plan_night_resolve,
+    plan_runoff_speech_to_runoff,
+    plan_runoff_speech_wait,
     plan_setup,
 )
 from wolfbot.persistence.sqlite_repo import SqliteRepo
@@ -113,8 +116,15 @@ class LLMAdapter(Protocol):
         round_: int,
         restrict_to_seats: frozenset[int] | None = None,
     ) -> None: ...
-    async def submit_llm_daystart_speeches(
+    async def submit_llm_discussion_rounds(
         self, game: Game, players: Sequence[Player], seats: Sequence[Seat]
+    ) -> None: ...
+    async def submit_llm_runoff_candidate_speeches(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        tied_candidates: Sequence[int],
     ) -> None: ...
 
 
@@ -169,6 +179,11 @@ class GameService:
         seats = await self.repo.load_seats(game_id)
         players = await self.repo.load_players(game_id)
         now = self.clock()
+        # Captured before commit so `_dispatch_submissions` can tell a fresh
+        # phase entry from a same-phase grace re-commit (DAY_DISCUSSION /
+        # DAY_RUNOFF_SPEECH wait pattern). Without this guard, the LLM round
+        # task would be re-dispatched on every grace tick.
+        previous_phase = game.phase
 
         transition = await self._plan_next(game, seats, players, now)
         if transition is None:
@@ -230,8 +245,9 @@ class GameService:
             except Exception:
                 log.exception("waiting announce failed for %s", game_id)
 
-        # 5. On entering DAY_VOTE / DAY_RUNOFF / NIGHT, kick off DMs.
-        await self._dispatch_submissions(new_game, players, seats, transition)
+        # 5. On entering DAY_VOTE / DAY_RUNOFF / NIGHT / DAY_DISCUSSION /
+        #    DAY_RUNOFF_SPEECH, kick off DMs and LLM tasks.
+        await self._dispatch_submissions(new_game, players, seats, transition, previous_phase)
 
         # 6. Victory handling: end game.
         if transition.victory is not None:
@@ -256,10 +272,58 @@ class GameService:
         if game.phase is Phase.NIGHT_0:
             return plan_night0(game, players, seats, self.rng, now)
         if game.phase is Phase.DAY_DISCUSSION:
-            return plan_day_discussion_to_vote(game, now)
+            # Advance only when BOTH the discussion deadline has passed AND every
+            # alive LLM seat has completed both speech rounds. Otherwise either
+            # park (no-op return None — engine sleeps to deadline) or commit a
+            # short same-phase grace transition.
+            seats_by_no = {s.seat_no: s for s in seats}
+            alive_llm_seats = [
+                p.seat_no
+                for p in players
+                if p.alive
+                and seats_by_no.get(p.seat_no) is not None
+                and seats_by_no[p.seat_no].is_llm
+            ]
+            rounds_done = True
+            for sn in alive_llm_seats:
+                progress = await self.repo.load_llm_speech_progress(game.id, game.day_number, sn)
+                if progress[3] < 2:  # discussion_rounds_done
+                    rounds_done = False
+                    break
+            deadline_passed = game.deadline_epoch is not None and now >= game.deadline_epoch
+            if deadline_passed and rounds_done:
+                return plan_day_discussion_to_vote(game, now)
+            if deadline_passed and not rounds_done:
+                # Same-phase grace — engine sleeps DAY_DISCUSSION_GRACE seconds
+                # then advances again. LLM completion will wake earlier.
+                return plan_day_discussion_wait(game, now)
+            # Not deadline_passed: either rounds done or not, just wait. Engine
+            # sleeps until natural deadline; LLM wake re-triggers a check too.
+            return None
         if game.phase is Phase.DAY_VOTE:
             votes = await self.repo.load_votes(game.id, day=game.day_number, round_=0)
             return plan_day_vote_resolve(game, players, seats, votes, game.force_skip_pending, now)
+        if game.phase is Phase.DAY_RUNOFF_SPEECH:
+            # Recompute tied candidates from round 0 votes — never stored.
+            round0 = await self.repo.load_votes(game.id, day=game.day_number, round_=0)
+            alive_set = {p.seat_no for p in players if p.alive}
+            tied = compute_vote_result(round0, alive_set).tied
+            seats_by_no = {s.seat_no: s for s in seats}
+            tied_llm_seats = [
+                sn for sn in tied if seats_by_no.get(sn) is not None and seats_by_no[sn].is_llm
+            ]
+            speeches_done = True
+            for sn in tied_llm_seats:
+                progress = await self.repo.load_llm_speech_progress(game.id, game.day_number, sn)
+                if not progress[4]:  # runoff_speech_done
+                    speeches_done = False
+                    break
+            if speeches_done:
+                return plan_runoff_speech_to_runoff(game, seats_by_no, tied, now)
+            deadline_passed = game.deadline_epoch is not None and now >= game.deadline_epoch
+            if deadline_passed:
+                return plan_runoff_speech_wait(game, now)
+            return None
         if game.phase is Phase.DAY_RUNOFF:
             round0 = await self.repo.load_votes(game.id, day=game.day_number, round_=0)
             alive = {p.seat_no for p in players if p.alive}
@@ -295,6 +359,7 @@ class GameService:
         old_players: Sequence[Player],
         seats: Sequence[Seat],
         transition: Transition,
+        previous_phase: Phase,
     ) -> None:
         # Post-transition player list (for dispatch decisions)
         players_after = [
@@ -314,6 +379,19 @@ class GameService:
                 )
             except Exception:
                 log.exception("llm vote submission failed for %s", new_game.id)
+        elif transition.next_phase is Phase.DAY_RUNOFF_SPEECH:
+            # Same-phase grace re-commit must not redispatch.
+            if previous_phase is Phase.DAY_RUNOFF_SPEECH:
+                return
+            round0 = await self.repo.load_votes(new_game.id, day=new_game.day_number, round_=0)
+            alive_set = {p.seat_no for p in players_after if p.alive}
+            tied = list(compute_vote_result(round0, alive_set).tied)
+            try:
+                await self.llm.submit_llm_runoff_candidate_speeches(
+                    new_game, players_after, seats, tied_candidates=tied
+                )
+            except Exception:
+                log.exception("llm runoff candidate speech dispatch failed for %s", new_game.id)
         elif transition.next_phase is Phase.DAY_RUNOFF:
             alive_voters = [p for p in players_after if p.alive]
             # Candidates come from tied set — derived in _plan_next on the next advance;
@@ -349,11 +427,14 @@ class GameService:
             except Exception:
                 log.exception("llm night action submission failed")
         elif transition.next_phase is Phase.DAY_DISCUSSION:
+            # Same-phase grace re-commit must not redispatch.
+            if previous_phase is Phase.DAY_DISCUSSION:
+                return
             alive_players = [p for p in players_after if p.alive]
             try:
-                await self.llm.submit_llm_daystart_speeches(new_game, alive_players, seats)
+                await self.llm.submit_llm_discussion_rounds(new_game, alive_players, seats)
             except Exception:
-                log.exception("llm day-start speeches failed")
+                log.exception("llm discussion rounds dispatch failed for %s", new_game.id)
 
     async def _safe_post_public(self, game: Game, text: str, kind: str) -> None:
         try:
@@ -650,6 +731,72 @@ class GameService:
                 )
             except Exception:
                 log.exception("resend_pending_dms llm night dispatch failed for %s", game_id)
+
+    async def resume_llm_speech_progress(self, game_id: str) -> None:
+        """Re-dispatch LLM speech tasks if DAY_DISCUSSION/DAY_RUNOFF_SPEECH
+        progress is incomplete after a bot restart.
+
+        Called from `RecoveryService._recover_one` after `resend_pending_dms`.
+        Idempotent: the LLM dispatcher's per-seat skip (rounds_done >= round_idx
+        / runoff_speech_done already True) makes redundant calls a no-op. For
+        any other phase this is a no-op.
+        """
+        game = await self.repo.load_game(game_id)
+        if game is None:
+            return
+        seats = await self.repo.load_seats(game_id)
+        seats_by_no = {s.seat_no: s for s in seats}
+        players = await self.repo.load_players(game_id)
+        if game.phase is Phase.DAY_DISCUSSION:
+            alive_llm_players = [
+                p
+                for p in players
+                if p.alive
+                and seats_by_no.get(p.seat_no) is not None
+                and seats_by_no[p.seat_no].is_llm
+            ]
+            if not alive_llm_players:
+                return
+            for p in alive_llm_players:
+                progress = await self.repo.load_llm_speech_progress(
+                    game_id, game.day_number, p.seat_no
+                )
+                if progress[3] < 2:
+                    break
+            else:
+                return  # everyone done — nothing to resume
+            try:
+                await self.llm.submit_llm_discussion_rounds(game, alive_llm_players, seats)
+            except Exception:
+                log.exception("resume discussion rounds failed for %s", game_id)
+            return
+        if game.phase is Phase.DAY_RUNOFF_SPEECH:
+            round0 = await self.repo.load_votes(game_id, day=game.day_number, round_=0)
+            alive_set = {p.seat_no for p in players if p.alive}
+            tied = list(compute_vote_result(round0, alive_set).tied)
+            tied_llm_players = [
+                p
+                for p in players
+                if p.seat_no in tied
+                and seats_by_no.get(p.seat_no) is not None
+                and seats_by_no[p.seat_no].is_llm
+            ]
+            if not tied_llm_players:
+                return
+            for p in tied_llm_players:
+                progress = await self.repo.load_llm_speech_progress(
+                    game_id, game.day_number, p.seat_no
+                )
+                if not progress[4]:
+                    break
+            else:
+                return
+            try:
+                await self.llm.submit_llm_runoff_candidate_speeches(
+                    game, players, seats, tied_candidates=tied
+                )
+            except Exception:
+                log.exception("resume runoff candidate speeches failed for %s", game_id)
 
     async def _all_votes_in(self, game: Game, round_: int) -> bool:
         players = await self.repo.load_players(game.id)
