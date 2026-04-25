@@ -106,7 +106,7 @@ uv run wolfbot
 | --- | --- | --- |
 | `DISCORD_TOKEN` | 必須 | Discord bot のトークン |
 | `XAI_API_KEY` | 必須 | xAI API キー |
-| `XAI_MODEL` | 既定値: `grok-4-1-fast` | 使用する xAI モデル名 |
+| `XAI_MODEL` | 既定値: `grok-4-1-fast-reasoning` | 使用する xAI モデル名 |
 | `DISCORD_GUILD_ID` | 必須 | `/wolf` コマンドを同期する guild の ID |
 | `MAIN_TEXT_CHANNEL_ID` | 必須 | 議論用に使う既存のメイン text チャンネル ID |
 | `MAIN_VOICE_CHANNEL_ID` | 必須 | 参加者が会話する既存のメイン VC の ID |
