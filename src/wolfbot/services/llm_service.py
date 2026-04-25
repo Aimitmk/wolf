@@ -611,7 +611,11 @@ class LLMAdapter:
                     continue
                 try:
                     await self._do_one_discussion_speech(
-                        game=fresh, player=llm, seat=seat, seats=seats
+                        game=fresh,
+                        player=llm,
+                        seat=seat,
+                        seats=seats,
+                        discussion_round=round_idx,
                     )
                 except Exception:
                     log.exception(
@@ -651,6 +655,7 @@ class LLMAdapter:
         player: Player,
         seat: Seat,
         seats: Sequence[Seat],
+        discussion_round: int | None = None,
     ) -> None:
         players = await self.repo.load_players(game.id)
         action = await self._ask(
@@ -659,7 +664,7 @@ class LLMAdapter:
             seat,
             players,
             seats,
-            task_text=task_daytime_speech(game.day_number),
+            task_text=task_daytime_speech(game.day_number, discussion_round=discussion_round),
         )
         if action.intent != "speak":
             return

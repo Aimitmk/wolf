@@ -27,6 +27,7 @@ from wolfbot.llm.prompt_builder import (
     _build_strategy_block,
     build_system_prompt,
     build_user_context,
+    task_daytime_speech,
     task_night_action,
     task_wolf_chat,
 )
@@ -973,6 +974,30 @@ def test_task_night_action_non_wolf_excludes_attack_checklist(
     assert "翌日の説明しやすさ" not in text
 
 
+def test_task_night_action_seer_divine_includes_targeting_checklist() -> None:
+    """SEER_DIVINE task hands the seer a targeting rubric inline. The new axes
+    push the LLM beyond random selection from legal candidates and toward
+    high-information targets (counter-CO whites, vote oddities, gray-narrowing
+    positions). These tokens must reach the LLM via the task block even if the
+    role strategy block is somehow ignored."""
+    text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
+    # Positive — seer-targeting axes anchors must be present.
+    assert "占い価値" in text
+    assert "灰を狭める" in text
+    assert "対抗 CO" in text
+    assert "囲い候補" in text
+    assert "投票" in text
+    assert "白でも黒でも情報が落ちる" in text
+    # Negative — none of the wolf-task forbidden substrings may appear here.
+    # (The parametrized exclusion test below also covers this; this focused
+    # negative makes the contract explicit at the SEER_DIVINE call site.)
+    assert "襲撃価値" not in text
+    assert "護衛されやすさ" not in text
+    assert "騎士候補度" not in text
+    assert "翌日の説明しやすさ" not in text
+    assert "騎士探し" not in text
+
+
 def test_task_night_action_knight_guard_includes_evaluation_checklist() -> None:
     """KNIGHT_GUARD task hands the knight a 5-axis checklist inline so even an
     LLM that ignored the strategy block sees the rubric on the action turn.
@@ -1012,6 +1037,143 @@ def test_task_wolf_chat_includes_guard_and_knight_candidate_reasons() -> None:
     # All five approach tokens must be offered as labels for the reason.
     for phrase in ("情報役噛み", "白位置噛み", "意見噛み", "騎士探し", "SG 残し"):
         assert phrase in text, f"wolf-chat task missing approach token {phrase!r}"
+
+
+# ----------------------------------------------------- daytime speech task
+def test_task_daytime_speech_default_omits_first_round_rule() -> None:
+    """Default call (no `discussion_round`) — runoff and any backward-compat
+    caller — must NOT include the day-2+ first-round mandatory result rule."""
+    text = task_daytime_speech(2)
+    assert "1 巡目" not in text
+    assert "前夜の能力結果" not in text
+
+
+def test_task_daytime_speech_day1_round1_omits_day2_rule() -> None:
+    """Day 1 round 1 must NOT include the day-2+ rule. Day 1 first results are
+    already constrained by NIGHT_0 random white / day-1 first white in the
+    game rules block; the day-2+ rule does not apply on day 1."""
+    text = task_daytime_speech(1, discussion_round=1)
+    assert "1 巡目" not in text
+    assert "前夜の能力結果" not in text
+
+
+def test_task_daytime_speech_day2_round2_omits_first_round_rule() -> None:
+    """Round 2 of day 2 must NOT carry the 'must attach prior-night results'
+    imperative. Round 2 is for follow-ups; the first-round publication
+    requirement is round-1 only."""
+    text = task_daytime_speech(2, discussion_round=2)
+    assert "1 巡目" not in text
+    assert "前夜の能力結果" not in text
+
+
+def test_task_daytime_speech_day2_round1_publishes_prior_night_results() -> None:
+    """Day 2+ round 1: CO'd or about-to-CO seer/medium/knight LLM must attach
+    prior-night ability results. The task text must call out all three roles
+    and their respective result formats so the LLM can match its own role."""
+    text = task_daytime_speech(2, discussion_round=1)
+    # Headline tokens.
+    assert "day 2 以降" in text
+    assert "1 巡目" in text
+    assert "前夜" in text
+    assert "能力結果" in text
+    # All three info roles must be addressed.
+    assert "占い師" in text
+    assert "霊媒師" in text
+    assert "騎士" in text
+    # Result format anchors.
+    assert "白/黒" in text
+    assert "前日処刑者" in text
+    assert "結果なし" in text
+    assert "合法な護衛履歴" in text
+    assert "平和な朝" in text
+    # Trust-pressure framing — withholding lowers credibility.
+    assert "信用低下" in text or "破綻" in text
+    # Wolf-coordination vocabulary must NOT appear in this task block (every
+    # role sees this task text).
+    assert "相方" not in text
+    assert "襲撃先を揃える" not in text
+
+
+@pytest.mark.parametrize("day", [3, 5])
+def test_task_daytime_speech_day_n_round1_publishes_prior_night_results(day: int) -> None:
+    """The 'day 2 以降' rule applies on day 3, 5, etc. as well — verifies the
+    `day_number >= 2` gate, not a literal day-2 check."""
+    text = task_daytime_speech(day, discussion_round=1)
+    assert "day 2 以降" in text
+    assert "1 巡目" in text
+    assert "能力結果" in text
+
+
+def test_task_daytime_speech_base_contract_preserved() -> None:
+    """Every variant must still surface the base intent/skip + 80–300 char
+    contract — neither the day-2+ branch nor the default branch may erase it."""
+    for kwargs in (
+        {"day_number": 1},
+        {"day_number": 2},
+        {"day_number": 1, "discussion_round": 1},
+        {"day_number": 2, "discussion_round": 1},
+        {"day_number": 2, "discussion_round": 2},
+    ):
+        text = task_daytime_speech(**kwargs)
+        assert "intent=speak" in text
+        assert "intent=skip" in text
+        assert "80〜300 字" in text
+
+
+# ------------------------------------------------ day 2+ round 1 fake publication
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_day2_round1_publishes_prior_night_results(role: Role) -> None:
+    """Both wolf and madman, when faking seer/medium/knight on day 2+, must be
+    instructed to publish the prior-night ability result on the day-2+ round-1
+    speech. Headline tokens (1 巡目, 前夜, 能力結果) must appear."""
+    block = _build_strategy_block(role)
+    assert "day 2 以降" in block
+    assert "1 巡目" in block
+    assert "前夜" in block
+    assert "能力結果" in block
+
+
+def test_werewolf_fake_strategy_integrates_with_attack_plan() -> None:
+    """Wolf-only: the fake-result guidance must integrate with the wolf's
+    private knowledge (partner position, framing risk, attack pattern) and
+    cross-checks (medium results, vote history, legal guard history)."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "相方" in block
+    assert "囲い" in block
+    assert "噛み筋" in block
+    assert "霊媒結果" in block
+    assert "合法な護衛履歴" in block
+
+
+def test_madman_fake_strategy_acknowledges_misfire_and_legal_constraints() -> None:
+    """Madman-only: the fake-result guidance must include misfire awareness
+    (誤爆リスク, 白先が本物の狼とは限らない), the no-execution-no-result rule,
+    and the legal-guard-history constraint. Wolf-coordination vocabulary
+    must remain absent (existing leak guard reinforced)."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "誤爆リスク" in block
+    assert "白先が本物の狼とは限らない" in block
+    assert "処刑なしの日は結果なし" in block
+    assert "合法な護衛履歴" in block
+    # Existing leak guard.
+    assert "相方" not in block
+    assert "襲撃先を揃える" not in block
+
+
+# ------------------------------------------------ seer night-divination axes
+def test_seer_strategy_includes_night_divination_targeting_axes() -> None:
+    """The true seer strategy must teach the LLM to pick high-information
+    targets rather than randomizing over legal candidates. The axes echo the
+    SEER_DIVINE task block so the LLM sees them in both places."""
+    block = _build_strategy_block(Role.SEER)
+    assert "占い価値" in block
+    assert "灰を狭める" in block
+    assert "対抗 CO" in block
+    assert "囲い候補" in block
+    assert "投票" in block
+    assert "白でも黒でも情報が落ちる" in block
+    # Existing SEER unique anchor (cross-leak pivot) must still be present.
+    assert "判定履歴を時系列で一貫" in block
 
 
 # --------------------------------------------------- build_system_prompt

@@ -15,7 +15,7 @@ import pytest
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, LogEntry, NightAction, Seat, Vote
-from wolfbot.llm.prompt_builder import task_night_action
+from wolfbot.llm.prompt_builder import task_daytime_speech, task_night_action
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.llm_service import LLMAction, LLMAdapter
 
@@ -1593,6 +1593,255 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "初日に黒を出す主張" in system_prompt
     assert "黒出しは day 2 以降" in system_prompt
     assert "誤爆リスクは day 2 以降の黒出しでも常に残る" in system_prompt
+
+
+async def test_ask_system_prompt_seer_includes_night_targeting_axes(
+    repo: SqliteRepo,
+) -> None:
+    """The true seer's system prompt must carry the night-divination targeting
+    axes (占い価値 / 灰を狭める / 対抗 CO / 囲い候補 / 投票 /
+    白でも黒でも情報が落ちる) via `_ROLE_STRATEGIES[Role.SEER]`. End-to-end
+    analog of the unit-level `test_seer_strategy_includes_night_divination_targeting_axes`."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
+    assert "占い価値" in system_prompt
+    assert "灰を狭める" in system_prompt
+    assert "対抗 CO" in system_prompt
+    assert "囲い候補" in system_prompt
+    assert "投票" in system_prompt
+    assert "白でも黒でも情報が落ちる" in system_prompt
+
+
+async def test_ask_system_prompt_seer_divine_task_includes_targeting_checklist(
+    repo: SqliteRepo,
+) -> None:
+    """When the seer's task_text is the actual SEER_DIVINE night-action prompt,
+    the targeting axes must reach the LLM via the `{task_block}` slot — the
+    parallel of the wolf-attack and knight-guard task tests above. Wolf-task
+    forbidden substrings must remain absent (existing leak guard reinforced)."""
+    task_text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.SEER, task_text=task_text
+    )
+    # Positive — task-level targeting checklist reached the LLM.
+    assert "占い価値" in system_prompt
+    assert "灰を狭める" in system_prompt
+    assert "対抗 CO" in system_prompt
+    assert "囲い候補" in system_prompt
+    assert "投票" in system_prompt
+    assert "白でも黒でも情報が落ちる" in system_prompt
+    # Negative — wolf-task forbidden substrings absent from the seer's task.
+    assert "襲撃価値" not in task_text
+    assert "護衛されやすさ" not in task_text
+    assert "騎士候補度" not in task_text
+    assert "翌日の説明しやすさ" not in task_text
+    assert "騎士探し" not in task_text
+
+
+async def test_ask_system_prompt_wolf_seat_includes_day2_round1_fake_publication(
+    repo: SqliteRepo,
+) -> None:
+    """The werewolf LLM's system prompt must carry the day-2+ round-1 fake-
+    result publication imperative for seer/medium/knight fakes, with the
+    integration cues (相方 / 囲い / 噛み筋 / 霊媒結果 / 合法な護衛履歴)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "day 2 以降" in system_prompt
+    assert "1 巡目" in system_prompt
+    assert "前夜" in system_prompt
+    assert "能力結果" in system_prompt
+    assert "合法な護衛履歴" in system_prompt
+    # Wolf-private integration cues must be present.
+    assert "相方" in system_prompt
+    assert "囲い" in system_prompt
+    assert "噛み筋" in system_prompt
+    assert "霊媒結果" in system_prompt
+
+
+async def test_ask_system_prompt_madman_includes_day2_round1_fake_publication(
+    repo: SqliteRepo,
+) -> None:
+    """The madman LLM's system prompt must carry the day-2+ round-1 fake-
+    result publication imperative with explicit misfire framing — and must
+    NOT carry wolf-coordination vocabulary."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "day 2 以降" in system_prompt
+    assert "1 巡目" in system_prompt
+    assert "前夜" in system_prompt
+    assert "能力結果" in system_prompt
+    assert "誤爆リスク" in system_prompt
+    assert "白先が本物の狼とは限らない" in system_prompt
+    assert "処刑なしの日は結果なし" in system_prompt
+    assert "合法な護衛履歴" in system_prompt
+    # Wolf-coordination vocabulary must remain absent.
+    assert "相方" not in system_prompt
+    assert "襲撃先を揃える" not in system_prompt
+
+
+async def test_discussion_speech_day2_round1_passes_first_round_rule(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: when `_run_discussion_rounds` calls
+    `_do_one_discussion_speech(discussion_round=1)` on a day-2 game, the
+    captured task block must contain the day-2+ round-1 mandatory rule. This
+    test drives the per-seat path directly so the round threading is asserted
+    independently of the round-loop bookkeeping."""
+    game = Game(
+        id="g-d2r1",
+        guild_id="gu-d2r1",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=2,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.SEER)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=1
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    assert "1 巡目" in system_prompt
+    assert "前夜の能力結果" in system_prompt
+
+
+async def test_discussion_speech_day2_round2_omits_first_round_rule(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: round 2 of a day-2 game must NOT carry the
+    'must attach prior-night results' imperative."""
+    game = Game(
+        id="g-d2r2",
+        guild_id="gu-d2r2",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=2,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.SEER)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=2
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # The day-2+ first-round imperative must NOT appear in round 2.
+    assert "前夜の能力結果" not in system_prompt
+    # The base intent/skip contract must still be present.
+    assert "intent=speak" in system_prompt
+    assert "intent=skip" in system_prompt
+
+
+async def test_discussion_speech_day1_round1_omits_day2_rule(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: day 1 round 1 must NOT carry the day-2+ rule. Day-1 first
+    results are constrained by the existing NIGHT_0 / day-1-white rules in the
+    game-rules block, not by the new day-2+ round-1 rule."""
+    game = Game(
+        id="g-d1r1",
+        guild_id="gu-d1r1",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.SEER)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=1
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Day-1 round-1 must omit the day-2+ rule. The literal day-2+ imperative
+    # phrase ("これは day 2 以降の 1 巡目発言です。") must not appear.
+    assert "day 2 以降の 1 巡目発言" not in system_prompt
+    assert "前夜の能力結果" not in system_prompt
+
+
+def test_task_daytime_speech_runoff_default_omits_first_round_rule() -> None:
+    """`_do_one_runoff_speech` calls `task_daytime_speech(game.day_number)`
+    with no `discussion_round`. The default branch must NOT include the
+    day-2+ first-round mandatory result rule, even on day 2+."""
+    text = task_daytime_speech(2)
+    assert "1 巡目" not in text
+    assert "前夜の能力結果" not in text
 
 
 # ---------------------------------- user context analysis blocks via _ask
