@@ -1097,6 +1097,28 @@ async def test_ask_system_prompt_contains_2_1_and_1_2_formations_for_any_role(
         assert "1-2" in system_prompt, f"{role.name} missed 1-2"
 
 
+async def test_ask_system_prompt_contains_advanced_guard_vocab_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """Advanced guard vocabulary (鉄板護衛 / 捨て護衛 / 連続護衛不可 / 護衛読み /
+    護衛誘導) lives in the shared rules block so every seat — not just the
+    knight — can interpret these terms when they appear in the public log."""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "鉄板護衛" in system_prompt, f"{role.name} missed 鉄板護衛"
+        assert "捨て護衛" in system_prompt, f"{role.name} missed 捨て護衛"
+        assert "連続護衛不可" in system_prompt, f"{role.name} missed 連続護衛不可"
+        assert "護衛読み" in system_prompt, f"{role.name} missed 護衛読み"
+        assert "護衛誘導" in system_prompt, f"{role.name} missed 護衛誘導"
+
+
 async def test_ask_system_prompt_contains_enthusiast_checklist_for_any_role(
     repo: SqliteRepo,
 ) -> None:
@@ -1467,6 +1489,54 @@ async def test_ask_system_prompt_knight_includes_legal_guard_history_and_endgame
     assert "護衛履歴を日付順" in system_prompt
     assert "自分護衛" in system_prompt
     assert "同じ相手の連続護衛" in system_prompt
+
+
+async def test_ask_system_prompt_knight_includes_advanced_guard_strategy(
+    repo: SqliteRepo,
+) -> None:
+    """A knight LLM's system prompt must carry the advanced multi-axis guard
+    reasoning: 鉄板護衛 / 捨て護衛 distinction, 連続護衛不可 awareness, and
+    next-night planning. Existing knight unique anchor remains as a regression
+    guard, and wolf-coordination leak guards still hold."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
+    assert "鉄板護衛" in system_prompt
+    assert "捨て護衛" in system_prompt
+    assert "連続護衛不可" in system_prompt
+    assert "次夜" in system_prompt
+    # Knight unique anchor must remain (regression guard).
+    assert "前夜と違う相手を選ぶ" in system_prompt
+    # Wolf-coordination leak guards must still hold.
+    assert "相方" not in system_prompt
+    assert "襲撃先を揃える" not in system_prompt
+
+
+async def test_ask_system_prompt_knight_guard_task_includes_checklist(
+    repo: SqliteRepo,
+) -> None:
+    """When the knight's task_text is the actual KNIGHT_GUARD night-action
+    prompt, the 5-axis knight checklist (鉄板護衛 / 捨て護衛 / 1 名 selection)
+    must reach the LLM via the `{task_block}` slot. None of the wolf-task
+    forbidden literal substrings may appear — that would trip the existing
+    parametrized leak test in the unit-level prompt builder tests."""
+    task_text = task_night_action(SubmissionType.KNIGHT_GUARD, ["席1 A", "席2 B"])
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.KNIGHT, task_text=task_text
+    )
+    # Positive — task-level checklist reached the LLM.
+    assert "鉄板護衛" in system_prompt
+    assert "捨て護衛" in system_prompt
+    assert "1 名" in system_prompt
+    # Negative — wolf-task forbidden substrings absent from the task block.
+    # (Note: 襲撃価値 / 護衛されやすさ / 騎士候補度 / 翌日の説明しやすさ /
+    # 騎士探し still appear elsewhere in the wolf strategy block of a wolf
+    # seat, but never in the knight seat's task_text.) The knight does not see
+    # the wolf strategy block, so these literals must be absent from the full
+    # knight system prompt as well.
+    assert "襲撃価値" not in system_prompt
+    assert "護衛されやすさ" not in system_prompt
+    assert "騎士候補度" not in system_prompt
+    assert "翌日の説明しやすさ" not in system_prompt
+    assert "騎士探し" not in system_prompt
 
 
 async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRepo) -> None:

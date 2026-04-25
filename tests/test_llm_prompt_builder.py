@@ -444,6 +444,47 @@ def test_game_rules_block_defines_endgame_vocabulary() -> None:
     assert "- RPP" in block
 
 
+def test_game_rules_block_defines_advanced_guard_vocabulary() -> None:
+    """Advanced jinrō guard vocabulary reaches every seat via the shared
+    rules block so that public-log mentions of 鉄板護衛 / 変態護衛 / 捨て護衛
+    / 護衛読み / 護衛誘導 / 連ガ無し / 狩人 are interpretable. Each term gets
+    its own dedicated bullet."""
+    block = _build_game_rules_block()
+    assert "- 鉄板護衛:" in block
+    assert "- 変態護衛:" in block
+    assert "- 捨て護衛:" in block
+    assert "- 護衛読み:" in block
+    assert "- 護衛誘導:" in block
+    # 連ガ無し / 連続護衛不可 vocabulary bullet.
+    assert "- 連ガ無し" in block
+    assert "連続護衛不可" in block
+    # 狩人 / 狩 synonym mapping to 騎士.
+    assert "狩人" in block
+    assert "騎士と同じ意味" in block
+
+
+def test_game_rules_block_clarifies_sutekogo_is_legal_target_choice_not_skip() -> None:
+    """The 捨て護衛 vocabulary bullet must explicitly say it is a
+    legal-candidate selection in this bot, not a skip / unsubmitted /
+    no-target action — otherwise an LLM might map 捨て護衛 to `intent=skip`."""
+    block = _build_game_rules_block()
+    assert "捨て護衛" in block
+    assert "合法護衛候補" in block
+    assert "1 名を選ぶ行動" in block
+    # Negation phrasing — captures all three forbidden interpretations.
+    assert "未提出" in block
+    assert "skip ではない" in block
+
+
+def test_game_rules_block_advanced_guard_vocab_no_wolf_coordination_leak() -> None:
+    """Defensive duplicate of the existing leak guard, focused on the new
+    advanced-guard bullets — they must not bleed wolf-coordination vocab into
+    the shared rules block."""
+    block = _build_game_rules_block()
+    assert "相方" not in block
+    assert "襲撃先を揃える" not in block
+
+
 def test_game_rules_block_terminology_has_no_wolf_coordination_leak() -> None:
     """Shared terminology must not bleed wolf-coordination vocabulary into
     non-wolf prompts. `相方` and the exact phrase `襲撃先を揃える` are the two
@@ -765,6 +806,45 @@ def test_knight_strategy_covers_endgame_and_legal_guard_history() -> None:
     assert "死亡済み" in block
 
 
+def test_knight_strategy_covers_multi_axis_guard_evaluation() -> None:
+    """Knight strategy must teach a 5-axis comparison rather than fixing a
+    single guard target. The five axis tokens must all appear so the LLM can
+    weigh candidates rather than always defaulting to the truth-leaning info
+    role."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "護衛価値" in block
+    assert "襲撃されやすさ" in block
+    assert "GJ" in block
+    assert "次夜" in block
+    assert "連続護衛不可" in block
+    assert "説明可能性" in block
+
+
+def test_knight_strategy_distinguishes_tetsuban_vs_sutekogo() -> None:
+    """Knight strategy must define both 鉄板護衛 and 捨て護衛 with their
+    bot-specific framing: 鉄板護衛 prioritized when key roles are at risk,
+    捨て護衛 always a legal-candidate choice (not skip)."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "鉄板護衛" in block
+    assert "捨て護衛" in block
+    # 鉄板護衛 bullet must frame it as the priority when key roles are at risk.
+    assert "重要役職" in block
+    assert "優先" in block
+    # 捨て護衛 bullet must explicitly say it is a legal-candidate, 1-name
+    # choice — never skip / unsubmitted / no-target.
+    assert "合法候補" in block
+    assert "1 名" in block
+    assert "skip" in block
+
+
+def test_knight_strategy_warns_against_sutekogo_overuse() -> None:
+    """The knight must not adopt 捨て護衛 as a default. The strategy must
+    contain a gating sentence that prefers 鉄板護衛 when key roles are at
+    immediate risk and explicitly forbids 捨て護衛 as a default action."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "毎夜の既定行動にしない" in block
+
+
 def test_villager_strategy_anchors_in_checklist() -> None:
     """Villager must still forbid CO fakes AND must anchor speech in the
     shared enthusiast checklist (CO / divination / vote histories)."""
@@ -891,6 +971,31 @@ def test_task_night_action_non_wolf_excludes_attack_checklist(
     assert "騎士候補度" not in text
     assert "騎士探し" not in text
     assert "翌日の説明しやすさ" not in text
+
+
+def test_task_night_action_knight_guard_includes_evaluation_checklist() -> None:
+    """KNIGHT_GUARD task hands the knight a 5-axis checklist inline so even an
+    LLM that ignored the strategy block sees the rubric on the action turn.
+    Critical: the knight task must NOT reuse the wolf-attack vocabulary
+    (襲撃価値 / 護衛されやすさ / 騎士候補度 / 翌日の説明しやすさ / 騎士探し) —
+    those would trip the existing leak guard. The knight uses its own
+    parallel vocabulary (鉄板護衛すべき価値 / 今夜実際に噛まれそうか /
+    次夜に同じ相手を守れないリスク / 捨て護衛で本命護衛余地を残す価値)."""
+    text = task_night_action(SubmissionType.KNIGHT_GUARD, ["席1 A", "席2 B"])
+    # Positive — knight checklist anchors must reach the LLM via the task block.
+    assert "鉄板護衛" in text
+    assert "捨て護衛" in text
+    assert "次夜" in text
+    assert "GJ" in text
+    # 捨て護衛 must be framed as a legal-candidate, 1-name selection (not skip).
+    assert "1 名" in text
+    assert "skip" in text
+    # Negative — none of the wolf-task forbidden substrings may appear here.
+    assert "襲撃価値" not in text
+    assert "護衛されやすさ" not in text
+    assert "騎士候補度" not in text
+    assert "翌日の説明しやすさ" not in text
+    assert "騎士探し" not in text
 
 
 # ----------------------------------------------------- wolf-chat task block
