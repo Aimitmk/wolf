@@ -302,6 +302,8 @@ class GameService:
             return None
         if game.phase is Phase.DAY_VOTE:
             votes = await self.repo.load_votes(game.id, day=game.day_number, round_=0)
+            if not self._vote_resolution_due(game, players, votes, now):
+                return None
             return plan_day_vote_resolve(game, players, seats, votes, game.force_skip_pending, now)
         if game.phase is Phase.DAY_RUNOFF_SPEECH:
             # Recompute tied candidates from round 0 votes — never stored.
@@ -329,6 +331,8 @@ class GameService:
             alive = {p.seat_no for p in players if p.alive}
             tied = compute_vote_result(round0, alive).tied
             round1 = await self.repo.load_votes(game.id, day=game.day_number, round_=1)
+            if not self._vote_resolution_due(game, players, round1, now):
+                return None
             return plan_day_runoff_resolve(
                 game,
                 players,
@@ -801,6 +805,26 @@ class GameService:
     async def _all_votes_in(self, game: Game, round_: int) -> bool:
         players = await self.repo.load_players(game.id)
         votes = await self.repo.load_votes(game.id, day=game.day_number, round_=round_)
+        alive = {p.seat_no for p in players if p.alive}
+        submitted = {v.voter_seat for v in votes if v.voter_seat in alive}
+        return alive.issubset(submitted)
+
+    def _vote_resolution_due(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        votes: Sequence[Vote],
+        now: int,
+    ) -> bool:
+        # Pure data-in / bool-out so _plan_next can reuse loaded snapshot without re-IO.
+        # Without this guard a stale wake or partial LLM-vote completion would call
+        # plan_day_vote_resolve before the deadline and the domain function — which
+        # has no knowledge of time — would treat any missing voter as a host-decision
+        # trigger. Resolution is only due when force-skip, deadline, or all-voted holds.
+        if game.force_skip_pending:
+            return True
+        if game.deadline_epoch is not None and now >= game.deadline_epoch:
+            return True
         alive = {p.seat_no for p in players if p.alive}
         submitted = {v.voter_seat for v in votes if v.voter_seat in alive}
         return alive.issubset(submitted)

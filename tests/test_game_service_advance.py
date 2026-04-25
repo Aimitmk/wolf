@@ -10,6 +10,7 @@ import pytest_asyncio
 from tests.fakes import FakeClock, FakeDiscordAdapter, FakeLLMAdapter
 from wolfbot.domain.enums import DeathCause, Phase, Role, SubmissionType, SubmitResult
 from wolfbot.domain.models import Game, PlayerUpdate, Seat, Transition
+from wolfbot.domain.rules import previous_guard_seat_for_night
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.game_service import GameService, new_game_id
 from wolfbot.services.timer_service import EngineRegistry
@@ -301,6 +302,270 @@ async def test_host_extend_resumes_phase_with_new_deadline(
     assert loaded.phase is Phase.DAY_VOTE
     assert loaded.deadline_epoch == clock.now + 120
     assert await repo.load_pending_decision(game.id) is None
+
+
+# ----- DAY_VOTE / DAY_RUNOFF deadline-guard regression tests -------------
+# These pin the service-layer guard added to GameService._plan_next that
+# prevents a stale wake or partial LLM-vote completion from collapsing an
+# active vote phase into WAITING_HOST_DECISION before the deadline. The bug
+# observed in production was day-3 specific in symptom but day-number-
+# agnostic in mechanism, so the tests cover day-1 typical cases AND a
+# day-3 progression to confirm parity.
+
+
+async def test_advance_day_vote_before_deadline_with_missing_votes_stays_in_phase(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Day-1 DAY_VOTE before the deadline with only some voters submitted must
+    stay in DAY_VOTE — without the guard, plan_day_vote_resolve would see
+    missing voters and immediately enter WAITING_HOST_DECISION."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP -> NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 -> DAY_DISCUSSION
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+
+    # 3 of 9 voted, 6 still pending. Deadline (clock+60) has not been reached.
+    for voter in (1, 2, 3):
+        await service.submit_vote(game.id, voter, target_seat=7, round_=0, day=1)
+
+    # Stale wake / spurious advance — must not collapse into WAITING.
+    await service.advance(game.id)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_VOTE, (
+        f"DAY_VOTE must hold before deadline with missing votes; got {loaded.phase}"
+    )
+    assert loaded.deadline_epoch is not None and loaded.deadline_epoch > clock.now
+    assert await repo.load_pending_decision(game.id) is None
+
+
+async def test_advance_day_vote_before_deadline_with_only_llm_votes_stays_in_phase(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Models the LLM-fire-and-forget case: LLM seats (6-9) submit votes via
+    background tasks while humans (1-5) are still thinking. Each LLM submission
+    can wake the engine; advance must stay in DAY_VOTE until the human side
+    finishes or the deadline arrives."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+
+    # Only LLM seats voted; humans still pending. Deadline still in the future.
+    for voter in (6, 7, 8, 9):
+        await service.submit_vote(game.id, voter, target_seat=1, round_=0, day=1)
+
+    await service.advance(game.id)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_VOTE
+    assert await repo.load_pending_decision(game.id) is None
+
+
+async def test_advance_day_vote_resolves_when_all_alive_voted_before_deadline(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Regression guard: the early-resolve path (all alive voters submitted →
+    resolve immediately even before deadline) must still work after the new
+    guard is added."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+
+    # All 9 vote for seat 1; deadline still in the future.
+    for voter in range(1, 10):
+        target = 1 if voter != 1 else 2
+        await service.submit_vote(game.id, voter, target, round_=0, day=1)
+
+    # Deadline still in the future — the guard must let resolution proceed
+    # because all alive voters submitted.
+    assert clock.now < (await repo.load_game(game.id)).deadline_epoch  # type: ignore[operator,union-attr]
+    await service.advance(game.id)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase in (Phase.NIGHT, Phase.GAME_OVER)
+
+
+async def test_advance_day_runoff_before_deadline_with_missing_votes_stays_in_phase(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Same guard for DAY_RUNOFF: stale wake before the runoff deadline with
+    missing runoff votes must keep the game in DAY_RUNOFF, not WAITING."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+
+    # Construct a tie between seats 1 and 5 so we go to DAY_RUNOFF.
+    for v in (1, 2, 3, 4):
+        await service.submit_vote(game.id, v, target_seat=5, round_=0, day=1)
+    for v in (6, 7, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=1, round_=0, day=1)
+    await service.submit_vote(game.id, 5, target_seat=None, round_=0, day=1)
+
+    await service.advance(game.id)  # → DAY_RUNOFF_SPEECH (intermediate phase)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    if loaded.phase is Phase.DAY_RUNOFF_SPEECH:
+        # Push past the speech deadline so we land in DAY_RUNOFF.
+        clock.tick(loaded.deadline_epoch - clock.now if loaded.deadline_epoch else 60)
+        await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_RUNOFF, f"expected DAY_RUNOFF, got {loaded.phase}"
+
+    # Only 2 of 9 cast a runoff vote; deadline still in the future.
+    await service.submit_vote(game.id, 2, target_seat=1, round_=1, day=1)
+    await service.submit_vote(game.id, 3, target_seat=5, round_=1, day=1)
+
+    # Stale advance — must not collapse into WAITING.
+    await service.advance(game.id)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_RUNOFF
+    assert await repo.load_pending_decision(game.id) is None
+
+
+async def test_advance_day_vote_day3_before_deadline_stays_in_phase(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """End-to-end day-3 regression for the production bug: drive through day 1
+    and day 2 by voting out a villager and resolving night actions, then on
+    day 3 verify the same guard prevents WAITING_HOST_DECISION before deadline
+    with missing voters. Confirms the guard behavior is uniform across days."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)  # SETUP → NIGHT_0
+    await service.advance(game.id)  # NIGHT_0 → DAY_DISCUSSION day 1
+
+    for day in (1, 2):
+        next_phase = await _drive_one_day(repo, service, clock, game.id, day=day)
+        if next_phase is not Phase.DAY_DISCUSSION:
+            # Game ended before reaching day 3; nothing to test on day 3 path.
+            # Mark as skipped via early return (regression test is conditional
+            # on the wolves-survive-to-day-3 trajectory, deterministic for
+            # rng=Random(0)).
+            return
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_DISCUSSION
+    assert loaded.day_number == 3
+
+    # Advance to DAY_VOTE day 3.
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=3)
+    clock.tick(180)  # day 3 discussion duration
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_VOTE
+    assert loaded.day_number == 3
+
+    # Stale wake on day-3 DAY_VOTE with no votes yet — must stay in phase.
+    await service.advance(game.id)
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_VOTE
+    assert loaded.day_number == 3
+    assert await repo.load_pending_decision(game.id) is None
+
+
+async def _drive_one_day(
+    repo: SqliteRepo,
+    service: GameService,
+    clock: FakeClock,
+    game_id: str,
+    *,
+    day: int,
+) -> Phase:
+    """Advance one full day cycle from DAY_DISCUSSION day=N to DAY_DISCUSSION
+    day=N+1 (or earlier exit). Returns the phase after the NIGHT advance.
+
+    Strategy: vote out a villager each day so wolves survive; submit all
+    required night actions (wolf attack on a villager, seer divine, knight
+    guard) so NIGHT resolves cleanly.
+    """
+    await _seed_llm_discussion_rounds_done(repo, game_id, day=day)
+    clock.tick(300 if day == 1 else 240 if day == 2 else 180)
+    await service.advance(game_id)  # DAY_DISCUSSION → DAY_VOTE
+
+    players = await repo.load_players(game_id)
+    villager_target = next(p.seat_no for p in players if p.alive and p.role is Role.VILLAGER)
+    voters = [p.seat_no for p in players if p.alive]
+    for v in voters:
+        if v == villager_target:
+            other = next(p.seat_no for p in players if p.alive and p.seat_no != v)
+            await service.submit_vote(game_id, v, other, round_=0, day=day)
+        else:
+            await service.submit_vote(game_id, v, villager_target, round_=0, day=day)
+    await service.advance(game_id)  # DAY_VOTE → NIGHT (or GAME_OVER)
+
+    loaded = await repo.load_game(game_id)
+    assert loaded is not None
+    if loaded.phase is not Phase.NIGHT:
+        return loaded.phase
+
+    players = await repo.load_players(game_id)
+    wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
+    villagers = [p.seat_no for p in players if p.alive and p.role is Role.VILLAGER]
+    seer = next((p.seat_no for p in players if p.alive and p.role is Role.SEER), None)
+    knight = next((p.seat_no for p in players if p.alive and p.role is Role.KNIGHT), None)
+
+    attack_target = (
+        villagers[0]
+        if villagers
+        else next(p.seat_no for p in players if p.alive and p.seat_no not in wolves)
+    )
+    for w in wolves:
+        await service.submit_night_action(
+            game_id, w, SubmissionType.WOLF_ATTACK, attack_target, day=day
+        )
+    if seer is not None:
+        seer_target = next(p.seat_no for p in players if p.alive and p.seat_no != seer)
+        await service.submit_night_action(
+            game_id, seer, SubmissionType.SEER_DIVINE, seer_target, day=day
+        )
+    if knight is not None:
+        loaded_for_day = await repo.load_game(game_id)
+        assert loaded_for_day is not None
+        prev = await repo.load_previous_guard(game_id)
+        prev_target = previous_guard_seat_for_night(prev, loaded_for_day.day_number)
+        forbidden: set[int] = {knight}
+        if prev_target is not None:
+            forbidden.add(prev_target)
+        knight_target = next(p.seat_no for p in players if p.alive and p.seat_no not in forbidden)
+        await service.submit_night_action(
+            game_id, knight, SubmissionType.KNIGHT_GUARD, knight_target, day=day
+        )
+
+    await service.advance(game_id)  # NIGHT → DAY_DISCUSSION day+1
+    loaded = await repo.load_game(game_id)
+    assert loaded is not None
+    return loaded.phase
 
 
 async def test_host_abort_ends_game(

@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import random
 
+import pytest
+
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, LogEntry, NightAction, Seat, Vote
 from wolfbot.persistence.sqlite_repo import SqliteRepo
@@ -1274,6 +1276,51 @@ async def test_ask_system_prompt_distinguishes_sole_survivor_from_lone_co(
     assert "自動的に真置きしない" in system_prompt
     assert "死亡済み" in system_prompt
     assert "死亡タイミング" in system_prompt
+
+
+async def test_ask_system_prompt_warns_against_last_surviving_co_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """Every LLM seat must receive the conclusion-side refinement: a
+    last-surviving CO is not automatically true. Wolves can leave an info role
+    unattacked, get the counter executed, or keep a CO around for protective
+    cover. Sample multiple roles to exercise both wolf-faction and village-
+    faction paths through the shared rules block."""
+    for role in (Role.VILLAGER, Role.SEER, Role.WEREWOLF, Role.MADMAN, Role.KNIGHT):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "最後まで生き残った" in system_prompt, f"{role.name} missed last-survivor warning"
+        assert "噛まずに残した" in system_prompt, f"{role.name} missed wolf-skip framing"
+        assert "単独 CO だから真" in system_prompt, f"{role.name} missed shortcut prohibition"
+
+
+async def test_ask_system_prompt_villager_seat_prohibits_villager_co(
+    repo: SqliteRepo,
+) -> None:
+    """A villager LLM's system prompt must explicitly forbid declaring
+    '村人CO' / '素村CO' / '普通の村人です' / '役職は村人です' as a trust-buy and
+    must point at the alternative '非 CO の灰' stance. The guidance reaches the
+    villager via `_ROLE_STRATEGIES[Role.VILLAGER]`, so this test pins the
+    end-to-end composition path through `build_system_prompt`."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "村人CO" in system_prompt
+    assert "素村CO" in system_prompt
+    assert "普通の村人です" in system_prompt
+    assert "役職は村人です" in system_prompt
+    assert "村人は能力結果を持たない" in system_prompt
+    assert "非 CO の灰" in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT])
+async def test_ask_system_prompt_villager_co_prohibition_isolated(
+    repo: SqliteRepo, role: Role
+) -> None:
+    """The villager-CO prohibition is scoped to the villager strategy block
+    only; other roles must not see '村人CO' / '素村CO' in their system prompt.
+    Cross-leak would either confuse fake-CO planning (wolf, madman) or
+    accidentally suppress legitimate role-CO (seer, medium, knight)."""
+    system_prompt = await _capture_ask_system_prompt(repo, role)
+    assert "村人CO" not in system_prompt, f"{role.name} saw '村人CO' in system prompt"
+    assert "素村CO" not in system_prompt, f"{role.name} saw '素村CO' in system prompt"
 
 
 async def test_ask_system_prompt_explains_medium_white_semantics_for_any_role(

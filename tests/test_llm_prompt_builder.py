@@ -137,6 +137,18 @@ def test_game_rules_block_includes_dead_co_in_comparison() -> None:
     assert "死亡タイミング" in block
 
 
+def test_game_rules_block_warns_against_treating_last_surviving_co_as_truth() -> None:
+    """When a counter-CO history exists and only one CO is left alive, the LLM
+    must not short-circuit to "lone CO ⇒ truth". The wording must explicitly
+    name the wolf-side mechanisms that produce a sole survivor (not attacking
+    the info role, getting a counter-CO executed, leaving them for protective
+    cover) and forbid the "single CO so truth" shortcut."""
+    block = _build_game_rules_block()
+    assert "最後まで生き残った" in block
+    assert "噛まずに残した" in block
+    assert "単独 CO だから真" in block
+
+
 def test_game_rules_block_co_recognition_requires_explicit_self_declaration() -> None:
     """Topical mentions / hypotheticals / references to others using CO
     vocabulary (`占いCO が出たら` etc.) must NOT be read as the speaker's own
@@ -759,6 +771,36 @@ def test_villager_strategy_anchors_in_checklist() -> None:
     assert "CO 履歴" in block
     assert "判定履歴" in block
     assert "1〜2 点" in block
+
+
+def test_villager_strategy_prohibits_villager_co() -> None:
+    """The villager must be explicitly forbidden from declaring '村人CO' /
+    '素村CO' / '普通の村人です' / '役職は村人です' as a trust-buy. The block
+    must also offer the alternative stance: stay non-CO, reason from public
+    information."""
+    block = _build_strategy_block(Role.VILLAGER)
+    # Forbidden phrases the villager must not say.
+    assert "村人CO" in block
+    assert "素村CO" in block
+    assert "普通の村人です" in block
+    assert "役職は村人です" in block
+    # Reason: villagers have no ability result so CO carries no proof.
+    assert "村人は能力結果を持たない" in block
+    # Alternative stance the villager should take instead.
+    assert "非 CO の灰" in block
+    assert "役職 CO はない" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT])
+def test_villager_co_prohibition_does_not_leak_to_other_roles(role: Role) -> None:
+    """The villager-CO prohibition is scoped to the villager strategy. Other
+    roles must not see '村人CO' / '素村CO' wording — the wolf and madman fake
+    seer/medium/knight, never villager; the real seer/medium/knight have their
+    own CO playbooks. Cross-leak would either confuse fake-CO planning or
+    suppress legitimate role-CO."""
+    block = _build_strategy_block(role)
+    assert "村人CO" not in block
+    assert "素村CO" not in block
 
 
 # --------------------------------------------------- build_system_prompt
