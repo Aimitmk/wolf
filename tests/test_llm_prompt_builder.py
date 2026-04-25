@@ -137,6 +137,34 @@ def test_game_rules_block_includes_dead_co_in_comparison() -> None:
     assert "死亡タイミング" in block
 
 
+def test_game_rules_block_co_recognition_requires_explicit_self_declaration() -> None:
+    """Topical mentions / hypotheticals / references to others using CO
+    vocabulary (`占いCO が出たら` etc.) must NOT be read as the speaker's own
+    CO. The rules block must explicitly carry the self-declaration policy and
+    the example phrases for each side (topical vs. self-declaration)."""
+    block = _build_game_rules_block()
+    # Topical phrases the LLM must NOT misread as self-CO.
+    assert "占いCOが出たら" in block
+    assert "霊媒COについて" in block
+    # Self-declaration example phrases.
+    assert "私は占い師です" in block
+    assert "占い師COします" in block
+    assert "霊媒師として出ます" in block
+    # Policy framing.
+    assert "話題化" in block
+    assert "名乗り" in block
+    assert "判断に迷うときは CO として数えない" in block
+
+
+def test_game_rules_block_co_recognition_no_wolf_coordination_leak() -> None:
+    """Defensive duplicate of the existing terminology leak-test focused on the
+    new CO-recognition bullets — guarantees the new policy text does not bleed
+    wolf-coordination vocabulary into the shared rules block."""
+    block = _build_game_rules_block()
+    assert "相方" not in block
+    assert "襲撃先を揃える" not in block
+
+
 def test_game_rules_block_explains_medium_white_means_not_wolf_only() -> None:
     """Medium white = `not a real werewolf`, not a role-claim confirmation.
     Every LLM seat must see this so that no role overreads a white result."""
@@ -924,7 +952,7 @@ def test_build_system_prompt_speech_profile_respects_persona() -> None:
 
 
 # =========================================================================
-# build_user_context — analysis blocks (CO parser, board, ropes, estimates)
+# build_user_context — rope block + raw-log passthrough invariants
 # =========================================================================
 
 
@@ -959,7 +987,11 @@ def _ctx_speech(text: str, *, actor_seat: int, day: int = 1) -> dict[str, object
     return {"kind": "PLAYER_SPEECH", "text": text, "actor_seat": actor_seat, "day": day}
 
 
-def test_build_user_context_includes_co_analysis_heading() -> None:
+def test_build_user_context_no_co_parser_sections() -> None:
+    """The pre-digest CO parser sections (CO list / 盤面分類 / 役職推定メモ) must
+    not appear in user_context. Even seeded with declarative-looking PLAYER_SPEECH
+    text, the build no longer attaches machine-summarized CO output — the LLM
+    is expected to read the raw 公開ログ要約 and judge in context."""
     seats = [_ctx_seat(1, "Alice"), _ctx_seat(2, "Bob"), _ctx_seat(3, "Carol")]
     players = [_ctx_player(1), _ctx_player(2), _ctx_player(3)]
     out = build_user_context(
@@ -968,31 +1000,78 @@ def test_build_user_context_includes_co_analysis_heading() -> None:
         my_seat=seats[0],
         seats=seats,
         players=players,
-        public_logs=[_ctx_speech("占い師CO", actor_seat=1)],
+        public_logs=[
+            _ctx_speech("占い師CO", actor_seat=1),
+            _ctx_speech("霊媒師CO", actor_seat=2),
+        ],
         private_logs=[],
     )
-    assert "## CO・判定の機械整理" in out
-    assert "占い師CO: 席1 Alice" in out
+    assert "## CO・判定の機械整理" not in out
+    assert "## 盤面分類" not in out
+    assert "## 役職推定メモ (公開情報ベース)" not in out
+    # The parser-style "占い師CO: 席X" / "霊媒師CO: 席X" / "公開CO履歴ベース"
+    # rendering lines are the canonical anti-pattern; not produced anywhere now.
+    assert "占い師CO: 席" not in out
+    assert "霊媒師CO: 席" not in out
+    assert "公開CO履歴ベース" not in out
 
 
-def test_build_user_context_board_classification_label_renders() -> None:
-    seats = [_ctx_seat(i, n) for i, n in enumerate(["A", "B", "C", "D"], start=1)]
-    players = [_ctx_player(i) for i in range(1, 5)]
+def test_build_user_context_topical_co_phrase_does_not_create_self_co() -> None:
+    """A speaker who merely raises `占いCO` as a topic / hypothetical must not
+    be tagged as a self-CO. The raw text still passes through 公開ログ要約 so
+    the LLM can read it in context."""
+    seats = [_ctx_seat(1, "Alice"), _ctx_seat(2, "Bob")]
+    players = [_ctx_player(1), _ctx_player(2)]
+    speech = "占いCOが出たらどう見るか考えたい"
     out = build_user_context(
         game=_ctx_game(),
         me=players[0],
         my_seat=seats[0],
         seats=seats,
         players=players,
-        public_logs=[
-            _ctx_speech("占い師CO", actor_seat=1),
-            _ctx_speech("占い師CO", actor_seat=2),
-            _ctx_speech("霊媒師CO", actor_seat=3),
-        ],
+        public_logs=[_ctx_speech(speech, actor_seat=2)],
         private_logs=[],
     )
-    assert "## 盤面分類" in out
-    assert "公開CO履歴ベース: 2-1" in out
+    assert "占い師CO: 席2" not in out
+    # Raw speech survives in the public log dump.
+    assert speech in out
+
+
+def test_build_user_context_topical_medium_phrase_does_not_create_self_co() -> None:
+    """Same invariant for medium-CO topical mentions — `霊媒COについて…` is a
+    discussion prompt, not a self-CO."""
+    seats = [_ctx_seat(1, "Alice"), _ctx_seat(2, "Bob"), _ctx_seat(3, "Carol")]
+    players = [_ctx_player(1), _ctx_player(2), _ctx_player(3)]
+    speech = "霊媒COについてどう見る？"
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[_ctx_speech(speech, actor_seat=3)],
+        private_logs=[],
+    )
+    assert "霊媒師CO: 席3" not in out
+    assert speech in out
+
+
+def test_build_user_context_passes_raw_player_speech_through() -> None:
+    """The raw PLAYER_SPEECH text reaches user_context with the seat-attributed
+    `[PLAYER_SPEECH] 席N {name}: …` formatting, so the LLM can spot CO
+    declarations on its own."""
+    seats = [_ctx_seat(1, "Alice"), _ctx_seat(2, "Bob")]
+    players = [_ctx_player(1), _ctx_player(2)]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[_ctx_speech("占い師COします。 席2 Bob 白", actor_seat=1)],
+        private_logs=[],
+    )
+    assert "[PLAYER_SPEECH] 席1 Alice: 占い師COします。 席2 Bob 白" in out
 
 
 def test_build_user_context_rope_count_with_alive_dead_breakdown() -> None:
@@ -1015,32 +1094,17 @@ def test_build_user_context_rope_count_with_alive_dead_breakdown() -> None:
     assert "3 縄" in out
 
 
-def test_build_user_context_role_estimate_memo_one_line_per_seat() -> None:
-    seats = [_ctx_seat(i, f"S{i}") for i in range(1, 5)]
-    players = [_ctx_player(i) for i in range(1, 5)]
-    out = build_user_context(
-        game=_ctx_game(),
-        me=players[0],
-        my_seat=seats[0],
-        seats=seats,
-        players=players,
-        public_logs=[],
-        private_logs=[],
-    )
-    assert "## 役職推定メモ (公開情報ベース)" in out
-    for i in range(1, 5):
-        assert f"席{i} S{i}:" in out
-
-
-def test_build_user_context_does_not_leak_real_role_into_estimate() -> None:
-    """Even when the players carry real roles (WEREWOLF / SEER / MADMAN), the
-    role-estimate memos must reflect only public claims. With no public CO and
-    no incoming color, every seat looks like 灰."""
-    seats = [_ctx_seat(i, f"S{i}") for i in range(1, 4)]
-    players = [
-        _ctx_player(1, role=Role.WEREWOLF),
-        _ctx_player(2, role=Role.SEER),
-        _ctx_player(3, role=Role.MADMAN),
+@pytest.mark.parametrize(
+    "alive, dead, ropes",
+    [(9, 0, 4), (7, 2, 3), (5, 4, 2), (3, 6, 1), (2, 7, 0)],
+)
+def test_build_user_context_rope_summary_parametrized(alive: int, dead: int, ropes: int) -> None:
+    """Rope formula coverage migrated from the deleted test_llm_context_analysis.py.
+    Asserts against the user_context block directly so the helper is exercised
+    through its only public surface."""
+    seats = [_ctx_seat(i, f"S{i}") for i in range(1, alive + dead + 1)]
+    players = [_ctx_player(i, alive=True) for i in range(1, alive + 1)] + [
+        _ctx_player(i, alive=False) for i in range(alive + 1, alive + dead + 1)
     ]
     out = build_user_context(
         game=_ctx_game(),
@@ -1051,18 +1115,65 @@ def test_build_user_context_does_not_leak_real_role_into_estimate() -> None:
         public_logs=[],
         private_logs=[],
     )
-    estimate_section = out.split("## 役職推定メモ (公開情報ベース)")[1].split(
-        "## あなたの私的メモ"
-    )[0]
-    assert "人狼" not in estimate_section
-    assert "占い師" not in estimate_section
-    assert "狂人" not in estimate_section
-    assert "灰" in estimate_section
+    assert "## 縄数・PP/RPPリスク" in out
+    assert f"生存 {alive} 人 / 死亡 {dead} 人" in out
+    assert f"{ropes} 縄" in out
+    assert "9人村開始時は4縄" in out
 
 
-def test_build_user_context_block_order_analysis_before_existing_logs() -> None:
-    """Analysis blocks must come BEFORE the existing 私的メモ / 公開ログ要約 /
-    自分の直近の発言 blocks so the LLM sees the digested view first."""
+def test_build_user_context_rope_endgame_note_at_3_alive() -> None:
+    seats = [_ctx_seat(i, f"S{i}") for i in range(1, 10)]
+    players = [_ctx_player(i, alive=True) for i in range(1, 4)] + [
+        _ctx_player(i, alive=False) for i in range(4, 10)
+    ]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[],
+        private_logs=[],
+    )
+    assert "最終局面" in out
+
+
+def test_build_user_context_rope_pp_warning_at_5_alive() -> None:
+    seats = [_ctx_seat(i, f"S{i}") for i in range(1, 10)]
+    players = [_ctx_player(i, alive=True) for i in range(1, 6)] + [
+        _ctx_player(i, alive=False) for i in range(6, 10)
+    ]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[],
+        private_logs=[],
+    )
+    assert "PP/RPP" in out
+
+
+def test_build_user_context_rope_normal_note_at_9_alive() -> None:
+    seats = [_ctx_seat(i, f"S{i}") for i in range(1, 10)]
+    players = [_ctx_player(i, alive=True) for i in range(1, 10)]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[],
+        private_logs=[],
+    )
+    assert "通常進行" in out
+
+
+def test_build_user_context_block_order_after_co_parser_removal() -> None:
+    """After dropping the CO parser, the surviving block order is:
+    rope block → 私的メモ → 公開ログ要約 → 自分の直近の発言. The deleted
+    parser headings must be absent."""
     seats = [_ctx_seat(1, "Alice")]
     players = [_ctx_player(1)]
     out = build_user_context(
@@ -1074,19 +1185,19 @@ def test_build_user_context_block_order_analysis_before_existing_logs() -> None:
         public_logs=[],
         private_logs=[],
     )
-    co_idx = out.find("## CO・判定の機械整理")
-    board_idx = out.find("## 盤面分類")
     rope_idx = out.find("## 縄数・PP/RPPリスク")
-    estimate_idx = out.find("## 役職推定メモ (公開情報ベース)")
-    private_idx = out.find("## あなたの私的メモ")
-    public_idx = out.find("## 公開ログ要約")
+    priv_idx = out.find("## あなたの私的メモ")
+    pub_idx = out.find("## 公開ログ要約")
     own_idx = out.find("## 自分の直近の発言")
-    assert -1 < co_idx < board_idx < rope_idx < estimate_idx < private_idx < public_idx < own_idx
+    assert -1 < rope_idx < priv_idx < pub_idx < own_idx
+    assert "## CO・判定の機械整理" not in out
+    assert "## 盤面分類" not in out
+    assert "## 役職推定メモ (公開情報ベース)" not in out
 
 
 def test_build_user_context_wolf_partner_block_only_for_wolves() -> None:
     """Regression: the wolf-partner block remains gated to werewolves after the
-    analysis section was added between it and the rest of the prompt."""
+    CO-parser analysis section was removed from between it and the rest."""
     seats = [_ctx_seat(1, "Alice"), _ctx_seat(2, "Bob")]
     players = [
         _ctx_player(1, role=Role.WEREWOLF),
@@ -1117,23 +1228,3 @@ def test_build_user_context_wolf_partner_block_only_for_wolves() -> None:
     )
     assert "## 仲間の人狼" in wolf_view
     assert "## 仲間の人狼" not in villager_view
-
-
-def test_build_user_context_seer_result_resolves_seat_and_color() -> None:
-    seats = [_ctx_seat(1, "Alice"), _ctx_seat(3, "Carol")]
-    players = [_ctx_player(1), _ctx_player(3)]
-    out = build_user_context(
-        game=_ctx_game(),
-        me=players[0],
-        my_seat=seats[0],
-        seats=seats,
-        players=players,
-        public_logs=[_ctx_speech("占い結果: 席3 Carol 白", actor_seat=1)],
-        private_logs=[],
-    )
-    # Result claim shows up in the CO section.
-    assert "席1 Alice -> 席3 Carol 白" in out
-    # Carol's estimate marks 白もらい.
-    estimate_section = out.split("## 役職推定メモ (公開情報ベース)")[1]
-    assert "席3 Carol:" in estimate_section
-    assert "白もらい" in estimate_section

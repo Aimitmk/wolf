@@ -1498,23 +1498,26 @@ async def _capture_ask_user_context(
     return user_context
 
 
-async def test_ask_user_context_contains_analysis_blocks(repo: SqliteRepo) -> None:
-    """The four new analysis headings must reach the LLM user_context."""
+async def test_ask_user_context_contains_rope_block(repo: SqliteRepo) -> None:
+    """The deterministic rope block survives in user_context. The CO parser
+    sections (CO list / 盤面分類 / 役職推定メモ) are gone — the LLM now reads
+    raw 公開ログ from `## 公開ログ要約` and judges in context."""
     user_context = await _capture_ask_user_context(
         repo,
-        Role.SEER,
+        Role.VILLAGER,
         game_id="game-analysis",
         guild_id="guild-analysis",
     )
-    assert "## CO・判定の機械整理" in user_context
-    assert "## 盤面分類" in user_context
     assert "## 縄数・PP/RPPリスク" in user_context
-    assert "## 役職推定メモ (公開情報ベース)" in user_context
+    assert "## CO・判定の機械整理" not in user_context
+    assert "## 盤面分類" not in user_context
+    assert "## 役職推定メモ (公開情報ベース)" not in user_context
 
 
-async def test_ask_user_context_extracts_seer_co_from_public_logs(repo: SqliteRepo) -> None:
-    """A seat that uttered `占い師CO` in a public PLAYER_SPEECH log must show
-    up under the CO analysis section of every seat's user_context."""
+async def test_ask_user_context_passes_raw_co_speech_through(repo: SqliteRepo) -> None:
+    """A seat that uttered `占い師CO` in a public PLAYER_SPEECH log must reach
+    the LLM as the seat-attributed raw line in `## 公開ログ要約`. No
+    parser-style digest (`占い師CO: 席1`, `公開CO履歴ベース`) is rendered."""
     user_context = await _capture_ask_user_context(
         repo,
         Role.VILLAGER,
@@ -1522,18 +1525,20 @@ async def test_ask_user_context_extracts_seer_co_from_public_logs(repo: SqliteRe
         guild_id="guild-co-extract",
         speeches=[(1, "占い師COします。"), (2, "霊媒師COします。")],
     )
-    assert "占い師CO: 席1 H1" in user_context
-    assert "霊媒師CO: 席2 L2" in user_context
-    # Board classification picks up the 1-1.
-    assert "公開CO履歴ベース: 1-1" in user_context
+    assert "[PLAYER_SPEECH] 席1 H1: 占い師COします。" in user_context
+    assert "[PLAYER_SPEECH] 席2 L2: 霊媒師COします。" in user_context
+    # Parser-style digest output must NOT be present.
+    assert "占い師CO: 席1" not in user_context
+    assert "霊媒師CO: 席2" not in user_context
+    assert "公開CO履歴ベース" not in user_context
 
 
-async def test_ask_user_context_analysis_scoped_to_current_game_id(repo: SqliteRepo) -> None:
-    """CO data from a different game must not leak into the analysis block.
-
-    Companion to `test_ask_scopes_logs_to_current_game_id`: that test verifies
-    the raw log dump isolation; this verifies the parser/aggregator runs only
-    against the current game's logs."""
+async def test_ask_user_context_raw_logs_scoped_to_current_game_id(repo: SqliteRepo) -> None:
+    """Raw PLAYER_SPEECH text from a different game must not leak into game B's
+    user_context. Companion to `test_ask_scopes_logs_to_current_game_id`: that
+    test verifies the raw log dump isolation; this version pins that the
+    leaked CO speech and seat name from game A do not surface anywhere in
+    game B's prompt now that the parser-derived sections are gone."""
     leak_seat = Seat(
         seat_no=1, display_name="LEAK", discord_user_id="ux", is_llm=False, persona_key=None
     )
@@ -1552,7 +1557,7 @@ async def test_ask_user_context_analysis_scoped_to_current_game_id(repo: SqliteR
     )
     await repo.set_player_role(game_a.id, 1, Role.VILLAGER)
     await repo.set_player_role(game_a.id, 2, Role.SEER)
-    # Game A: a CO that should NOT bleed into game B's analysis.
+    # Game A: a CO speech that should NOT bleed into game B's user_context.
     await repo.insert_log_public(
         LogEntry(
             game_id=game_a.id,
@@ -1561,7 +1566,7 @@ async def test_ask_user_context_analysis_scoped_to_current_game_id(repo: SqliteR
             kind="PLAYER_SPEECH",
             actor_seat=1,
             visibility="PUBLIC",
-            text="占い師CO",
+            text="占い師COします。",
             created_at=1,
         )
     )
@@ -1573,10 +1578,12 @@ async def test_ask_user_context_analysis_scoped_to_current_game_id(repo: SqliteR
         game_id="g-leak-b",
         guild_id="guild-leak-b",
     )
-    # No COs in game B, so the analysis section must show "(なし)".
-    assert "占い師CO: (なし)" in user_context
-    # And the leak seat's display_name from game A must not appear anywhere.
+    # The leak seat's display_name from game A must not appear anywhere.
     assert "LEAK" not in user_context
+    # Game B never logged a CO, so neither the raw speech nor any CO substring
+    # from game A's logs should be present.
+    assert "占い師COします" not in user_context
+    assert "占い師CO" not in user_context
 
 
 async def test_ask_user_context_no_wolf_partner_block_for_villager(repo: SqliteRepo) -> None:

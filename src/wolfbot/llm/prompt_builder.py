@@ -19,7 +19,6 @@ from wolfbot.domain.enums import (
     SubmissionType,
 )
 from wolfbot.domain.models import Game, Player, Seat
-from wolfbot.llm.context_analysis import analyze_context, render_context_analysis
 from wolfbot.llm.personas import Persona
 
 SYSTEM_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "prompts" / "llm_system_prompt.md"
@@ -79,6 +78,14 @@ def _build_game_rules_block() -> str:
         "- 対抗 CO が出た場合は、死亡済み CO 者も推理対象として保持し、"
         "判定結果・発言の時系列・投票・襲撃結果・死亡タイミングとの整合性で真偽を比較し、"
         "どちらをより真寄りとするか判断する。\n"
+        "- 「占いCOが出たら」「霊媒COについて」「占いCOしている人をどう見るか」など、"
+        "CO 語彙が発言中に登場するだけでは、その発言者自身の CO ではない。"
+        "CO 語彙の話題化と本人による名乗りを区別する。\n"
+        "- CO として扱うのは、本人が「私は占い師です」「占い師COします」「霊媒師として出ます」"
+        "のように自分の役職として明確に宣言した場合だけである。"
+        "仮定・話題提示・他者への言及はどれも CO ではない。\n"
+        "- 疑わしい場合は、公開ログの前後関係、主語、引用や仮定の語尾 (〜なら / 〜について / 〜どう見る)、"
+        "自分自身の宣言か他者への言及かを確認する。判断に迷うときは CO として数えない。\n"
         "- 占い師 CO が 3 人・霊媒師 CO が 1 人の盤面を『3-1』と呼ぶ。"
         "3-1 では占い 3 人のうち 2 人が騙りである可能性が高く、"
         "単独の霊媒師 CO は対抗がいない限り原則として真寄りの進行軸として扱い、"
@@ -400,6 +407,29 @@ def build_system_prompt(
     )
 
 
+_VILLAGE_STARTING_ROPES = 4
+
+
+def _format_rope_block(players: Sequence[Player]) -> str:
+    alive = sum(1 for p in players if p.alive)
+    dead = len(players) - alive
+    ropes_left = max(0, (alive - 1) // 2)
+    if alive >= 6:
+        risk = f"残り処刑回数の目安: {ropes_left} 縄。終盤までは通常進行。"
+    elif alive >= 4:
+        risk = f"残り処刑回数の目安: {ropes_left} 縄。PP/RPP の可能性を確認してください。"
+    elif alive == 3:
+        risk = f"残り処刑回数の目安: {ropes_left} 縄。最終局面: PP/RPP に厳重注意。"
+    else:
+        risk = f"残り処刑回数の目安: {ropes_left} 縄。決着局面。"
+    return (
+        "## 縄数・PP/RPPリスク\n"
+        f"- 生存 {alive} 人 / 死亡 {dead} 人。{risk} "
+        f"(9人村開始時は{_VILLAGE_STARTING_ROPES}縄)\n"
+        "- 注意: 残り人狼数と狂人生存は公開情報から推定する必要があります。"
+    )
+
+
 def build_user_context(
     game: Game,
     me: Player,
@@ -445,8 +475,7 @@ def build_user_context(
                 "\n## 仲間の人狼 (村人には非公開)\n" + "、".join(partner_tokens) + "\n"
             )
 
-    analysis = analyze_context(seats=seats, players=players, public_logs=public_logs)
-    analysis_block = render_context_analysis(analysis, seats)
+    rope_block = _format_rope_block(players)
 
     return (
         f"あなたは座席 {my_seat.seat_no}『{my_seat.display_name}』です。\n"
@@ -455,7 +484,7 @@ def build_user_context(
         f"現在フェイズ: {game.phase.value} / day {game.day_number}\n"
         f"{wolf_partner_block}"
         "\n"
-        f"{analysis_block}\n"
+        f"{rope_block}\n"
         "\n"
         "## あなたの私的メモ (他者には非公開)\n"
         f"{priv_block}\n"
