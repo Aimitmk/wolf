@@ -511,13 +511,28 @@ class LLMAdapter:
                         day=game.day_number,
                     )
                     return
+                wolf_partner_tokens: list[str] = []
+                if voter.role is Role.WEREWOLF:
+                    wolf_partner_tokens = [
+                        seat_token(seats_by_no[p.seat_no])
+                        for p in all_players
+                        if p.alive
+                        and p.role is Role.WEREWOLF
+                        and p.seat_no != voter.seat_no
+                        and p.seat_no in seats_by_no
+                    ]
                 action = await self._ask(
                     game,
                     voter,
                     seat,
                     all_players,
                     seats,
-                    task_text=task_vote([seat_token(c) for c in cand_seats], runoff=round_ == 1),
+                    task_text=task_vote(
+                        [seat_token(c) for c in cand_seats],
+                        runoff=round_ == 1,
+                        role=voter.role,
+                        wolf_partner_tokens=wolf_partner_tokens,
+                    ),
                 )
                 if action.intent == "skip":
                     target = None

@@ -15,7 +15,7 @@ import pytest
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, LogEntry, NightAction, Seat, Vote
-from wolfbot.llm.prompt_builder import task_daytime_speech, task_night_action
+from wolfbot.llm.prompt_builder import task_daytime_speech, task_night_action, task_vote
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.llm_service import LLMAction, LLMAdapter
 
@@ -1240,6 +1240,95 @@ async def test_ask_system_prompt_non_wolf_excludes_wolf_attack_vocabulary(
         assert "護衛リスクを読んで噛む" not in system_prompt, (
             f"wolf-only '護衛リスクを読んで噛む' leaked into {role.name}"
         )
+
+
+async def test_ask_system_prompt_wolf_vote_task_includes_partner_checklist(
+    repo: SqliteRepo,
+) -> None:
+    """When a wolf voter's task_text is the partner-aware vote task, the
+    partner-name and vote-discipline checklist must reach the LLM via the
+    `{task_block}` slot. Exercises the path `_one_vote` uses for wolf seats."""
+    task_text = task_vote(
+        ["席1 H1"],
+        runoff=False,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席3 PartnerName"],
+    )
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.WEREWOLF, task_text=task_text
+    )
+    for token in (
+        "仲間の人狼",
+        "席3 PartnerName",
+        "身内票",
+        "ライン切り",
+        "票筋",
+        "透け",
+    ):
+        assert token in system_prompt, f"wolf vote system prompt missing {token!r}"
+
+
+async def test_ask_system_prompt_wolf_runoff_vote_task_includes_runoff_checklist(
+    repo: SqliteRepo,
+) -> None:
+    """The wolf runoff vote task injects the 決選投票 PP/RPP comparison into
+    the system prompt on top of the base partner checklist."""
+    task_text = task_vote(
+        ["席1 H1"],
+        runoff=True,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席3 PartnerName"],
+    )
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.WEREWOLF, task_text=task_text
+    )
+    for token in ("決選投票", "透け", "PP/RPP", "仲間の人狼"):
+        assert token in system_prompt, (
+            f"wolf runoff vote system prompt missing {token!r}"
+        )
+
+
+async def test_ask_system_prompt_non_wolf_vote_task_excludes_partner_vocabulary(
+    repo: SqliteRepo,
+) -> None:
+    """Non-wolf voters get the base `task_vote` text. Partner-name and
+    partner-action vocabulary must never appear in their system prompt,
+    even though `身内票` / `ライン切り` themselves are shared rules vocab."""
+    for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
+        task_text = task_vote(["席1 H1"], runoff=False, role=role)
+        system_prompt = await _capture_ask_system_prompt(
+            repo, role, task_text=task_text
+        )
+        assert "仲間の人狼" not in system_prompt, (
+            f"'仲間の人狼' leaked into {role.name} vote prompt"
+        )
+        assert "相方を救" not in system_prompt, (
+            f"'相方を救' leaked into {role.name} vote prompt"
+        )
+        assert "相方を切" not in system_prompt, (
+            f"'相方を切' leaked into {role.name} vote prompt"
+        )
+
+
+async def test_ask_system_prompt_madman_vote_task_drops_partner_token(
+    repo: SqliteRepo,
+) -> None:
+    """If a caller passes a partner token for a madman voter, `task_vote`'s
+    role gate must drop it before the prompt is built. The madman never
+    learns real wolf positions through the vote task."""
+    task_text = task_vote(
+        ["席1 H1"],
+        runoff=False,
+        role=Role.MADMAN,
+        wolf_partner_tokens=["席3 X"],
+    )
+    assert "仲間の人狼" not in task_text
+    assert "席3 X" not in task_text
+    system_prompt = await _capture_ask_system_prompt(
+        repo, Role.MADMAN, task_text=task_text
+    )
+    assert "仲間の人狼" not in system_prompt
+    assert "席3 X" not in system_prompt
 
 
 async def test_ask_system_prompt_role_strategy_isolated_between_roles(

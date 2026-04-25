@@ -312,7 +312,23 @@ _ROLE_STRATEGIES: dict[Role, str] = {
         "自分護衛・同一対象連続護衛・死亡済み対象護衛・死者が出た朝の護衛成功主張はしない。"
         "平和な朝に護衛成功を主張するなら、"
         "護衛先がその朝の襲撃失敗説明として自然か、襲撃計画と矛盾しないかを確認する。\n"
-        "- 結果を出す発言は、長い内部思考ではなく、結果と最も効く 1〜2 点の理由に絞る。"
+        "- 結果を出す発言は、長い内部思考ではなく、結果と最も効く 1〜2 点の理由に絞る。\n"
+        "- 投票は翌日以降に票筋として読まれる前提で動く。"
+        "相方が公開ログ上で処刑濃厚な局面で、自分だけ弱い別候補へ票を逸らすと、"
+        "相方を庇った狼として透けやすく、狼ラインを濃くする。\n"
+        "- 相方を救えない局面では、身内票やライン切りで相方へ投票し、"
+        "自分が白く残って翌日以降に動ける価値を優先することも熟練者の選択肢に入れる。"
+        "投票理由は公開ログ上の発言・CO 矛盾・票筋・視点漏れに沿って自然に作り、"
+        "前日までの自分の主張や騙り結果と矛盾しないようにする。\n"
+        "- 相方を救う票は、自然に票が集まり得る対抗候補がいて、"
+        "自分の過去発言・投票理由・騙り結果と矛盾しないときだけ選ぶ。"
+        "根拠の薄い票を逸らす動きや、無理筋な対抗誘導は狼ラインを濃くする。\n"
+        "- 決選投票では、相方救済の成功見込み、自分の透けリスク、"
+        "相方を切って翌日以降に残る価値、PP/RPP の近さと縄数を比較し、"
+        "もっとも勝ち筋が残る投票を選ぶ。\n"
+        "- 「常に相方へ投票」でも「常に相方を庇う」でもなく、"
+        "公開ログ上もっとも自然で、自分と相方の票筋が翌日以降に読まれても"
+        "勝ち筋が残る投票を毎回選ぶ。"
     ),
     Role.MADMAN: (
         "- あなたは人狼陣営の勝利に貢献するが、本物の人狼位置を知っている前提で話してはならない。"
@@ -660,16 +676,55 @@ def task_daytime_speech(day_number: int, discussion_round: int | None = None) ->
     return base
 
 
-def task_vote(candidate_tokens: Sequence[str], runoff: bool) -> str:
-    """Candidates are `席{N} {display_name}` tokens; target_name must echo one back."""
+def task_vote(
+    candidate_tokens: Sequence[str],
+    runoff: bool,
+    *,
+    role: Role | None = None,
+    wolf_partner_tokens: Sequence[str] = (),
+) -> str:
+    """Candidates are `席{N} {display_name}` tokens; target_name must echo one back.
+
+    `role` + `wolf_partner_tokens` are an additive, wolf-only enrichment: when the
+    voter is a werewolf and at least one alive partner exists, append a checklist
+    that names the partner and walks熟練狼's vote-discipline tradeoffs (身内票 /
+    ライン切り / 票逸らしリスク / 決選投票). Other roles always get the base text
+    so partner identity and wolf-side voting tactics never reach non-wolf prompts.
+    """
     names = "、".join(candidate_tokens)
     runoff_note = "これは決選投票です。" if runoff else ""
-    return (
+    base = (
         f"{runoff_note}投票先として合法な候補は: {names}\n"
         " `intent=vote`、`target_name` に候補トークン (例: `席3 Alice`) のいずれかを"
         " 厳密に一致させて返してください。`席番号` を含めないと同名の別席と区別できません。"
         " どうしても棄権したい場合は `intent=skip` を返し、`target_name` は `null` にします。"
     )
+    if role is not Role.WEREWOLF or not wolf_partner_tokens:
+        return base
+    partners = "、".join(wolf_partner_tokens)
+    runoff_extra = (
+        "\n- 決選投票では、相方救済の成功見込み、自分の透けリスク、"
+        "相方を切って翌日以降に残る価値、PP/RPP の近さと縄数を比較してください。"
+        if runoff
+        else ""
+    )
+    wolf_block = (
+        "\n\nあなたは人狼です。仲間の人狼: "
+        f"{partners}。"
+        "\n- 投票は翌日以降に票筋として読まれます。"
+        "仲間が公開ログ上で処刑濃厚なときに自分だけ弱い別候補へ票を逸らすと、"
+        "相方を庇った狼として透けやすくなります。"
+        "\n- 相方を救えない局面では、身内票やライン切りで相方へ投票することも検討してください。"
+        "投票理由は公開ログ上の発言・CO 矛盾・票筋・視点漏れに沿って自然に作り、"
+        "前日までの自分の発言や騙り結果と矛盾しないようにします。"
+        "\n- 相方を救う票は、自然に票が集まり得る対抗候補がいて、"
+        "自分の過去発言・投票理由・騙り結果と矛盾しないときだけ選んでください。"
+        "根拠の薄い票逸らしは狼ラインを濃くします。"
+        f"{runoff_extra}"
+        "\n- 最後は必ず合法候補トークンから 1 名を返します。"
+        "困っても安易に skip しないでください。"
+    )
+    return base + wolf_block
 
 
 def task_night_action(kind: SubmissionType, candidate_tokens: Sequence[str]) -> str:

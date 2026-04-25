@@ -29,6 +29,7 @@ from wolfbot.llm.prompt_builder import (
     build_user_context,
     task_daytime_speech,
     task_night_action,
+    task_vote,
     task_wolf_chat,
 )
 
@@ -1643,3 +1644,129 @@ def test_build_user_context_wolf_partner_block_only_for_wolves() -> None:
     )
     assert "## 仲間の人狼" in wolf_view
     assert "## 仲間の人狼" not in villager_view
+
+
+# ----------------------------- werewolf vote-discipline strategy & task_vote
+
+
+def test_wolf_strategy_block_contains_vote_discipline_vocabulary() -> None:
+    """The werewolf strategy block must teach 投票 discipline: 票筋 reads,
+    身内票/ライン切り on the partner when unsavable, 票逸らし risk, and the
+    決選投票 PP/RPP comparison. Without these, the LLM wolf falls back to
+    transparent partner-protection that exposes the wolf line."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    for token in (
+        "身内票",
+        "ライン切り",
+        "票筋",
+        "処刑濃厚",
+        "票を逸ら",
+        "決選投票",
+        "PP/RPP",
+        "透け",
+    ):
+        assert token in block, f"wolf strategy missing vote-discipline token {token!r}"
+    assert "相方を救" in block
+    assert "相方を切" in block
+
+
+@pytest.mark.parametrize(
+    "role",
+    [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER],
+)
+def test_non_wolf_strategy_excludes_partner_action_vocabulary(role: Role) -> None:
+    """Partner-name and partner-action vocabulary must stay wolf-only. Bare
+    `身内票` / `ライン切り` are shared in `_build_game_rules_block`, but the
+    wolf-specific phrasings (`仲間の人狼`, `相方を救う`, `相方を切る`) must
+    not appear in any other role's strategy block."""
+    block = _build_strategy_block(role)
+    assert "仲間の人狼" not in block, f"'仲間の人狼' leaked into {role.name}"
+    assert "相方を救" not in block, f"'相方を救' leaked into {role.name}"
+    assert "相方を切" not in block, f"'相方を切' leaked into {role.name}"
+
+
+def test_task_vote_baseline_unchanged_without_role() -> None:
+    """The default `task_vote(candidates, runoff)` call must keep the existing
+    base text and never inject partner vocabulary, so all pre-existing call
+    sites and non-wolf voters get the same instructions as before."""
+    text = task_vote(["席1 A", "席2 B"], runoff=False)
+    assert "投票先として合法な候補は: 席1 A、席2 B" in text
+    assert "仲間の人狼" not in text
+    assert "相方" not in text
+
+
+def test_task_vote_wolf_path_emits_partner_checklist() -> None:
+    """A wolf voter with at least one alive partner gets the partner-aware
+    vote checklist appended after the base candidate text."""
+    text = task_vote(
+        ["席1 A", "席2 B"],
+        runoff=False,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席2 B"],
+    )
+    for token in (
+        "仲間の人狼",
+        "席2 B",
+        "相方",
+        "身内票",
+        "ライン切り",
+        "票筋",
+        "処刑濃厚",
+        "透け",
+        "合法候補",
+    ):
+        assert token in text, f"wolf vote task missing token {token!r}"
+
+
+def test_task_vote_wolf_runoff_adds_runoff_checklist() -> None:
+    """The wolf runoff vote task must add the 決選投票-specific tradeoff
+    comparison (救済成功見込み・透けリスク・PP/RPP) on top of the base
+    wolf checklist."""
+    text = task_vote(
+        ["席1 A", "席2 B"],
+        runoff=True,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席2 B"],
+    )
+    for token in ("決選投票", "透け", "PP/RPP"):
+        assert token in text, f"wolf runoff vote task missing token {token!r}"
+
+
+@pytest.mark.parametrize(
+    "role",
+    [Role.VILLAGER, Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT],
+)
+def test_task_vote_non_wolf_role_returns_base_text(role: Role) -> None:
+    """Passing a non-wolf role to `task_vote` returns the base text — the
+    wolf-specific block never reaches non-wolf voters even if a future caller
+    forgets to skip the role argument."""
+    text = task_vote(["席1 A", "席2 B"], runoff=False, role=role)
+    assert "仲間の人狼" not in text
+    assert "相方" not in text
+
+
+def test_task_vote_madman_with_partner_token_does_not_leak_partner() -> None:
+    """Even if a caller naively passes a partner token for a madman, the
+    role gate inside `task_vote` must drop it. The madman never sees real
+    wolf positions."""
+    text = task_vote(
+        ["席1 A"],
+        runoff=False,
+        role=Role.MADMAN,
+        wolf_partner_tokens=["席3 X"],
+    )
+    assert "仲間の人狼" not in text
+    assert "席3 X" not in text
+
+
+def test_task_vote_lone_wolf_returns_base_text() -> None:
+    """A wolf voter with no alive partner (lone-wolf endgame) gets the base
+    text — the partner-aware checklist requires at least one partner token."""
+    text = task_vote(
+        ["席1 A"],
+        runoff=False,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=(),
+    )
+    assert "仲間の人狼" not in text
+    assert "相方" not in text
