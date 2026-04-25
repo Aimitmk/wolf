@@ -75,8 +75,20 @@ def test_game_rules_block_contains_seer_medium_wolf_only_rule() -> None:
 
 def test_game_rules_block_contains_wolf_split_attack_rule() -> None:
     block = _build_game_rules_block()
-    assert "意見が割れる" in block
+    assert "意見が割れた場合" in block
     assert "空振り" in block
+
+
+def test_game_rules_block_documents_human_wolf_priority_exception() -> None:
+    """Domain has human-wolf priority for mixed (1 human + 1 LLM) splits.
+
+    LLM wolves must understand the asymmetry — without it they assume any
+    split fails and may misjudge attack-target choice when paired with a human.
+    """
+    block = _build_game_rules_block()
+    assert "人間プレイヤー" in block
+    assert "LLM 席" in block
+    assert "採用" in block
 
 
 def test_game_rules_block_contains_knight_consecutive_guard_rule() -> None:

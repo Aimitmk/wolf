@@ -101,6 +101,46 @@ async def test_partial_channel_failure_rolls_back_heaven(repo) -> None:
     assert any("失敗" in m for m in interaction.followup.messages)
 
 
+async def test_create_game_db_failure_cleans_up_both_channels(repo) -> None:
+    """If repo.create_game raises (other than ActiveGameExistsError) after both
+    private channels exist, the channels must be deleted so a retry isn't
+    blocked by the same-name safety check on the next /wolf create.
+
+    The exception must still propagate — silently swallowing a DB-layer error
+    would hide a real fault from the operator.
+    """
+    cog = _build_cog(repo)
+    heaven = FakeChannel(id=11)
+    wolves = FakeChannel(id=12)
+    queue: list[FakeChannel] = [heaven, wolves]
+
+    async def fake_create(
+        guild: Any, name: str, *, safe_to_delete_ids: set[str]
+    ) -> FakeChannel:
+        return queue.pop(0)
+
+    cog._create_private_channel = fake_create  # type: ignore[method-assign]
+
+    boom = RuntimeError("simulated DB failure")
+
+    async def boom_create_game(_game: Any) -> None:
+        raise boom
+
+    cog.repo.create_game = boom_create_game  # type: ignore[method-assign]
+
+    interaction = FakeInteraction(guild_id=43)
+
+    raised: Exception | None = None
+    try:
+        await WolfCog.create.callback(cog, interaction)  # type: ignore[arg-type]
+    except RuntimeError as exc:
+        raised = exc
+
+    assert raised is boom
+    assert heaven.deleted is True
+    assert wolves.deleted is True
+
+
 async def test_concurrent_create_serializes_and_skips_loser(repo) -> None:
     cog = _build_cog(repo)
     next_id = [0]

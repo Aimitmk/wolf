@@ -585,6 +585,18 @@ class WolfCog(commands.Cog):
                     f"既に進行中のゲームがあります (id: `{winner_id}`)。"
                 )
                 return
+            except Exception:
+                # The channels exist on Discord but the games row never landed,
+                # so on the next /wolf create the same-name safety check would
+                # refuse to delete them as orphans (their IDs aren't in the
+                # DB-tracked safe set). Clean them up here while we still know
+                # their IDs, then re-raise so the failure surfaces.
+                for ch in (heaven, wolves):
+                    try:
+                        await ch.delete(reason="wolfbot: /wolf create failed before DB commit")
+                    except discord.DiscordException:
+                        log.exception("cleanup of %s failed", ch.id)
+                raise
             await interaction.followup.send(
                 f"🎲 ゲーム作成 (id: `{game.id}`)。`/wolf join` で参加してください。"
             )

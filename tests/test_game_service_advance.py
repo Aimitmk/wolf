@@ -1826,6 +1826,68 @@ async def test_aligned_wolf_attack_still_early_wakes(
     assert wakes == [game.id]
 
 
+async def test_mixed_human_llm_wolf_split_triggers_early_wake(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Human wolf + LLM wolf disagreeing must early-wake (human-wolf priority).
+
+    `plan_night_resolve` adopts the human's pick when the two wolves are mixed,
+    so the night is fully decided the moment the second submission lands.
+    Without mirroring that priority in `_all_night_actions_in`, the engine
+    would idle for up to NIGHT_DURATION even though there is no actual split.
+    """
+    service, _, _, reg, clock = svc
+
+    # Build a game directly in NIGHT phase so we can pin specific role/seat
+    # assignments — the role-shuffle from `_advance_to_night` is RNG-driven and
+    # only sometimes produces a mixed wolf pair.
+    game = Game(
+        id=new_game_id(),
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=1,
+        deadline_epoch=clock.now + 90,
+        main_text_channel_id="ch-text",
+        main_vc_channel_id="ch-vc",
+        heaven_channel_id="ch-heaven",
+        wolves_channel_id="ch-wolves",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    for s in _nine_seats():
+        await repo.insert_seat(game.id, s)
+
+    # Seat 1 = human wolf, seat 9 = LLM wolf, seat 2 = seer, seat 3 = knight.
+    await repo.set_player_role(game.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(game.id, 9, Role.WEREWOLF)
+    await repo.set_player_role(game.id, 2, Role.SEER)
+    await repo.set_player_role(game.id, 3, Role.KNIGHT)
+    for sn in (4, 5, 6, 7, 8):
+        await repo.set_player_role(game.id, sn, Role.VILLAGER)
+
+    wakes: list[str] = []
+    reg.wake = lambda gid: wakes.append(gid)  # type: ignore[method-assign]
+
+    await service.submit_night_action(
+        game.id, 2, SubmissionType.SEER_DIVINE, 9, day=1
+    )
+    await service.submit_night_action(
+        game.id, 3, SubmissionType.KNIGHT_GUARD, 2, day=1
+    )
+    # Wolves split: human picks 4, LLM picks 5. Human-wolf priority resolves
+    # in favor of seat 4, so the night is decided.
+    await service.submit_night_action(
+        game.id, 1, SubmissionType.WOLF_ATTACK, 4, day=1
+    )
+    await service.submit_night_action(
+        game.id, 9, SubmissionType.WOLF_ATTACK, 5, day=1
+    )
+
+    assert wakes == [game.id]
+
+
 async def test_submit_night_action_rejects_none_target_for_seer(
     repo: SqliteRepo,
     svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],

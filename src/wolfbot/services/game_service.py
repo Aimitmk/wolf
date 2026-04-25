@@ -831,6 +831,7 @@ class GameService:
 
     async def _all_night_actions_in(self, game: Game) -> bool:
         players = await self.repo.load_players(game.id)
+        seats = await self.repo.load_seats(game.id)
         actions = await self.repo.load_night_actions(game.id, day=game.day_number)
         expected: set[tuple[int, SubmissionType]] = set()
         from wolfbot.domain.enums import Role
@@ -847,14 +848,20 @@ class GameService:
         got = {(a.actor_seat, a.kind) for a in actions}
         if not expected.issubset(got):
             return False
-        # All required actors submitted, but if wolves picked different
-        # targets, hold off on the early wake — the spec keeps the split
-        # "未確定" until the deadline so wolves can still self-correct.
-        # plan_night_resolve at the deadline detects the same split and
-        # routes to WAITING_HOST_DECISION.
+        # All required actors submitted. Mirror plan_night_resolve's human-wolf
+        # priority so a mixed human+LLM wolf disagreement (which the deadline
+        # resolver would settle in the human's favor) wakes early instead of
+        # idling for the rest of NIGHT_DURATION. Same-kind splits stay split
+        # and continue to wait until the deadline / WAITING_HOST_DECISION.
+        seats_by_no = {s.seat_no: s for s in seats}
         wolf_actions = [a for a in actions if a.kind is SubmissionType.WOLF_ATTACK]
         alive_wolves = [p.seat_no for p in players if p.alive and p.role is Role.WEREWOLF]
-        attack = resolve_wolf_attack(wolf_actions, alive_wolves, force_skip=False)
+        human_wolf_seats = [
+            w for w in alive_wolves if seats_by_no.get(w) is not None and not seats_by_no[w].is_llm
+        ]
+        attack = resolve_wolf_attack(
+            wolf_actions, alive_wolves, force_skip=False, human_wolf_seats=human_wolf_seats
+        )
         return not attack.split
 
     # ------------------------------------------------------ host commands
