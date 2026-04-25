@@ -19,6 +19,7 @@ from wolfbot.domain.enums import (
     SubmissionType,
 )
 from wolfbot.domain.models import Game, Player, Seat
+from wolfbot.llm.context_analysis import analyze_context, render_context_analysis
 from wolfbot.llm.personas import Persona
 
 SYSTEM_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "prompts" / "llm_system_prompt.md"
@@ -444,12 +445,17 @@ def build_user_context(
                 "\n## 仲間の人狼 (村人には非公開)\n" + "、".join(partner_tokens) + "\n"
             )
 
+    analysis = analyze_context(seats=seats, players=players, public_logs=public_logs)
+    analysis_block = render_context_analysis(analysis, seats)
+
     return (
         f"あなたは座席 {my_seat.seat_no}『{my_seat.display_name}』です。\n"
         f"生存者: {alive_names}\n"
         f"死亡者: {dead_names}\n"
         f"現在フェイズ: {game.phase.value} / day {game.day_number}\n"
         f"{wolf_partner_block}"
+        "\n"
+        f"{analysis_block}\n"
         "\n"
         "## あなたの私的メモ (他者には非公開)\n"
         f"{priv_block}\n"

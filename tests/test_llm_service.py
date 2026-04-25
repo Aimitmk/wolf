@@ -1424,3 +1424,168 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "初日に黒を出す主張" in system_prompt
     assert "黒出しは day 2 以降" in system_prompt
     assert "誤爆リスクは day 2 以降の黒出しでも常に残る" in system_prompt
+
+
+# ---------------------------------- user context analysis blocks via _ask
+async def _capture_ask_user_context(
+    repo: SqliteRepo,
+    role: Role,
+    *,
+    game_id: str,
+    guild_id: str,
+    extra_seats: list[Seat] | None = None,
+    extra_roles: list[tuple[int, Role]] | None = None,
+    speeches: list[tuple[int, str]] | None = None,
+) -> str:
+    """Seed a small game, optionally insert PLAYER_SPEECH logs, run `_ask`,
+    and return the captured user_context. Mirrors `_capture_ask_system_prompt`.
+
+    `extra_seats` plus `extra_roles` lets a caller add seats beyond the
+    default 2-seat (Villager + role-under-test) layout. `speeches` is a list
+    of (actor_seat, text) pairs inserted as PLAYER_SPEECH public logs.
+    """
+    seats = [
+        Seat(
+            seat_no=1,
+            display_name="H1",
+            discord_user_id="u1",
+            is_llm=False,
+            persona_key=None,
+        ),
+        Seat(
+            seat_no=2,
+            display_name="L2",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    if extra_seats:
+        seats.extend(extra_seats)
+    game = _game_with_id(game_id, guild_id=guild_id)
+    await repo.create_game(game)
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+    for seat_no, extra_role in extra_roles or []:
+        await repo.set_player_role(game.id, seat_no, extra_role)
+    for seat_no, text in speeches or []:
+        await repo.insert_log_public(
+            LogEntry(
+                game_id=game.id,
+                day=1,
+                phase=Phase.DAY_DISCUSSION,
+                kind="PLAYER_SPEECH",
+                actor_seat=seat_no,
+                visibility="PUBLIC",
+                text=text,
+                created_at=1,
+            )
+        )
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    me = next(p for p in players if p.seat_no == 2)
+    my_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._ask(game, me, my_seat, players, seats, task_text="test-task")
+
+    assert len(decider.captured) == 1
+    _, user_context = decider.captured[0]
+    return user_context
+
+
+async def test_ask_user_context_contains_analysis_blocks(repo: SqliteRepo) -> None:
+    """The four new analysis headings must reach the LLM user_context."""
+    user_context = await _capture_ask_user_context(
+        repo,
+        Role.SEER,
+        game_id="game-analysis",
+        guild_id="guild-analysis",
+    )
+    assert "## CO・判定の機械整理" in user_context
+    assert "## 盤面分類" in user_context
+    assert "## 縄数・PP/RPPリスク" in user_context
+    assert "## 役職推定メモ (公開情報ベース)" in user_context
+
+
+async def test_ask_user_context_extracts_seer_co_from_public_logs(repo: SqliteRepo) -> None:
+    """A seat that uttered `占い師CO` in a public PLAYER_SPEECH log must show
+    up under the CO analysis section of every seat's user_context."""
+    user_context = await _capture_ask_user_context(
+        repo,
+        Role.VILLAGER,
+        game_id="game-co-extract",
+        guild_id="guild-co-extract",
+        speeches=[(1, "占い師COします。"), (2, "霊媒師COします。")],
+    )
+    assert "占い師CO: 席1 H1" in user_context
+    assert "霊媒師CO: 席2 L2" in user_context
+    # Board classification picks up the 1-1.
+    assert "公開CO履歴ベース: 1-1" in user_context
+
+
+async def test_ask_user_context_analysis_scoped_to_current_game_id(repo: SqliteRepo) -> None:
+    """CO data from a different game must not leak into the analysis block.
+
+    Companion to `test_ask_scopes_logs_to_current_game_id`: that test verifies
+    the raw log dump isolation; this verifies the parser/aggregator runs only
+    against the current game's logs."""
+    leak_seat = Seat(
+        seat_no=1, display_name="LEAK", discord_user_id="ux", is_llm=False, persona_key=None
+    )
+    game_a = _game_with_id("g-leak-a", guild_id="guild-leak-a")
+    await repo.create_game(game_a)
+    await repo.insert_seat(game_a.id, leak_seat)
+    await repo.insert_seat(
+        game_a.id,
+        Seat(
+            seat_no=2,
+            display_name="LEAK2",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    )
+    await repo.set_player_role(game_a.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game_a.id, 2, Role.SEER)
+    # Game A: a CO that should NOT bleed into game B's analysis.
+    await repo.insert_log_public(
+        LogEntry(
+            game_id=game_a.id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            kind="PLAYER_SPEECH",
+            actor_seat=1,
+            visibility="PUBLIC",
+            text="占い師CO",
+            created_at=1,
+        )
+    )
+    await repo.end_game(game_a.id, ended_at_epoch=2)
+
+    user_context = await _capture_ask_user_context(
+        repo,
+        Role.VILLAGER,
+        game_id="g-leak-b",
+        guild_id="guild-leak-b",
+    )
+    # No COs in game B, so the analysis section must show "(なし)".
+    assert "占い師CO: (なし)" in user_context
+    # And the leak seat's display_name from game A must not appear anywhere.
+    assert "LEAK" not in user_context
+
+
+async def test_ask_user_context_no_wolf_partner_block_for_villager(repo: SqliteRepo) -> None:
+    """Even after the analysis blocks were inserted between the wolf-partner
+    block and the rest, non-wolves must never see the wolf-partner heading."""
+    user_context = await _capture_ask_user_context(
+        repo,
+        Role.VILLAGER,
+        game_id="g-no-wolf",
+        guild_id="guild-no-wolf",
+    )
+    assert "## 仲間の人狼" not in user_context
