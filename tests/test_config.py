@@ -71,7 +71,7 @@ def test_reasoning_effort_literal_is_strict() -> None:
         Settings(_env_file=None, **base, DEEPSEEK_REASONING_EFFORT="medium")  # type: ignore[arg-type]
 
 
-def test_gemini_provider_requires_gemini_key() -> None:
+def test_gemini_provider_requires_gemini_vertex_project() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **_base_kwargs(), LLM_PROVIDER="gemini")  # type: ignore[arg-type]
 
@@ -81,15 +81,55 @@ def test_gemini_provider_does_not_require_xai_or_deepseek_key() -> None:
         _env_file=None,
         **_base_kwargs(),
         LLM_PROVIDER="gemini",
-        GEMINI_API_KEY=SecretStr("g"),
+        GEMINI_VERTEX_PROJECT="my-project",
     )
     assert s.XAI_API_KEY is None
     assert s.DEEPSEEK_API_KEY is None
+    assert s.GEMINI_VERTEX_PROJECT == "my-project"
+    assert s.GEMINI_VERTEX_LOCATION == "global"
     assert s.GEMINI_MODEL == "gemini-3-flash-preview"
-    assert s.GEMINI_THINKING_LEVEL == "low"
+    assert s.GEMINI_THINKING_LEVEL == "high"
 
 
 def test_gemini_thinking_level_literal_is_strict() -> None:
-    base = {**_base_kwargs(), "LLM_PROVIDER": "gemini", "GEMINI_API_KEY": SecretStr("g")}
+    base = {
+        **_base_kwargs(),
+        "LLM_PROVIDER": "gemini",
+        "GEMINI_VERTEX_PROJECT": "my-project",
+    }
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **base, GEMINI_THINKING_LEVEL="off")  # type: ignore[arg-type]
+
+
+def test_gemini_api_key_alone_without_vertex_project_rejected() -> None:
+    """Stale GEMINI_API_KEY in env is silently dropped by extra='ignore';
+    the missing GEMINI_VERTEX_PROJECT still raises a ValidationError."""
+    with pytest.raises(ValidationError):
+        Settings(  # type: ignore[arg-type, call-arg]
+            _env_file=None,
+            **_base_kwargs(),
+            LLM_PROVIDER="gemini",
+            GEMINI_API_KEY=SecretStr("g"),
+        )
+
+
+def test_gemini_vertex_location_default_is_global() -> None:
+    s = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        LLM_PROVIDER="gemini",
+        GEMINI_VERTEX_PROJECT="p",
+    )
+    assert s.GEMINI_VERTEX_LOCATION == "global"
+
+
+def test_gemini_empty_vertex_project_rejected() -> None:
+    """Empty string in .env should be rejected at boot, not deferred to
+    the SDK at first request time."""
+    with pytest.raises(ValidationError):
+        Settings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            LLM_PROVIDER="gemini",
+            GEMINI_VERTEX_PROJECT="",
+        )

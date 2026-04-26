@@ -32,9 +32,10 @@ class Settings(BaseSettings):
     DEEPSEEK_THINKING: Literal["enabled", "disabled"] = "enabled"
     DEEPSEEK_REASONING_EFFORT: Literal["high", "max"] = "max"
 
-    GEMINI_API_KEY: SecretStr | None = None
+    GEMINI_VERTEX_PROJECT: str | None = None
+    GEMINI_VERTEX_LOCATION: str = "global"
     GEMINI_MODEL: str = "gemini-3-flash-preview"
-    GEMINI_THINKING_LEVEL: Literal["minimal", "low", "medium", "high"] = "low"
+    GEMINI_THINKING_LEVEL: Literal["minimal", "low", "medium", "high"] = "high"
 
     @model_validator(mode="after")
     def _require_provider_key(self) -> Settings:
@@ -42,6 +43,8 @@ class Settings(BaseSettings):
             raise ValueError("LLM_PROVIDER=xai requires XAI_API_KEY to be set")
         if self.LLM_PROVIDER == "deepseek" and self.DEEPSEEK_API_KEY is None:
             raise ValueError("LLM_PROVIDER=deepseek requires DEEPSEEK_API_KEY to be set")
-        if self.LLM_PROVIDER == "gemini" and self.GEMINI_API_KEY is None:
-            raise ValueError("LLM_PROVIDER=gemini requires GEMINI_API_KEY to be set")
+        if self.LLM_PROVIDER == "gemini" and not self.GEMINI_VERTEX_PROJECT:
+            raise ValueError(
+                "LLM_PROVIDER=gemini requires GEMINI_VERTEX_PROJECT to be set"
+            )
         return self

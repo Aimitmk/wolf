@@ -7,8 +7,10 @@
 - `XAILLMActionDecider`: calls xAI's OpenAI-compat endpoint with json_schema strict mode.
 - `DeepSeekLLMActionDecider`: calls DeepSeek's OpenAI-compat endpoint with json_object
   + appended JSON contract; thinking mode and reasoning_effort are configurable.
-- `GeminiLLMActionDecider`: calls Google Gemini via the official google-genai SDK
-  with response_json_schema structured output and configurable thinking_level.
+- `GeminiLLMActionDecider`: calls Vertex AI's Gemini API via the official
+  google-genai SDK with response_json_schema structured output and configurable
+  thinking_level. Authenticates via ADC/IAM (no API key); Vertex AI Express mode
+  is deliberately unsupported.
 - `FakeLLMActionDecider`: deterministic stub for tests/offline dry runs.
 - `make_llm_decider(settings)`: provider-aware factory; branches on `LLM_PROVIDER`.
 - `LLMAdapter`: implements the LLMAdapter Protocol consumed by game_service; iterates
@@ -243,7 +245,7 @@ class DeepSeekLLMActionDecider:
 
 
 class GeminiLLMActionDecider:
-    """Calls Google Gemini through the official google-genai SDK.
+    """Calls Vertex AI's Gemini API through the official google-genai SDK.
 
     Gemini 3 supports structured outputs via `response_json_schema` plus a
     configurable `thinking_level` (`minimal` / `low` / `medium` / `high`).
@@ -256,7 +258,7 @@ class GeminiLLMActionDecider:
         self,
         client: object,
         model: str,
-        thinking_level: Literal["minimal", "low", "medium", "high"] = "low",
+        thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
         timeout: float = 30.0,
     ) -> None:
         self.client = client
@@ -1123,21 +1125,26 @@ def make_deepseek_decider(
 
 
 def make_gemini_decider(
-    api_key: str,
+    project: str,
+    location: str,
     model: str,
-    thinking_level: Literal["minimal", "low", "medium", "high"] = "low",
+    thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
     timeout: float = 30.0,
 ) -> GeminiLLMActionDecider:
-    """Build a Gemini-backed decider. Imports google-genai lazily.
+    """Build a Vertex AI Gemini-backed decider. Imports google-genai lazily.
 
-    `timeout` is forwarded as `HttpOptions(timeout=...)` (milliseconds) — the
-    SDK does not accept a per-call `timeout=` like the openai client does.
+    Authenticates via Application Default Credentials (gcloud locally,
+    attached service account in production). `timeout` is forwarded as
+    `HttpOptions(timeout=...)` (milliseconds) — the SDK does not accept
+    a per-call `timeout=` like the openai client does.
     """
     from google import genai
     from google.genai import types
 
     client = genai.Client(
-        api_key=api_key,
+        vertexai=True,
+        project=project,
+        location=location,
         http_options=types.HttpOptions(timeout=int(timeout * 1000)),
     )
     return GeminiLLMActionDecider(
@@ -1172,9 +1179,10 @@ def make_llm_decider(settings: Settings, timeout: float = 30.0) -> LLMActionDeci
             timeout=timeout,
         )
     if settings.LLM_PROVIDER == "gemini":
-        assert settings.GEMINI_API_KEY is not None  # validated in Settings
+        assert settings.GEMINI_VERTEX_PROJECT is not None  # validated in Settings
         return make_gemini_decider(
-            api_key=settings.GEMINI_API_KEY.get_secret_value(),
+            project=settings.GEMINI_VERTEX_PROJECT,
+            location=settings.GEMINI_VERTEX_LOCATION,
             model=settings.GEMINI_MODEL,
             thinking_level=settings.GEMINI_THINKING_LEVEL,
             timeout=timeout,

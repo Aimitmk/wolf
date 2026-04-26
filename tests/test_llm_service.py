@@ -2346,10 +2346,11 @@ async def test_gemini_decider_sends_response_json_schema_and_thinking_level() ->
     assert "reasoning_effort" not in call
 
 
-def test_make_llm_decider_branches_on_provider() -> None:
+def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """The provider-aware factory must wire the right decider class for each
     LLM_PROVIDER value. Construction goes through Settings so the validator
-    runs end-to-end."""
+    runs end-to-end. The Gemini branch stubs `google.genai.Client` so the
+    test never depends on a live ADC environment."""
     from pydantic import SecretStr
 
     from wolfbot.config import Settings
@@ -2359,6 +2360,14 @@ def test_make_llm_decider_branches_on_provider() -> None:
         XAILLMActionDecider,
         make_llm_decider,
     )
+
+    class _StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", _StubClient)
 
     base_kwargs: dict[str, object] = {
         "DISCORD_TOKEN": SecretStr("t"),
@@ -2386,6 +2395,45 @@ def test_make_llm_decider_branches_on_provider() -> None:
         _env_file=None,
         **base_kwargs,
         LLM_PROVIDER="gemini",
-        GEMINI_API_KEY=SecretStr("g"),
+        GEMINI_VERTEX_PROJECT="my-project",
     )
     assert isinstance(make_llm_decider(s_gem), GeminiLLMActionDecider)
+
+
+def test_make_gemini_decider_constructs_vertex_ai_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex AI client construction must pass `vertexai=True`, project,
+    location, and `http_options`, and must NOT pass `api_key` (the SDK
+    rejects api_key + vertexai together). Also verifies the decider
+    captures model/thinking_level/timeout for downstream use."""
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", _StubClient)
+
+    from wolfbot.services.llm_service import make_gemini_decider
+
+    decider = make_gemini_decider(
+        project="my-project",
+        location="global",
+        model="gemini-3-flash-preview",
+        thinking_level="high",
+        timeout=15.0,
+    )
+
+    assert captured["vertexai"] is True
+    assert captured["project"] == "my-project"
+    assert captured["location"] == "global"
+    assert "api_key" not in captured
+    http_options = captured["http_options"]
+    # types.HttpOptions stores timeout in milliseconds.
+    assert getattr(http_options, "timeout", None) == 15000
+    assert decider.model == "gemini-3-flash-preview"
+    assert decider.thinking_level == "high"
+    assert decider.timeout == 15.0
