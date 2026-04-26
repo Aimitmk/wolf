@@ -70,7 +70,7 @@ LOG_LEVEL=INFO
 - `MAIN_VOICE_CHANNEL_ID`: プレイヤーが会話するメイン VC の ID を入れます。
 - `XAI_MODEL`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_THINKING`, `DEEPSEEK_REASONING_EFFORT`, `GEMINI_VERTEX_LOCATION`, `GEMINI_MODEL`, `GEMINI_THINKING_LEVEL`, `WOLFBOT_DB_PATH`, `LOG_LEVEL` は最初は既定値のままで構いません。
 
-`DISCORD_GUILD_ID`、`MAIN_TEXT_CHANNEL_ID`、`MAIN_VOICE_CHANNEL_ID` にはチャンネル名や `#channel` のようなメンション文字列ではなく、数値の ID を設定してください。どの guild やチャンネルを使うか未定なら、先に手順 3 を済ませてから `.env` を埋めてください。
+`DISCORD_GUILD_ID`、`MAIN_TEXT_CHANNEL_ID`、`MAIN_VOICE_CHANNEL_ID` にはチャンネル名や `#channel` のようなメンション文字列ではなく、数値の ID を設定してください。どの guild やチャンネルを使うか未定なら、先に手順 3 を済ませてから `.env` を埋めてください。`LLM_PROVIDER=gemini` で `GEMINI_VERTEX_PROJECT` の値がまだ決まっていない場合は、先に手順 4 を済ませてから埋めてください。
 
 ### 3. Discord 側の設定を済ませる
 
@@ -105,7 +105,80 @@ LOG_LEVEL=INFO
 17. プレイヤーが bot から DM を受け取れる状態か確認します。`/wolf start` 実行時に DM を開けない参加者がいると開始できません。
 18. `wolf-heaven` と `wolf-wolves` はゲーム作成時に bot が自動で作成し、ゲーム終了時に削除するため、管理者が事前に作る必要はありません。
 
-### 4. bot を起動する
+### 4. (Gemini を使う場合) Vertex AI ADC を構成する
+
+`LLM_PROVIDER=gemini` で起動する場合のみ実施します。`xai` / `deepseek` を使う場合は読み飛ばして手順 5 へ進んでください。`wolfbot` は Vertex AI Express mode と API key 認証には対応せず、ADC/IAM のみをサポートします。
+
+1. Google Cloud project を用意します。既存 project を使うか、Cloud Console (`https://console.cloud.google.com/`) または `gcloud projects create PROJECT_ID` で新規作成します。
+2. その project に billing account を紐付けます。Vertex AI は無料 tier がないため、billing が有効でないと API 呼び出しが reject されます。
+3. gcloud CLI をインストールします (`https://cloud.google.com/sdk/docs/install`)。インストール済みなら `gcloud version` で確認できます。
+4. gcloud をログインして既定 project を設定します。
+
+   ```bash
+   gcloud init
+   gcloud config set project PROJECT_ID
+   ```
+
+5. Vertex AI API を有効化します。`serviceusage.services.enable` 権限が必要で、project の owner/editor なら持っています。
+
+   ```bash
+   gcloud services enable aiplatform.googleapis.com
+   ```
+
+6. bot を実行する Google アカウントに `roles/aiplatform.user` (Vertex AI User) を付与します。owner/editor を持っているなら不要です。
+
+   ```bash
+   gcloud projects add-iam-policy-binding PROJECT_ID \
+     --member="user:YOUR_ACCOUNT@example.com" \
+     --role="roles/aiplatform.user"
+   ```
+
+7. ADC (Application Default Credentials) を構成します。
+
+   ```bash
+   gcloud auth application-default login
+   gcloud auth application-default set-quota-project PROJECT_ID
+   ```
+
+   1 行目はブラウザを開いて Google ログインを行い、credentials を `~/.config/gcloud/application_default_credentials.json` に保存します。2 行目は ADC が請求先として参照する project を書き込みます (未設定だと `Your application has authenticated using end user credentials` の quota project warning が呼び出しごとに出ます)。
+
+8. `.env` の値を埋めます。
+
+   ```env
+   LLM_PROVIDER=gemini
+   GEMINI_VERTEX_PROJECT=PROJECT_ID
+   GEMINI_VERTEX_LOCATION=global
+   ```
+
+   `gemini-3-flash-preview` は location `global` で利用可能です。他 region を指定する場合は Vertex AI の Gemini モデル提供 region 一覧で `gemini-3-flash-preview` の対応 region を確認してください。
+
+9. (任意) ADC が正しく構成されたか確認します。
+
+   ```bash
+   gcloud auth application-default print-access-token
+   ```
+
+   token が表示されれば ADC は機能しています。`bot を起動する` (手順 5) で実際に LLM 席が動けば end-to-end で動作確認できます。
+
+#### production / 常駐サーバーで動かす場合
+
+VM / container などで常駐させる場合は、user 個人の ADC ではなく service account を使ってください。
+
+1. service account を作成して `roles/aiplatform.user` を付与します。
+
+   ```bash
+   gcloud iam service-accounts create wolfbot-vertex \
+     --display-name="wolfbot Vertex AI runner"
+   gcloud projects add-iam-policy-binding PROJECT_ID \
+     --member="serviceAccount:wolfbot-vertex@PROJECT_ID.iam.gserviceaccount.com" \
+     --role="roles/aiplatform.user"
+   ```
+
+2. 実行環境に応じて service account を attach します。
+   - **GCE / Cloud Run / GKE**: instance attach か workload identity を使えば、bot 側で `GOOGLE_APPLICATION_CREDENTIALS` を設定する必要はありません。ADC が自動で拾います。
+   - **その他 (オンプレ / 別クラウド)**: service account key (JSON) を発行して `GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json` を bot プロセスの環境変数に設定。key file は漏洩リスクが高いので、可能なら attached service account / workload identity を優先してください。
+
+### 5. bot を起動する
 
 ```bash
 uv run wolfbot
