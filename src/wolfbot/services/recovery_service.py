@@ -39,6 +39,12 @@ class RecoveryDiscordAdapter(Protocol):
     async def announce_recovery(self, game: Game, pending: PendingDecision | None) -> None: ...
 
 
+class ReactiveVoiceRecoverySweep(Protocol):
+    """Callable that closes in-flight npc_speak_requests and npc_playback_events."""
+
+    async def __call__(self, game_id: str) -> None: ...
+
+
 class RecoveryService:
     def __init__(
         self,
@@ -47,12 +53,14 @@ class RecoveryService:
         registry: EngineRegistry,
         discord: RecoveryDiscordAdapter,
         clock: Callable[[], int] = lambda: int(time.time()),
+        reactive_voice_sweep: ReactiveVoiceRecoverySweep | None = None,
     ) -> None:
         self.repo = repo
         self.game_service = game_service
         self.registry = registry
         self.discord = discord
         self.clock = clock
+        self._reactive_voice_sweep = reactive_voice_sweep
 
     async def recover_all(self) -> list[str]:
         games = await self.repo.load_active_games()
@@ -101,6 +109,15 @@ class RecoveryService:
             await self.discord.announce_recovery(game, current_pending)
         except Exception:
             log.exception("announce_recovery failed for %s", game.id)
+
+        # Step 2.5: sweep open reactive_voice audit rows so in-flight requests
+        # and playback windows from before the restart are closed with
+        # failure_reason=master_restart (npc-voice-pipeline spec §Recovery).
+        if game.discussion_mode == "reactive_voice" and self._reactive_voice_sweep is not None:
+            try:
+                await self._reactive_voice_sweep(game.id)
+            except Exception:
+                log.exception("reactive_voice recovery sweep failed for %s", game.id)
 
         # Step 3: attach and start engine. Pass the recovery clock so tests
         # using FakeClock get deterministic timing — otherwise the engine

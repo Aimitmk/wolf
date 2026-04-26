@@ -53,6 +53,13 @@ class LeaveLobbyResult(StrEnum):
 
 
 def _row_to_game(row: aiosqlite.Row) -> Game:
+    discussion_mode = "rounds"
+    try:
+        # Old DBs migrated in place may lack the column momentarily during
+        # boot — guard so we keep the default in that race.
+        discussion_mode = row["discussion_mode"] or "rounds"
+    except (IndexError, KeyError):
+        discussion_mode = "rounds"
     return Game(
         id=row["id"],
         guild_id=row["guild_id"],
@@ -67,6 +74,7 @@ def _row_to_game(row: aiosqlite.Row) -> Game:
         created_at=row["created_at"],
         ended_at=row["ended_at"],
         force_skip_pending=bool(row["force_skip_pending"]),
+        discussion_mode=discussion_mode,
     )
 
 
@@ -204,8 +212,9 @@ class SqliteRepo:
                     INSERT INTO games (id, guild_id, host_user_id, phase, day_number, deadline_epoch,
                                        main_text_channel_id, main_vc_channel_id,
                                        heaven_channel_id, wolves_channel_id,
-                                       created_at, ended_at, force_skip_pending)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       created_at, ended_at, force_skip_pending,
+                                       discussion_mode)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         game.id,
@@ -221,6 +230,7 @@ class SqliteRepo:
                         game.created_at,
                         game.ended_at,
                         int(game.force_skip_pending),
+                        game.discussion_mode,
                     ),
                 )
         except aiosqlite.IntegrityError as e:
@@ -932,6 +942,201 @@ class SqliteRepo:
         except _LobbyClaimAborted:
             return False
         return True
+
+    # ---------------------------------------------------- npc audit tables
+    #
+    # Master is the sole writer for npc_speak_requests / npc_speak_results /
+    # npc_playback_events. These tables are append-or-update audit trails;
+    # the live arbiter does not depend on them after a restart, but the
+    # recovery sweep needs them to close in-flight rows on Master restart.
+
+    async def insert_npc_speak_request(
+        self,
+        *,
+        request_id: str,
+        game_id: str,
+        phase_id: str,
+        npc_id: str,
+        seat_no: int,
+        logic_packet_id: str,
+        suggested_intent: str,
+        max_chars: int,
+        max_duration_ms: int,
+        priority: int,
+        expires_at_ms: int,
+        created_at_ms: int,
+    ) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO npc_speak_requests (
+                request_id, game_id, phase_id, npc_id, seat_no,
+                logic_packet_id, suggested_intent, max_chars, max_duration_ms,
+                priority, expires_at_ms, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                game_id,
+                phase_id,
+                npc_id,
+                seat_no,
+                logic_packet_id,
+                suggested_intent,
+                max_chars,
+                max_duration_ms,
+                priority,
+                expires_at_ms,
+                created_at_ms,
+            ),
+        )
+        await self._db.commit()
+
+    async def insert_npc_speak_result(
+        self,
+        *,
+        request_id: str,
+        game_id: str,
+        phase_id: str,
+        npc_id: str,
+        status: str,
+        text: str | None,
+        used_logic_ids: Sequence[str] | None,
+        intent: str | None,
+        estimated_duration_ms: int | None,
+        failure_reason: str | None,
+        received_at_ms: int,
+    ) -> None:
+        await self._db.execute(
+            """
+            INSERT OR REPLACE INTO npc_speak_results (
+                request_id, game_id, phase_id, npc_id, status, text,
+                used_logic_ids_json, intent, estimated_duration_ms,
+                failure_reason, received_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                game_id,
+                phase_id,
+                npc_id,
+                status,
+                text,
+                json.dumps(list(used_logic_ids)) if used_logic_ids else None,
+                intent,
+                estimated_duration_ms,
+                failure_reason,
+                received_at_ms,
+            ),
+        )
+        await self._db.commit()
+
+    async def open_npc_playback(
+        self,
+        *,
+        request_id: str,
+        game_id: str,
+        phase_id: str,
+        npc_id: str,
+        speech_event_id: str,
+        authorized_at_ms: int,
+        playback_deadline_ms: int,
+    ) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO npc_playback_events (
+                request_id, game_id, phase_id, npc_id, speech_event_id,
+                authorized_at_ms, playback_deadline_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                game_id,
+                phase_id,
+                npc_id,
+                speech_event_id,
+                authorized_at_ms,
+                playback_deadline_ms,
+            ),
+        )
+        await self._db.commit()
+
+    async def update_npc_playback_tts(
+        self,
+        request_id: str,
+        *,
+        outcome: str,
+        duration_ms: int | None,
+        failure_reason: str | None,
+    ) -> None:
+        await self._db.execute(
+            """
+            UPDATE npc_playback_events
+               SET tts_outcome=?, tts_duration_ms=?, tts_failure_reason=?
+             WHERE request_id=?
+            """,
+            (outcome, duration_ms, failure_reason, request_id),
+        )
+        await self._db.commit()
+
+    async def close_npc_playback(
+        self,
+        request_id: str,
+        *,
+        finished_at_ms: int,
+        outcome: str,
+        failure_reason: str | None,
+    ) -> None:
+        await self._db.execute(
+            """
+            UPDATE npc_playback_events
+               SET finished_at_ms=?, outcome=?, failure_reason=?
+             WHERE request_id=? AND finished_at_ms IS NULL
+            """,
+            (finished_at_ms, outcome, failure_reason, request_id),
+        )
+        await self._db.commit()
+
+    async def load_open_npc_speak_requests(self, game_id: str) -> list[dict[str, Any]]:
+        async with self._db.execute(
+            """
+            SELECT r.request_id, r.npc_id, r.phase_id, r.expires_at_ms
+              FROM npc_speak_requests r
+              LEFT JOIN npc_speak_results s USING (request_id)
+             WHERE r.game_id=? AND s.request_id IS NULL
+            """,
+            (game_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {
+                "request_id": row[0],
+                "npc_id": row[1],
+                "phase_id": row[2],
+                "expires_at_ms": row[3],
+            }
+            for row in rows
+        ]
+
+    async def load_open_npc_playback(self, game_id: str) -> list[dict[str, Any]]:
+        async with self._db.execute(
+            """
+            SELECT request_id, npc_id, phase_id, speech_event_id, playback_deadline_ms
+              FROM npc_playback_events
+             WHERE game_id=? AND finished_at_ms IS NULL
+            """,
+            (game_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {
+                "request_id": row[0],
+                "npc_id": row[1],
+                "phase_id": row[2],
+                "speech_event_id": row[3],
+                "playback_deadline_ms": row[4],
+            }
+            for row in rows
+        ]
 
 
 class _LobbyClaimAborted(Exception):

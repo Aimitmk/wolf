@@ -15,8 +15,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from random import Random
+from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -47,6 +48,9 @@ from wolfbot.services.llm_service import LLMAdapter
 from wolfbot.services.permission_manager import PermissionManager
 from wolfbot.services.timer_service import EngineRegistry, GameEngine
 from wolfbot.ui.views import NightActionView, VoteView
+
+if TYPE_CHECKING:
+    from wolfbot.services.discussion_service import DiscussionService
 
 log = logging.getLogger(__name__)
 
@@ -410,6 +414,8 @@ class WolfCog(commands.Cog):
         registry: EngineRegistry,
         settings: Settings,
         rng: Random | None = None,
+        discussion_service: DiscussionService | None = None,
+        on_speech_recorded: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__()
         self.bot = bot
@@ -421,6 +427,8 @@ class WolfCog(commands.Cog):
         self.settings = settings
         self.rng = rng or Random()
         self._create_locks: dict[str, asyncio.Lock] = {}
+        self._discussion_service = discussion_service
+        self._on_speech_recorded = on_speech_recorded
 
     def _create_lock_for(self, guild_id: str) -> asyncio.Lock:
         lock = self._create_locks.get(guild_id)
@@ -449,24 +457,66 @@ class WolfCog(commands.Cog):
         author_seat = await self.repo.seat_of_user(game.id, str(message.author.id))
         players = await self.repo.load_players(game.id)
 
-        if is_main and game.phase is Phase.DAY_DISCUSSION:
+        if is_main and game.phase in (Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH):
             if not _main_channel_should_llm_react(author_seat, players):
                 return
-            try:
-                await self.repo.insert_log_public(
-                    LogEntry(
+            if self._discussion_service is not None and author_seat is not None:
+                # Full SpeechEvent path: record() persists the event row AND
+                # emits the PLAYER_SPEECH LogEntry (for source=text it skips
+                # the channel post since the original message is already visible).
+                try:
+                    from wolfbot.domain.discussion import make_phase_id
+                    from wolfbot.services.discussion_service import make_human_text_event
+
+                    alive_seat_nos = sorted(p.seat_no for p in players if p.alive)
+                    await self._discussion_service.begin_phase_if_absent(
                         game_id=game.id,
                         day=game.day_number,
                         phase=game.phase,
-                        kind="PLAYER_SPEECH",
-                        actor_seat=author_seat,
-                        visibility="PUBLIC",
-                        text=message.content,
-                        created_at=int(time.time()),
+                        alive_seat_nos=alive_seat_nos,
                     )
-                )
-            except Exception:
-                log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
+                    phase_id = make_phase_id(game.id, game.day_number, game.phase)
+                    event = make_human_text_event(
+                        game_id=game.id,
+                        phase_id=phase_id,
+                        day=game.day_number,
+                        phase=game.phase,
+                        speaker_seat=author_seat,
+                        text=message.content,
+                    )
+                    await self._discussion_service.record(event)
+                    # Trigger arbiter dispatch so NPCs can respond to new text.
+                    if self._on_speech_recorded is not None:
+                        try:
+                            await self._on_speech_recorded(game.id)
+                        except Exception:
+                            log.exception(
+                                "on_speech_recorded callback failed game=%s", game.id
+                            )
+                except Exception:
+                    log.exception(
+                        "SpeechEvent(text) write failed for game=%s seat=%s",
+                        game.id,
+                        author_seat,
+                    )
+            else:
+                # Legacy path: no DiscussionService wired (or spectator with
+                # no seat). Fall back to direct PLAYER_SPEECH log insert.
+                try:
+                    await self.repo.insert_log_public(
+                        LogEntry(
+                            game_id=game.id,
+                            day=game.day_number,
+                            phase=game.phase,
+                            kind="PLAYER_SPEECH",
+                            actor_seat=author_seat,
+                            visibility="PUBLIC",
+                            text=message.content,
+                            created_at=int(time.time()),
+                        )
+                    )
+                except Exception:
+                    log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
             return
 
         if is_wolves and game.phase is Phase.NIGHT and author_seat is not None:
@@ -556,6 +606,13 @@ class WolfCog(commands.Cog):
                 await interaction.followup.send(create_failed_msg)
                 return
 
+            discussion_mode = self.settings.LLM_DISCUSSION_MODE
+            if discussion_mode not in ("rounds", "reactive_voice"):
+                log.warning(
+                    "LLM_DISCUSSION_MODE=%r invalid, falling back to 'rounds'",
+                    discussion_mode,
+                )
+                discussion_mode = "rounds"
             game = Game(
                 id=new_game_id(),
                 guild_id=guild_id,
@@ -567,6 +624,7 @@ class WolfCog(commands.Cog):
                 heaven_channel_id=str(heaven.id),
                 wolves_channel_id=str(wolves.id),
                 created_at=int(time.time()),
+                discussion_mode=discussion_mode,
             )
             try:
                 await self.repo.create_game(game)

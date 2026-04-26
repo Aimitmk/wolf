@@ -1228,9 +1228,7 @@ async def test_ask_system_prompt_wolf_attack_task_includes_checklist(
     the same 4-axis rubric must reach the LLM via the `{task_block}` slot — not
     only via the strategy block. Exercises the path `_one_night_action` uses."""
     task_text = task_night_action(SubmissionType.WOLF_ATTACK, ["席1 A", "席2 B"])
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     assert "襲撃価値" in system_prompt
     assert "護衛されやすさ" in system_prompt
     assert "騎士候補度" in system_prompt
@@ -1265,9 +1263,7 @@ async def test_ask_system_prompt_wolf_vote_task_includes_partner_checklist(
         role=Role.WEREWOLF,
         wolf_partner_tokens=["席3 PartnerName"],
     )
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     for token in (
         "仲間の人狼",
         "席3 PartnerName",
@@ -1290,13 +1286,9 @@ async def test_ask_system_prompt_wolf_runoff_vote_task_includes_runoff_checklist
         role=Role.WEREWOLF,
         wolf_partner_tokens=["席3 PartnerName"],
     )
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     for token in ("決選投票", "透け", "PP/RPP", "仲間の人狼"):
-        assert token in system_prompt, (
-            f"wolf runoff vote system prompt missing {token!r}"
-        )
+        assert token in system_prompt, f"wolf runoff vote system prompt missing {token!r}"
 
 
 async def test_ask_system_prompt_non_wolf_vote_task_excludes_partner_vocabulary(
@@ -1307,18 +1299,12 @@ async def test_ask_system_prompt_non_wolf_vote_task_excludes_partner_vocabulary(
     even though `身内票` / `ライン切り` themselves are shared rules vocab."""
     for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
         task_text = task_vote(["席1 H1"], runoff=False, role=role)
-        system_prompt = await _capture_ask_system_prompt(
-            repo, role, task_text=task_text
-        )
+        system_prompt = await _capture_ask_system_prompt(repo, role, task_text=task_text)
         assert "仲間の人狼" not in system_prompt, (
             f"'仲間の人狼' leaked into {role.name} vote prompt"
         )
-        assert "相方を救" not in system_prompt, (
-            f"'相方を救' leaked into {role.name} vote prompt"
-        )
-        assert "相方を切" not in system_prompt, (
-            f"'相方を切' leaked into {role.name} vote prompt"
-        )
+        assert "相方を救" not in system_prompt, f"'相方を救' leaked into {role.name} vote prompt"
+        assert "相方を切" not in system_prompt, f"'相方を切' leaked into {role.name} vote prompt"
 
 
 async def test_ask_system_prompt_madman_vote_task_drops_partner_token(
@@ -1335,9 +1321,7 @@ async def test_ask_system_prompt_madman_vote_task_drops_partner_token(
     )
     assert "仲間の人狼" not in task_text
     assert "席3 X" not in task_text
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.MADMAN, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN, task_text=task_text)
     assert "仲間の人狼" not in system_prompt
     assert "席3 X" not in system_prompt
 
@@ -1622,9 +1606,7 @@ async def test_ask_system_prompt_knight_guard_task_includes_checklist(
     forbidden literal substrings may appear — that would trip the existing
     parametrized leak test in the unit-level prompt builder tests."""
     task_text = task_night_action(SubmissionType.KNIGHT_GUARD, ["席1 A", "席2 B"])
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.KNIGHT, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT, task_text=task_text)
     # Positive — task-level checklist reached the LLM.
     assert "鉄板護衛" in system_prompt
     assert "捨て護衛" in system_prompt
@@ -1723,9 +1705,7 @@ async def test_ask_system_prompt_seer_divine_task_includes_targeting_checklist(
     parallel of the wolf-attack and knight-guard task tests above. Wolf-task
     forbidden substrings must remain absent (existing leak guard reinforced)."""
     task_text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.SEER, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER, task_text=task_text)
     # Positive — task-level targeting checklist reached the LLM.
     assert "占い価値" in system_prompt
     assert "灰を狭める" in system_prompt
@@ -2126,6 +2106,7 @@ async def test_ask_user_context_no_wolf_partner_block_for_villager(repo: SqliteR
 # test_llm_prompt_builder.py. Verify the new content actually reaches the LLM
 # via the full system-prompt assembly path.
 
+
 @pytest.mark.parametrize("role", list(Role))
 async def test_ask_system_prompt_pair_inference_reaches_any_role(
     repo: SqliteRepo, role: Role
@@ -2134,12 +2115,8 @@ async def test_ask_system_prompt_pair_inference_reaches_any_role(
     via the rules block. `相方候補` (inference noun) and `2 人狼` (the canonical
     pair label) are the two shared anchors."""
     system_prompt = await _capture_ask_system_prompt(repo, role)
-    assert "相方候補" in system_prompt, (
-        f"{role.name} missing pair-inference anchor '相方候補'"
-    )
-    assert "2 人狼" in system_prompt, (
-        f"{role.name} missing pair-inference anchor '2 人狼'"
-    )
+    assert "相方候補" in system_prompt, f"{role.name} missing pair-inference anchor '相方候補'"
+    assert "2 人狼" in system_prompt, f"{role.name} missing pair-inference anchor '2 人狼'"
 
 
 async def test_ask_system_prompt_wolf_seat_includes_two_wolf_set_framing(
@@ -2183,9 +2160,7 @@ async def test_ask_system_prompt_wolf_vote_task_extends_with_two_wolf_set(
         role=Role.WEREWOLF,
         wolf_partner_tokens=["席3 PartnerName"],
     )
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     assert "2 人狼セット" in system_prompt
     # Existing wolf-only vote anchors preserved.
     assert "相方" in system_prompt

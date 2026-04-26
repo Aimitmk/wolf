@@ -54,6 +54,10 @@ class Game(BaseModel):
     created_at: int
     ended_at: int | None = None
     force_skip_pending: bool = False
+    # discussion_mode is captured at game-start time from `Settings.LLM_DISCUSSION_MODE`
+    # and never mutated mid-game (per the day-discussion spec). Default `rounds`
+    # preserves backwards-compatible behavior for old rows that lack the column.
+    discussion_mode: str = "rounds"
 
 
 class NightAction(BaseModel):

@@ -1870,20 +1870,12 @@ async def test_mixed_human_llm_wolf_split_triggers_early_wake(
     wakes: list[str] = []
     reg.wake = lambda gid: wakes.append(gid)  # type: ignore[method-assign]
 
-    await service.submit_night_action(
-        game.id, 2, SubmissionType.SEER_DIVINE, 9, day=1
-    )
-    await service.submit_night_action(
-        game.id, 3, SubmissionType.KNIGHT_GUARD, 2, day=1
-    )
+    await service.submit_night_action(game.id, 2, SubmissionType.SEER_DIVINE, 9, day=1)
+    await service.submit_night_action(game.id, 3, SubmissionType.KNIGHT_GUARD, 2, day=1)
     # Wolves split: human picks 4, LLM picks 5. Human-wolf priority resolves
     # in favor of seat 4, so the night is decided.
-    await service.submit_night_action(
-        game.id, 1, SubmissionType.WOLF_ATTACK, 4, day=1
-    )
-    await service.submit_night_action(
-        game.id, 9, SubmissionType.WOLF_ATTACK, 5, day=1
-    )
+    await service.submit_night_action(game.id, 1, SubmissionType.WOLF_ATTACK, 4, day=1)
+    await service.submit_night_action(game.id, 9, SubmissionType.WOLF_ATTACK, 5, day=1)
 
     assert wakes == [game.id]
 

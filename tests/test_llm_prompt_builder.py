@@ -961,17 +961,13 @@ def test_werewolf_strategy_disclaims_real_role_inference() -> None:
     assert "公開情報からの推定" in block
 
 
-@pytest.mark.parametrize(
-    "role", [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER]
-)
+@pytest.mark.parametrize("role", [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
 def test_wolf_attack_only_vocabulary_never_in_non_wolf_strategy(role: Role) -> None:
     """The new tactical phrases are wolf-private. Any leak (e.g. someone copies
     the wolf bullet into the knight strategy by mistake) must trip this guard."""
     block = _build_strategy_block(role)
     for phrase in _WOLF_ATTACK_ONLY_PHRASES:
-        assert phrase not in block, (
-            f"wolf-only attack vocab {phrase!r} leaked into {role.name}"
-        )
+        assert phrase not in block, f"wolf-only attack vocab {phrase!r} leaked into {role.name}"
 
 
 # ---------------------------------------------------- night-action task block

@@ -48,6 +48,7 @@ if TYPE_CHECKING:  # avoid importing heavy modules unless needed
     from openai import AsyncOpenAI
 
     from wolfbot.persistence.sqlite_repo import SqliteRepo
+    from wolfbot.services.discussion_service import DiscussionService
     from wolfbot.services.game_service import GameService
 
 # Sleep ranges between consecutive LLM speeches inside DAY_DISCUSSION rounds.
@@ -191,6 +192,7 @@ class LLMAdapter:
         game_service_ref: dict[str, GameService] | None = None,
         rng: random.Random | None = None,
         clock: Callable[[], int] | None = None,
+        discussion_service: DiscussionService | None = None,
     ) -> None:
         import time as _time
 
@@ -201,6 +203,12 @@ class LLMAdapter:
         self.rng = rng or random.Random()
         self._clock: Callable[[], int] = clock or (lambda: int(_time.time()))
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Optional SpeechEvent emission. When None, behavior matches pre-
+        # speech-event-bus rounds mode: only PLAYER_SPEECH log + Discord post
+        # are produced. When set, every accepted utterance is also recorded
+        # as SpeechEvent(source=npc_generated) so PublicDiscussionState can
+        # rebuild a uniform timeline across rounds + reactive_voice modes.
+        self.discussion_service = discussion_service
 
     def set_game_service(self, gs: GameService) -> None:
         self._gs_slot["gs"] = gs
@@ -575,6 +583,22 @@ class LLMAdapter:
             for p in players
             if p.alive and p.seat_no in seats_by_no and seats_by_no[p.seat_no].is_llm
         ]
+        # Seed the phase baseline even when there are no LLM seats (all-human
+        # game). Human text events recorded by on_message need the sentinel to
+        # exist so PublicDiscussionState rebuild works.
+        if self.discussion_service is not None:
+            try:
+                alive_seat_nos = sorted(p.seat_no for p in players if p.alive)
+                await self.discussion_service.begin_phase_if_absent(
+                    game_id=game.id,
+                    day=game.day_number,
+                    phase=game.phase,
+                    alive_seat_nos=alive_seat_nos,
+                )
+            except Exception:
+                log.exception(
+                    "phase_baseline insert failed for %s day=%d", game.id, game.day_number
+                )
         if not llm_players:
             return
         task = asyncio.create_task(
@@ -592,6 +616,8 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         ordered = sorted(llm_players, key=lambda p: p.seat_no)
+        # Phase baseline is seeded by submit_llm_discussion_rounds before the
+        # background task starts — no need to duplicate it here.
         for round_idx in (1, 2):
             for llm in ordered:
                 # Re-read live game state before each per-seat attempt so a
@@ -718,6 +744,7 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
+        await self._emit_npc_speech_event(fresh, player.seat_no, message)
 
     # --------------------------------------------------- runoff candidate speech
     async def submit_llm_runoff_candidate_speeches(
@@ -761,6 +788,21 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         ordered = sorted(llm_players, key=lambda p: p.seat_no)
+        # Phase baseline for runoff: alive seats at runoff entry.
+        if self.discussion_service is not None:
+            try:
+                all_players = await self.repo.load_players(game.id)
+                alive_seat_nos = sorted(p.seat_no for p in all_players if p.alive)
+                await self.discussion_service.begin_phase_if_absent(
+                    game_id=game.id,
+                    day=game.day_number,
+                    phase=game.phase,
+                    alive_seat_nos=alive_seat_nos,
+                )
+            except Exception:
+                log.exception(
+                    "runoff phase_baseline insert failed %s day=%d", game.id, game.day_number
+                )
         for llm in ordered:
             fresh = await self.repo.load_game(game.id)
             if (
@@ -852,6 +894,44 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
+        await self._emit_npc_speech_event(fresh, player.seat_no, message)
+
+    async def _emit_npc_speech_event(self, game: Game, speaker_seat: int, text: str) -> None:
+        """Persist a SpeechEvent(source=npc_generated) for an LLM utterance.
+
+        Wrapped in try/except so a SpeechEvent persistence hiccup does not
+        rollback the already-completed Discord post + PLAYER_SPEECH log.
+        Skips DiscussionService's own MessagePoster + LogSink hooks (they
+        would duplicate the LLM speech) by going through `_store.insert`
+        directly when available.
+        """
+        if self.discussion_service is None:
+            return
+        try:
+            from wolfbot.domain.discussion import make_phase_id
+            from wolfbot.services.discussion_service import (
+                make_npc_generated_event,
+            )
+
+            phase_id = make_phase_id(game.id, game.day_number, game.phase)
+            event = make_npc_generated_event(
+                game_id=game.id,
+                phase_id=phase_id,
+                day=game.day_number,
+                phase=game.phase,
+                speaker_seat=speaker_seat,
+                text=text,
+            )
+            # Persist-only avoids re-posting the message to Discord (the
+            # rounds-mode path already posted it via MessagePoster) and
+            # avoids re-inserting the PLAYER_SPEECH LogEntry (already inserted).
+            await self.discussion_service.record_persist_only(event)
+        except Exception:
+            log.exception(
+                "SpeechEvent(npc_generated) write failed for game=%s seat=%s",
+                game.id,
+                speaker_seat,
+            )
 
     # ------------------------------------------------------ helpers
     async def _ask(

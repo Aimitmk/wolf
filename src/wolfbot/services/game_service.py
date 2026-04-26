@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from random import Random
 from typing import Protocol, runtime_checkable
 
@@ -143,6 +143,7 @@ class GameService:
         wake: WakeSink,
         clock: Callable[[], int] = lambda: int(time.time()),
         rng: Random | None = None,
+        on_reactive_phase_enter: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.repo = repo
         self.discord = discord
@@ -151,6 +152,7 @@ class GameService:
         self.clock = clock
         self.rng = rng or Random()
         self._advance_locks: dict[str, asyncio.Lock] = {}
+        self._on_reactive_phase_enter = on_reactive_phase_enter
 
     def _lock_for(self, game_id: str) -> asyncio.Lock:
         lock = self._advance_locks.get(game_id)
@@ -245,6 +247,10 @@ class GameService:
             except Exception:
                 log.exception("waiting announce failed for %s", game_id)
 
+        # 4.5. Emit discussion_phase_summary when leaving a public-speech phase.
+        if previous_phase in (Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH):
+            await self._emit_discussion_phase_summary(game, previous_phase)
+
         # 5. On entering DAY_VOTE / DAY_RUNOFF / NIGHT / DAY_DISCUSSION /
         #    DAY_RUNOFF_SPEECH, kick off DMs and LLM tasks.
         await self._dispatch_submissions(new_game, players, seats, transition, previous_phase)
@@ -276,6 +282,14 @@ class GameService:
             # alive LLM seat has completed both speech rounds. Otherwise either
             # park (no-op return None — engine sleeps to deadline) or commit a
             # short same-phase grace transition.
+            #
+            # Under reactive_voice mode there are no fixed rounds; LLMs speak
+            # event-driven via SpeakArbiter, so the deadline is the sole gate.
+            deadline_passed = game.deadline_epoch is not None and now >= game.deadline_epoch
+            if game.discussion_mode == "reactive_voice":
+                if deadline_passed:
+                    return plan_day_discussion_to_vote(game, now)
+                return None
             seats_by_no = {s.seat_no: s for s in seats}
             alive_llm_seats = [
                 p.seat_no
@@ -290,7 +304,6 @@ class GameService:
                 if progress[3] < 2:  # discussion_rounds_done
                     rounds_done = False
                     break
-            deadline_passed = game.deadline_epoch is not None and now >= game.deadline_epoch
             if deadline_passed and rounds_done:
                 return plan_day_discussion_to_vote(game, now)
             if deadline_passed and not rounds_done:
@@ -435,10 +448,58 @@ class GameService:
             if previous_phase is Phase.DAY_DISCUSSION:
                 return
             alive_players = [p for p in players_after if p.alive]
+            # Mode-fixed dispatch: under reactive_voice we skip the rounds-mode
+            # LLM batch entirely. Reactive speech is driven event-by-event by
+            # SpeakArbiter via the WS server, not by the timer-driven engine.
+            if new_game.discussion_mode == "reactive_voice":
+                log.info(
+                    "reactive_voice_phase_entered game=%s day=%d",
+                    new_game.id,
+                    new_game.day_number,
+                )
+                if self._on_reactive_phase_enter is not None:
+                    try:
+                        await self._on_reactive_phase_enter(new_game.id)
+                    except Exception:
+                        log.exception(
+                            "reactive_phase_enter callback failed for %s", new_game.id
+                        )
+                return
             try:
                 await self.llm.submit_llm_discussion_rounds(new_game, alive_players, seats)
             except Exception:
                 log.exception("llm discussion rounds dispatch failed for %s", new_game.id)
+
+    async def _emit_discussion_phase_summary(self, game: Game, phase: Phase) -> None:
+        """Emit the discussion_phase_summary structured-log event.
+
+        Called when transitioning away from DAY_DISCUSSION or DAY_RUNOFF_SPEECH.
+        Best-effort: failures are logged but do not block the advance.
+        """
+        try:
+            from wolfbot.domain.discussion import make_phase_id
+            from wolfbot.services.discussion_phase_summary import emit_phase_summary
+            from wolfbot.services.discussion_service import DiscussionService
+
+            # Access the DiscussionService and repo through the LLM adapter
+            # which holds a reference. The summary emitter needs both.
+            ds: DiscussionService | None = getattr(self.llm, "discussion_service", None)
+            if ds is None:
+                return
+            phase_id = make_phase_id(game.id, game.day_number, phase)
+            await emit_phase_summary(
+                repo=self.repo,
+                discussion=ds,
+                game_id=game.id,
+                phase_id=phase_id,
+                mode=game.discussion_mode,
+            )
+        except Exception:
+            log.exception(
+                "discussion_phase_summary emission failed for game=%s phase=%s",
+                game.id,
+                phase.value,
+            )
 
     async def _safe_post_public(self, game: Game, text: str, kind: str) -> None:
         try:
@@ -747,6 +808,12 @@ class GameService:
         """
         game = await self.repo.load_game(game_id)
         if game is None:
+            return
+        # Under reactive_voice, LLM speech is driven event-by-event by the
+        # SpeakArbiter via the WS server — there are no fixed rounds to
+        # resume. Skip entirely so we don't spawn a legacy two-round batch
+        # that would violate the per-game mode contract.
+        if game.discussion_mode == "reactive_voice":
             return
         seats = await self.repo.load_seats(game_id)
         seats_by_no = {s.seat_no: s for s in seats}
