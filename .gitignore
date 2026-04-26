@@ -15,8 +15,4 @@ build/
 .DS_Store
 
 # for git push
-prompts/
-reviews/
 .claude/
-AGENTS.md
-CLAUDE.md
