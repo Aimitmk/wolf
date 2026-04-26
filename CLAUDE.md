@@ -37,7 +37,7 @@ From `.env.example`. The provider key (`XAI_API_KEY` or `DEEPSEEK_API_KEY`) is c
 - `DISCORD_TOKEN` — bot token (SecretStr)
 - `LLM_PROVIDER` — `xai` (default) or `deepseek`. Lowercase only.
 - `XAI_API_KEY` — xAI API key (SecretStr); required when `LLM_PROVIDER=xai`
-- `XAI_MODEL` — model name (default `grok-4-1-fast`)
+- `XAI_MODEL` — model name (default `grok-4-1-fast-reasoning`)
 - `DEEPSEEK_API_KEY` — DeepSeek API key (SecretStr); required when `LLM_PROVIDER=deepseek`
 - `DEEPSEEK_BASE_URL` — default `https://api.deepseek.com`
 - `DEEPSEEK_MODEL` — default `deepseek-v4-flash`

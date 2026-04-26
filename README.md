@@ -43,7 +43,7 @@ cp .env.example .env
 DISCORD_TOKEN=your_discord_bot_token
 LLM_PROVIDER=xai
 XAI_API_KEY=your_xai_api_key
-XAI_MODEL=grok-4-1-fast
+XAI_MODEL=grok-4-1-fast-reasoning
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
