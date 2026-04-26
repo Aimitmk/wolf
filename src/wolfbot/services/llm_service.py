@@ -1,11 +1,14 @@
-"""LLM service + LLMAdapter that drives LLM players (xAI Grok or DeepSeek).
+"""LLM service + LLMAdapter that drives LLM players (xAI Grok, DeepSeek, or Gemini).
 
 - `LLMAction`: the Pydantic shape returned by the model (same schema sent via
-  response_format on the xAI path; checked post-hoc on the DeepSeek path).
+  response_format on the xAI path; via response_json_schema on the Gemini path;
+  checked post-hoc on the DeepSeek path).
 - `LLMActionDecider` Protocol: low-level "given a persona+context, return an LLMAction".
 - `XAILLMActionDecider`: calls xAI's OpenAI-compat endpoint with json_schema strict mode.
 - `DeepSeekLLMActionDecider`: calls DeepSeek's OpenAI-compat endpoint with json_object
   + appended JSON contract; thinking mode and reasoning_effort are configurable.
+- `GeminiLLMActionDecider`: calls Google Gemini via the official google-genai SDK
+  with response_json_schema structured output and configurable thinking_level.
 - `FakeLLMActionDecider`: deterministic stub for tests/offline dry runs.
 - `make_llm_decider(settings)`: provider-aware factory; branches on `LLM_PROVIDER`.
 - `LLMAdapter`: implements the LLMAdapter Protocol consumed by game_service; iterates
@@ -236,6 +239,55 @@ class DeepSeekLLMActionDecider:
         resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
         message = resp.choices[0].message
         content = message.content or "{}"
+        return LLMAction.model_validate_json(content)
+
+
+class GeminiLLMActionDecider:
+    """Calls Google Gemini through the official google-genai SDK.
+
+    Gemini 3 supports structured outputs via `response_json_schema` plus a
+    configurable `thinking_level` (`minimal` / `low` / `medium` / `high`).
+    Internal thinking and thought signatures are deliberately ignored — only
+    `resp.text` is consumed, mirroring how the DeepSeek path treats
+    `reasoning_content`.
+    """
+
+    def __init__(
+        self,
+        client: object,
+        model: str,
+        thinking_level: Literal["minimal", "low", "medium", "high"] = "low",
+        timeout: float = 30.0,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.thinking_level = thinking_level
+        self.timeout = timeout
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        from google.genai import types
+
+        resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
+            model=self.model,
+            contents=user_context,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_json_schema=RESPONSE_SCHEMA["schema"],
+                thinking_config=types.ThinkingConfig(
+                    # SDK normalizes the string into ThinkingLevel at runtime;
+                    # the type annotation is enum-only, so silence the check.
+                    thinking_level=self.thinking_level,  # type: ignore[arg-type]
+                ),
+            ),
+        )
+        content = resp.text or "{}"
         return LLMAction.model_validate_json(content)
 
 
@@ -1070,6 +1122,32 @@ def make_deepseek_decider(
     )
 
 
+def make_gemini_decider(
+    api_key: str,
+    model: str,
+    thinking_level: Literal["minimal", "low", "medium", "high"] = "low",
+    timeout: float = 30.0,
+) -> GeminiLLMActionDecider:
+    """Build a Gemini-backed decider. Imports google-genai lazily.
+
+    `timeout` is forwarded as `HttpOptions(timeout=...)` (milliseconds) — the
+    SDK does not accept a per-call `timeout=` like the openai client does.
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=int(timeout * 1000)),
+    )
+    return GeminiLLMActionDecider(
+        client=client,
+        model=model,
+        thinking_level=thinking_level,
+        timeout=timeout,
+    )
+
+
 def make_llm_decider(settings: Settings, timeout: float = 30.0) -> LLMActionDecider:
     """Provider-aware decider factory. Branches on `settings.LLM_PROVIDER`.
 
@@ -1093,6 +1171,14 @@ def make_llm_decider(settings: Settings, timeout: float = 30.0) -> LLMActionDeci
             reasoning_effort=settings.DEEPSEEK_REASONING_EFFORT,
             timeout=timeout,
         )
+    if settings.LLM_PROVIDER == "gemini":
+        assert settings.GEMINI_API_KEY is not None  # validated in Settings
+        return make_gemini_decider(
+            api_key=settings.GEMINI_API_KEY.get_secret_value(),
+            model=settings.GEMINI_MODEL,
+            thinking_level=settings.GEMINI_THINKING_LEVEL,
+            timeout=timeout,
+        )
     raise ValueError(f"unknown LLM_PROVIDER: {settings.LLM_PROVIDER!r}")
 
 
@@ -1100,11 +1186,13 @@ __all__ = [
     "RESPONSE_SCHEMA",
     "DeepSeekLLMActionDecider",
     "FakeLLMActionDecider",
+    "GeminiLLMActionDecider",
     "LLMAction",
     "LLMActionDecider",
     "LLMAdapter",
     "XAILLMActionDecider",
     "make_deepseek_decider",
+    "make_gemini_decider",
     "make_llm_decider",
     "make_xai_decider",
 ]

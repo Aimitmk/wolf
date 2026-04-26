@@ -69,3 +69,27 @@ def test_reasoning_effort_literal_is_strict() -> None:
     base = {**_base_kwargs(), "LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": SecretStr("d")}
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **base, DEEPSEEK_REASONING_EFFORT="medium")  # type: ignore[arg-type]
+
+
+def test_gemini_provider_requires_gemini_key() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_base_kwargs(), LLM_PROVIDER="gemini")  # type: ignore[arg-type]
+
+
+def test_gemini_provider_does_not_require_xai_or_deepseek_key() -> None:
+    s = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        LLM_PROVIDER="gemini",
+        GEMINI_API_KEY=SecretStr("g"),
+    )
+    assert s.XAI_API_KEY is None
+    assert s.DEEPSEEK_API_KEY is None
+    assert s.GEMINI_MODEL == "gemini-3-flash-preview"
+    assert s.GEMINI_THINKING_LEVEL == "low"
+
+
+def test_gemini_thinking_level_literal_is_strict() -> None:
+    base = {**_base_kwargs(), "LLM_PROVIDER": "gemini", "GEMINI_API_KEY": SecretStr("g")}
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **base, GEMINI_THINKING_LEVEL="off")  # type: ignore[arg-type]

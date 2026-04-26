@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`wolfbot` — a Discord bot that hosts synchronous 9-player Werewolf (人狼) games. 1–9 humans join via slash commands; any unfilled seats are played by xAI Grok or DeepSeek V4 Flash LLM personas (selected by `LLM_PROVIDER`). Python 3.11 (strict pin `>=3.11,<3.12`), uv-managed, async-first (discord.py + aiosqlite + pydantic v2 + openai client pointed at xAI or DeepSeek per `LLM_PROVIDER`).
+`wolfbot` — a Discord bot that hosts synchronous 9-player Werewolf (人狼) games. 1–9 humans join via slash commands; any unfilled seats are played by xAI Grok, DeepSeek V4 Flash, or Google Gemini 3 Flash LLM personas (selected by `LLM_PROVIDER`). Python 3.11 (strict pin `>=3.11,<3.12`), uv-managed, async-first (discord.py + aiosqlite + pydantic v2; openai client points at xAI or DeepSeek, while the Gemini path uses the official `google-genai` SDK — selected per `LLM_PROVIDER`).
 
 Full game spec (Japanese) lives at `prompts/IMPLEMENTATION_PROMPT.md` — consult it for roles, phase order, and event ordering rules before changing domain logic. Note: the top-level `prompts/` directory holds authoring/spec docs for humans and Claude (not loaded at runtime); the runtime LLM template is a separate file at `src/wolfbot/prompts/llm_system_prompt.md`, composed dynamically by `llm/prompt_builder.py` — see the LLM integration section.
 
@@ -32,10 +32,10 @@ uv run mypy                                              # strict typecheck (pac
 
 ## Required environment variables
 
-From `.env.example`. The provider key (`XAI_API_KEY` or `DEEPSEEK_API_KEY`) is conditionally required by `LLM_PROVIDER`; the cross-field check lives in a `model_validator(mode='after')` on `Settings` and fails fast at boot if the active provider's key is missing.
+From `.env.example`. The provider key (`XAI_API_KEY`, `DEEPSEEK_API_KEY`, or `GEMINI_API_KEY`) is conditionally required by `LLM_PROVIDER`; the cross-field check lives in a `model_validator(mode='after')` on `Settings` and fails fast at boot if the active provider's key is missing.
 
 - `DISCORD_TOKEN` — bot token (SecretStr)
-- `LLM_PROVIDER` — `xai` (default) or `deepseek`. Lowercase only.
+- `LLM_PROVIDER` — `xai` (default), `deepseek`, or `gemini`. Lowercase only.
 - `XAI_API_KEY` — xAI API key (SecretStr); required when `LLM_PROVIDER=xai`
 - `XAI_MODEL` — model name (default `grok-4-1-fast-reasoning`)
 - `DEEPSEEK_API_KEY` — DeepSeek API key (SecretStr); required when `LLM_PROVIDER=deepseek`
@@ -43,6 +43,9 @@ From `.env.example`. The provider key (`XAI_API_KEY` or `DEEPSEEK_API_KEY`) is c
 - `DEEPSEEK_MODEL` — default `deepseek-v4-flash`
 - `DEEPSEEK_THINKING` — `enabled` (default) or `disabled`
 - `DEEPSEEK_REASONING_EFFORT` — `high` or `max` (default); only forwarded when thinking is enabled
+- `GEMINI_API_KEY` — Google Gemini API key (SecretStr); required when `LLM_PROVIDER=gemini`
+- `GEMINI_MODEL` — default `gemini-3-flash-preview`
+- `GEMINI_THINKING_LEVEL` — `minimal` / `low` (default) / `medium` / `high`; default `low` keeps Discord turn-time bounded
 - `DISCORD_GUILD_ID`, `MAIN_TEXT_CHANNEL_ID`, `MAIN_VOICE_CHANNEL_ID` — ints
 - `WOLFBOT_DB_PATH` — SQLite path (default `./wolfbot.db`)
 - `LOG_LEVEL` — default `INFO`
@@ -140,7 +143,7 @@ During wolf-attack splits, the main channel announces only `未確定: N件` (hi
 
 ### LLM integration
 
-`src/wolfbot/services/llm_service.py` exposes two deciders selected by `make_llm_decider(settings)` based on `settings.LLM_PROVIDER`. `XAILLMActionDecider` calls `https://api.x.ai/v1/chat/completions` with `response_format={"type":"json_schema", "json_schema": RESPONSE_SCHEMA}` strict mode (Grok rejects `reasoning_effort`/`extra_body`, so the xAI path deliberately sends neither). `DeepSeekLLMActionDecider` calls `https://api.deepseek.com` with `response_format={"type":"json_object"}` (DeepSeek doesn't support strict json_schema) plus a per-call JSON contract appended to the system prompt by `_deepseek_json_contract` so the model knows the exact field names; `DEEPSEEK_THINKING` toggles `extra_body={"thinking": {"type": ...}}` and, when enabled, forwards `reasoning_effort` (`high`/`max`). DeepSeek's `reasoning_content` is intentionally never read, logged, or persisted — only `message.content` is consumed. Both paths funnel through `LLMAction.model_validate_json` and share the same `tenacity` retry policy. The runtime markdown template (`src/wolfbot/prompts/llm_system_prompt.md`) is unchanged — the JSON contract is added at decider time only on the DeepSeek path.
+`src/wolfbot/services/llm_service.py` exposes three deciders selected by `make_llm_decider(settings)` based on `settings.LLM_PROVIDER`. `XAILLMActionDecider` calls `https://api.x.ai/v1/chat/completions` with `response_format={"type":"json_schema", "json_schema": RESPONSE_SCHEMA}` strict mode (Grok rejects `reasoning_effort`/`extra_body`, so the xAI path deliberately sends neither). `DeepSeekLLMActionDecider` calls `https://api.deepseek.com` with `response_format={"type":"json_object"}` (DeepSeek doesn't support strict json_schema) plus a per-call JSON contract appended to the system prompt by `_deepseek_json_contract` so the model knows the exact field names; `DEEPSEEK_THINKING` toggles `extra_body={"thinking": {"type": ...}}` and, when enabled, forwards `reasoning_effort` (`high`/`max`). DeepSeek's `reasoning_content` is intentionally never read, logged, or persisted — only `message.content` is consumed. `GeminiLLMActionDecider` calls `https://generativelanguage.googleapis.com` via the official `google-genai` SDK (`client.aio.models.generate_content(...)`) with `response_mime_type="application/json"` + `response_json_schema=RESPONSE_SCHEMA["schema"]` (Gemini 3 structured outputs), plus `thinking_config=types.ThinkingConfig(thinking_level=...)`; default `thinking_level="low"` keeps Discord turn-time bounded, and Gemini's internal thinking / thought signatures are never read, logged, or persisted — only `resp.text` is consumed (parallel to DeepSeek's `reasoning_content` rule). All three paths funnel through `LLMAction.model_validate_json` and share the same `tenacity` retry policy. The runtime markdown template (`src/wolfbot/prompts/llm_system_prompt.md`) is unchanged — the DeepSeek JSON contract is added at decider time only on the DeepSeek path; Gemini relies on `response_json_schema` and xAI on `json_schema` strict mode.
 
 The system prompt is **composed per actor** by `src/wolfbot/llm/prompt_builder.py`, not loaded verbatim. Three programmatically-generated blocks are layered onto `src/wolfbot/prompts/llm_system_prompt.md`: `_build_game_rules_block()` (9-player ruleset derived from `ROLE_DISTRIBUTION` + `VILLAGE_SIZE` so the canonical numbers aren't duplicated, plus the shared reasoning heuristics every seat sees — currently CO evaluation: a **never-countered** single role-CO is presumed near-real, but a **sole survivor** of a contested CO history (same role had ≥2 COs, others died) is **not** auto-trusted; topical mention of a CO ("the seer CO 〜について") is distinguished from self-declaration; counter-COs and divination/attack alignment feed the judgment), `_ROLE_STRATEGIES[role]` (role-scoped tactical hints — wolf/madman carry day-phased fake-CO playbooks that deliberately mirror each other, knight carries peaceful-morning guard-CO guidance, seer/medium/villager carry judgment-integrity rules (villager strategy explicitly forbids 「村人CO」/「素村CO」 and equivalents); cross-leak tests assert one role never sees another's strategy), and `_build_speech_profile_block(persona)` (the persona's 話法 section). Routing when editing: shared heuristics every seat should see → `_build_game_rules_block`; role-specific strategy → `_ROLE_STRATEGIES`; base framing / output format / hard invariants → the markdown template. The markdown is a template, not the whole prompt.
 

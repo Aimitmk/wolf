@@ -1,6 +1,6 @@
 # wolfbot
 
-`wolfbot` は、Discord 上で 9 人村の人狼を進行する Python 製 bot です。`/wolf` コマンドでロビー作成から開始、進行確認、延長、強制終了まで操作できます。人間プレイヤーが 9 人に満たない場合は、xAI Grok もしくは DeepSeek API を使う LLM プレイヤーが不足人数を補完します。LLM backend は環境変数 `LLM_PROVIDER` で切り替えます (既定は `xai`)。9 人村専用で、人間は主に VC で会話し、LLM を含む村ではメイン text チャンネルの投稿も議論材料として扱います。
+`wolfbot` は、Discord 上で 9 人村の人狼を進行する Python 製 bot です。`/wolf` コマンドでロビー作成から開始、進行確認、延長、強制終了まで操作できます。人間プレイヤーが 9 人に満たない場合は、xAI Grok / DeepSeek / Google Gemini いずれかの API を使う LLM プレイヤーが不足人数を補完します。LLM backend は環境変数 `LLM_PROVIDER` で切り替えます (既定は `xai`)。9 人村専用で、人間は主に VC で会話し、LLM を含む村ではメイン text チャンネルの投稿も議論材料として扱います。
 
 ## 主な機能
 
@@ -17,7 +17,7 @@
 - `Python 3.11`
 - `uv`
 - Discord Bot アプリケーション
-- xAI または DeepSeek の API キー (`LLM_PROVIDER` で選んだ方)
+- xAI / DeepSeek / Google Gemini いずれかの API キー (`LLM_PROVIDER` で選んだもの)
 - 既存のメイン text チャンネル
 - 既存のメイン VC
 
@@ -37,7 +37,7 @@ uv sync
 cp .env.example .env
 ```
 
-最初は次の内容を埋めれば起動に必要な最低限の設定が揃います (xAI を使う場合)。DeepSeek を使う場合は `LLM_PROVIDER=deepseek` にして `DEEPSEEK_API_KEY` を設定してください。
+最初は次の内容を埋めれば起動に必要な最低限の設定が揃います (xAI を使う場合)。DeepSeek を使う場合は `LLM_PROVIDER=deepseek` にして `DEEPSEEK_API_KEY` を、Gemini を使う場合は `LLM_PROVIDER=gemini` にして `GEMINI_API_KEY` を設定してください。
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token
@@ -49,6 +49,9 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_THINKING=enabled
 DEEPSEEK_REASONING_EFFORT=max
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_THINKING_LEVEL=low
 DISCORD_GUILD_ID=123456789012345678
 MAIN_TEXT_CHANNEL_ID=123456789012345678
 MAIN_VOICE_CHANNEL_ID=123456789012345678
@@ -57,13 +60,14 @@ LOG_LEVEL=INFO
 ```
 
 - `DISCORD_TOKEN`: Discord Developer Portal で作成した bot のトークンを入れます。
-- `LLM_PROVIDER`: `xai` または `deepseek`。既定は `xai`。
+- `LLM_PROVIDER`: `xai` / `deepseek` / `gemini` のいずれか。既定は `xai`。
 - `XAI_API_KEY`: `LLM_PROVIDER=xai` のとき必須。xAI の API キーを入れます。
 - `DEEPSEEK_API_KEY`: `LLM_PROVIDER=deepseek` のとき必須。DeepSeek の API キーを入れます。
+- `GEMINI_API_KEY`: `LLM_PROVIDER=gemini` のとき必須。Google Gemini の API キーを入れます。
 - `DISCORD_GUILD_ID`: bot を動かす Discord サーバーの ID を入れます。
 - `MAIN_TEXT_CHANNEL_ID`: 議論用に使うメイン text チャンネルの ID を入れます。
 - `MAIN_VOICE_CHANNEL_ID`: プレイヤーが会話するメイン VC の ID を入れます。
-- `XAI_MODEL`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_THINKING`, `DEEPSEEK_REASONING_EFFORT`, `WOLFBOT_DB_PATH`, `LOG_LEVEL` は最初は既定値のままで構いません。
+- `XAI_MODEL`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_THINKING`, `DEEPSEEK_REASONING_EFFORT`, `GEMINI_MODEL`, `GEMINI_THINKING_LEVEL`, `WOLFBOT_DB_PATH`, `LOG_LEVEL` は最初は既定値のままで構いません。
 
 `DISCORD_GUILD_ID`、`MAIN_TEXT_CHANNEL_ID`、`MAIN_VOICE_CHANNEL_ID` にはチャンネル名や `#channel` のようなメンション文字列ではなく、数値の ID を設定してください。どの guild やチャンネルを使うか未定なら、先に手順 3 を済ませてから `.env` を埋めてください。
 
@@ -113,7 +117,7 @@ uv run wolfbot
 | 変数名 | 必須 / 既定値 | 用途 |
 | --- | --- | --- |
 | `DISCORD_TOKEN` | 必須 | Discord bot のトークン |
-| `LLM_PROVIDER` | 既定値: `xai` | LLM backend: `xai` または `deepseek` |
+| `LLM_PROVIDER` | 既定値: `xai` | LLM backend: `xai` / `deepseek` / `gemini` |
 | `XAI_API_KEY` | `LLM_PROVIDER=xai` のとき必須 | xAI API キー |
 | `XAI_MODEL` | 既定値: `grok-4-1-fast` | 使用する xAI モデル名 |
 | `DEEPSEEK_API_KEY` | `LLM_PROVIDER=deepseek` のとき必須 | DeepSeek API キー |
@@ -121,6 +125,9 @@ uv run wolfbot
 | `DEEPSEEK_MODEL` | 既定値: `deepseek-v4-flash` | 使用する DeepSeek モデル名 |
 | `DEEPSEEK_THINKING` | 既定値: `enabled` | DeepSeek thinking mode (`enabled` / `disabled`) |
 | `DEEPSEEK_REASONING_EFFORT` | 既定値: `max` | thinking enabled 時の reasoning effort (`high` / `max`) |
+| `GEMINI_API_KEY` | `LLM_PROVIDER=gemini` のとき必須 | Google Gemini API キー |
+| `GEMINI_MODEL` | 既定値: `gemini-3-flash-preview` | 使用する Gemini モデル名 |
+| `GEMINI_THINKING_LEVEL` | 既定値: `low` | Gemini 3 Flash thinking level (`minimal` / `low` / `medium` / `high`) |
 | `DISCORD_GUILD_ID` | 必須 | `/wolf` コマンドを同期する guild の ID |
 | `MAIN_TEXT_CHANNEL_ID` | 必須 | 議論用に使う既存のメイン text チャンネル ID |
 | `MAIN_VOICE_CHANNEL_ID` | 必須 | 参加者が会話する既存のメイン VC の ID |

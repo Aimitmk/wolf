@@ -2170,11 +2170,11 @@ async def test_ask_system_prompt_wolf_vote_task_extends_with_two_wolf_set(
 
 # ---------------------------------------------------------- provider deciders
 #
-# These tests exercise XAILLMActionDecider / DeepSeekLLMActionDecider directly
-# against a fake AsyncOpenAI to verify the exact kwargs sent to
-# `chat.completions.create` — the integration boundary that distinguishes the
-# two providers. The rest of this file uses Protocol-level fake deciders, but
-# kwargs assertions need a fake of the SDK's call surface.
+# These tests exercise XAILLMActionDecider / DeepSeekLLMActionDecider /
+# GeminiLLMActionDecider directly against fake clients to verify the exact
+# kwargs sent at the SDK boundary that distinguishes each provider. The rest
+# of this file uses Protocol-level fake deciders, but kwargs assertions need
+# a fake of each SDK's call surface.
 
 
 class _FakeChatCompletions:
@@ -2203,6 +2203,32 @@ class _FakeAsyncOpenAI:
 
     def __init__(self, content: str) -> None:
         self.chat = _FakeChat(content)
+
+
+class _FakeGenAIModels:
+    """Records generate_content() kwargs and returns a canned `.text` payload."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self.calls: list[dict[str, object]] = []
+
+    async def generate_content(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        return SimpleNamespace(text=self._content)
+
+
+class _FakeGenAIAio:
+    def __init__(self, content: str) -> None:
+        self.models = _FakeGenAIModels(content)
+
+
+class _FakeGenAIClient:
+    """Minimal stand-in for `google.genai.Client` — exposes `.aio.models.generate_content`."""
+
+    def __init__(self, content: str) -> None:
+        self.aio = _FakeGenAIAio(content)
 
 
 def _canned_action_json() -> str:
@@ -2287,6 +2313,39 @@ async def test_deepseek_decider_omits_reasoning_effort_when_thinking_disabled() 
     assert "reasoning_effort" not in call
 
 
+async def test_gemini_decider_sends_response_json_schema_and_thinking_level() -> None:
+    """Gemini path: `response_mime_type=application/json` + `response_json_schema`,
+    `thinking_level` forwarded via `ThinkingConfig`, system prompt as
+    `system_instruction`, user context as `contents`. Sampling controls and
+    DeepSeek-only knobs (`extra_body`, `reasoning_effort`) must NOT be sent."""
+    from wolfbot.services.llm_service import RESPONSE_SCHEMA, GeminiLLMActionDecider
+
+    fake = _FakeGenAIClient(_canned_action_json())
+    decider = GeminiLLMActionDecider(
+        client=fake,
+        model="gemini-3-flash-preview",
+        thinking_level="low",
+        timeout=15.0,
+    )
+    action = await decider.decide("sys", "ctx")
+
+    assert action.intent == "speak"
+    call = fake.aio.models.calls[0]
+    assert call["model"] == "gemini-3-flash-preview"
+    assert call["contents"] == "ctx"
+    config = call["config"]
+    assert config.system_instruction == "sys"
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == RESPONSE_SCHEMA["schema"]
+    # SDK normalizes the string "low" into `ThinkingLevel.LOW` (value="LOW"),
+    # so compare on the case-insensitive value.
+    assert config.thinking_config.thinking_level.value.lower() == "low"
+    for forbidden in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+        assert forbidden not in call
+    assert "extra_body" not in call
+    assert "reasoning_effort" not in call
+
+
 def test_make_llm_decider_branches_on_provider() -> None:
     """The provider-aware factory must wire the right decider class for each
     LLM_PROVIDER value. Construction goes through Settings so the validator
@@ -2296,6 +2355,7 @@ def test_make_llm_decider_branches_on_provider() -> None:
     from wolfbot.config import Settings
     from wolfbot.services.llm_service import (
         DeepSeekLLMActionDecider,
+        GeminiLLMActionDecider,
         XAILLMActionDecider,
         make_llm_decider,
     )
@@ -2321,3 +2381,11 @@ def test_make_llm_decider_branches_on_provider() -> None:
         DEEPSEEK_API_KEY=SecretStr("d"),
     )
     assert isinstance(make_llm_decider(s_ds), DeepSeekLLMActionDecider)
+
+    s_gem = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **base_kwargs,
+        LLM_PROVIDER="gemini",
+        GEMINI_API_KEY=SecretStr("g"),
+    )
+    assert isinstance(make_llm_decider(s_gem), GeminiLLMActionDecider)
