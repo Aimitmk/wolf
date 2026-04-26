@@ -1,10 +1,13 @@
-"""xAI (Grok) LLM service + LLMAdapter that drives LLM players.
+"""LLM service + LLMAdapter that drives LLM players (xAI Grok or DeepSeek).
 
 - `LLMAction`: the Pydantic shape returned by the model (same schema sent via
-  response_format).
+  response_format on the xAI path; checked post-hoc on the DeepSeek path).
 - `LLMActionDecider` Protocol: low-level "given a persona+context, return an LLMAction".
-- `XAILLMActionDecider`: calls xAI's OpenAI-compat endpoint with structured output.
+- `XAILLMActionDecider`: calls xAI's OpenAI-compat endpoint with json_schema strict mode.
+- `DeepSeekLLMActionDecider`: calls DeepSeek's OpenAI-compat endpoint with json_object
+  + appended JSON contract; thinking mode and reasoning_effort are configurable.
 - `FakeLLMActionDecider`: deterministic stub for tests/offline dry runs.
+- `make_llm_decider(settings)`: provider-aware factory; branches on `LLM_PROVIDER`.
 - `LLMAdapter`: implements the LLMAdapter Protocol consumed by game_service; iterates
   LLM seats and submits their actions via GameService.submit_*.
 """
@@ -47,6 +50,7 @@ from wolfbot.llm.prompt_builder import (
 if TYPE_CHECKING:  # avoid importing heavy modules unless needed
     from openai import AsyncOpenAI
 
+    from wolfbot.config import Settings
     from wolfbot.persistence.sqlite_repo import SqliteRepo
     from wolfbot.services.game_service import GameService
 
@@ -116,6 +120,33 @@ RESPONSE_SCHEMA: dict[str, object] = {
 }
 
 
+# DeepSeek's `json_object` mode requires the system prompt to literally mention
+# "json" and works best with a concrete example. We append this contract to the
+# system prompt for every DeepSeek decision; the contract complements (does not
+# replace) the markdown template loaded by prompt_builder. xAI uses json_schema
+# strict mode and does not need this. Module-level so tests can assert on
+# substrings without instantiating AsyncOpenAI.
+_DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
+
+---
+出力形式 (json):
+必ず次のキーを持つ JSON オブジェクトのみを返してください。前後にテキストや markdown コードフェンスを付けないでください。
+- "intent": "speak" | "vote" | "night_action" | "skip"
+- "public_message": string (最大 400 文字)
+- "target_name": string または null
+- "reason_summary": string (最大 200 文字)
+- "confidence": number (0 から 1)
+
+例:
+{"intent": "speak", "public_message": "私は占い師です。", "target_name": null, "reason_summary": "CO 表明", "confidence": 0.7}
+"""
+
+
+def _deepseek_json_contract(system_prompt: str) -> str:
+    """Append DeepSeek's JSON-mode contract to a system prompt."""
+    return system_prompt + _DEEPSEEK_JSON_CONTRACT_SUFFIX
+
+
 # ---------------------------------------------------------- low-level deciders
 class LLMActionDecider(Protocol):
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction: ...
@@ -149,6 +180,60 @@ class XAILLMActionDecider:
             },
             timeout=self.timeout,
         )
+        message = resp.choices[0].message
+        content = message.content or "{}"
+        return LLMAction.model_validate_json(content)
+
+
+class DeepSeekLLMActionDecider:
+    """Calls DeepSeek's OpenAI-compatible chat completions endpoint.
+
+    DeepSeek does not support `response_format=json_schema` strict mode, so we
+    use `json_object` and rely on `LLMAction.model_validate_json` for the same
+    Pydantic check the xAI path uses. The system prompt has the JSON contract
+    appended at call time so the model knows the field names without us
+    re-walking the schema.
+
+    `reasoning_content` is intentionally never read or logged — only
+    `message.content` (the public answer) is consumed.
+    """
+
+    def __init__(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        thinking: Literal["enabled", "disabled"] = "enabled",
+        reasoning_effort: Literal["high", "max"] = "max",
+        timeout: float = 30.0,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
+        self.timeout = timeout
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        full_system = _deepseek_json_contract(system_prompt)
+        kwargs: dict[str, object] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": full_system},
+                {"role": "user", "content": user_context},
+            ],
+            "response_format": {"type": "json_object"},
+            "timeout": self.timeout,
+            "extra_body": {"thinking": {"type": self.thinking}},
+        }
+        if self.thinking == "enabled":
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        # DeepSeek model IDs aren't in the openai SDK's Literal, hence the ignore.
+        resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
         message = resp.choices[0].message
         content = message.content or "{}"
         return LLMAction.model_validate_json(content)
@@ -954,20 +1039,73 @@ class LLMAdapter:
 
 # ------------------------------------------------------------- factory
 def make_xai_decider(api_key: str, model: str, timeout: float = 30.0) -> XAILLMActionDecider:
-    """Build an xAI-backed decider. Imports openai lazily so tests can skip it."""
+    """Build an xAI-backed decider. Imports openai lazily so tests can skip it.
+
+    Kept for back-compat. New code should call `make_llm_decider(settings)`.
+    """
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
     return XAILLMActionDecider(client=client, model=model, timeout=timeout)
 
 
+def make_deepseek_decider(
+    api_key: str,
+    model: str,
+    base_url: str = "https://api.deepseek.com",
+    thinking: Literal["enabled", "disabled"] = "enabled",
+    reasoning_effort: Literal["high", "max"] = "max",
+    timeout: float = 30.0,
+) -> DeepSeekLLMActionDecider:
+    """Build a DeepSeek-backed decider. Imports openai lazily."""
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    return DeepSeekLLMActionDecider(
+        client=client,
+        model=model,
+        thinking=thinking,
+        reasoning_effort=reasoning_effort,
+        timeout=timeout,
+    )
+
+
+def make_llm_decider(settings: Settings, timeout: float = 30.0) -> LLMActionDecider:
+    """Provider-aware decider factory. Branches on `settings.LLM_PROVIDER`.
+
+    The Settings model_validator guarantees the relevant API key is non-None
+    by the time we get here; the asserts are a documentation aid for mypy.
+    """
+    if settings.LLM_PROVIDER == "xai":
+        assert settings.XAI_API_KEY is not None  # validated in Settings
+        return make_xai_decider(
+            api_key=settings.XAI_API_KEY.get_secret_value(),
+            model=settings.XAI_MODEL,
+            timeout=timeout,
+        )
+    if settings.LLM_PROVIDER == "deepseek":
+        assert settings.DEEPSEEK_API_KEY is not None  # validated in Settings
+        return make_deepseek_decider(
+            api_key=settings.DEEPSEEK_API_KEY.get_secret_value(),
+            model=settings.DEEPSEEK_MODEL,
+            base_url=settings.DEEPSEEK_BASE_URL,
+            thinking=settings.DEEPSEEK_THINKING,
+            reasoning_effort=settings.DEEPSEEK_REASONING_EFFORT,
+            timeout=timeout,
+        )
+    raise ValueError(f"unknown LLM_PROVIDER: {settings.LLM_PROVIDER!r}")
+
+
 __all__ = [
     "RESPONSE_SCHEMA",
+    "DeepSeekLLMActionDecider",
     "FakeLLMActionDecider",
     "LLMAction",
     "LLMActionDecider",
     "LLMAdapter",
     "XAILLMActionDecider",
+    "make_deepseek_decider",
+    "make_llm_decider",
     "make_xai_decider",
 ]
 

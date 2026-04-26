@@ -1,7 +1,7 @@
 # Discord 人狼 Bot 実装プロンプト
 
 ## 目的
-このリポジトリに、Discord で 9 人村の人狼を遊べる Python 製 bot を実装してください。人間プレイヤーが 9 人未満の場合は、xAI Grok API を使う LLM プレイヤーで不足人数を補完してください。
+このリポジトリに、Discord で 9 人村の人狼を遊べる Python 製 bot を実装してください。人間プレイヤーが 9 人未満の場合は、xAI Grok API もしくは DeepSeek API を使う LLM プレイヤーで不足人数を補完してください。LLM backend は `LLM_PROVIDER` 環境変数で切り替えます (既定は `xai`)。
 
 この文書は仕様を固定するための実装指示書です。勝手に仕様を省略したり、曖昧な部分を別案に置き換えたりせず、この文書に合わせて実装してください。状態遷移、夜処理、権限管理、再起動復旧の正確さを最優先にしてください。
 
@@ -45,12 +45,23 @@ uv venv --python 3.11 .venv
 - 本番依存: `discord.py`, `aiosqlite` もしくは同等の非同期 SQLite アクセス手段, `pydantic`, `python-dotenv`, xAI API 用クライアント, `httpx`, `tenacity`
 - 開発依存: `pytest`, `pytest-asyncio`, `ruff`, `mypy`
 
-### xAI API
-- xAI API のモデル指定は環境変数 `XAI_MODEL` で切り替え可能にする。
-- 既定値は `grok-4-1-fast` にする。
-- `grok-4-1-fast` は reasoning 可能な fast 系モデルとして扱うが、`reasoning_effort` のような未対応パラメータは送らないこと。
+### LLM API
+- `LLM_PROVIDER` 環境変数で xAI と DeepSeek を切り替え可能にする。既定値は `xai`。
+- 起動時に、選んだ provider の API キーが未設定なら `Settings` の `model_validator` で boot を止める。
+- どちらの provider でも、最終応答は `LLMAction` Pydantic model でバリデートしてから既存の `LLMAdapter` に渡す。
+
+xAI:
+- xAI API のモデル指定は環境変数 `XAI_MODEL` で切り替え可能にする。既定値は `grok-4-1-fast`。
+- `grok-4-1-fast` は reasoning 可能な fast 系モデルとして扱うが、`reasoning_effort` のような未対応パラメータは送らないこと。`extra_body` も送らない。
 - API キーは `XAI_API_KEY` を使う。
-- LLM 応答はできるだけ JSON schema / structured output で受け取り、文字列パースに依存しない。
+- LLM 応答は `response_format=json_schema` (strict) で受け取り、文字列パースに依存しない。
+
+DeepSeek:
+- API キーは `DEEPSEEK_API_KEY`。base URL は `DEEPSEEK_BASE_URL` (既定 `https://api.deepseek.com`)。モデルは `DEEPSEEK_MODEL` (既定 `deepseek-v4-flash`)。
+- DeepSeek は `response_format=json_schema` strict mode をサポートしないので、`response_format={"type":"json_object"}` を使い、システムプロンプト末尾に JSON 出力契約 (フィールド名と例) を decider 側で追記する。最終バリデーションは `LLMAction.model_validate_json` で行う。
+- `DEEPSEEK_THINKING` (`enabled` / `disabled`, 既定 `enabled`) を `extra_body={"thinking":{"type":...}}` として送る。`enabled` のときだけ `reasoning_effort` (`high` / `max`, 既定 `max`) を `DEEPSEEK_REASONING_EFFORT` から送る。
+- DeepSeek の `reasoning_content` は読まない・ログにも DB にも保存しない。`message.content` のみを使う。
+- `temperature` / `top_p` / `presence_penalty` / `frequency_penalty` は送らない (thinking mode で実質無効)。
 
 ## 期待する成果物
 実装後のコードベースは少なくとも以下の責務を分離すること。
@@ -93,8 +104,14 @@ tests/
 
 ```env
 DISCORD_TOKEN=
+LLM_PROVIDER=xai
 XAI_API_KEY=
 XAI_MODEL=grok-4-1-fast
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_THINKING=enabled
+DEEPSEEK_REASONING_EFFORT=max
 DISCORD_GUILD_ID=
 MAIN_TEXT_CHANNEL_ID=
 MAIN_VOICE_CHANNEL_ID=

@@ -16,7 +16,7 @@ from wolfbot.persistence.schema import migrate
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discord_service import DiscordBotAdapter, WolfCog
 from wolfbot.services.game_service import GameService
-from wolfbot.services.llm_service import LLMAdapter, make_xai_decider
+from wolfbot.services.llm_service import LLMAdapter, make_llm_decider
 from wolfbot.services.recovery_service import RecoveryService
 from wolfbot.services.timer_service import EngineRegistry
 
@@ -42,10 +42,7 @@ async def _run() -> None:
 
     registry = EngineRegistry()
     discord_adapter = DiscordBotAdapter(bot=bot, repo=repo, settings=settings)
-    decider = make_xai_decider(
-        api_key=settings.XAI_API_KEY.get_secret_value(),
-        model=settings.XAI_MODEL,
-    )
+    decider = make_llm_decider(settings)
     llm_adapter = LLMAdapter(repo=repo, decider=decider, message_poster=discord_adapter)
     game_service = GameService(repo=repo, discord=discord_adapter, llm=llm_adapter, wake=registry)
     discord_adapter.set_game_service(game_service)

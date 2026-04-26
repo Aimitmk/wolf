@@ -1228,9 +1228,7 @@ async def test_ask_system_prompt_wolf_attack_task_includes_checklist(
     the same 4-axis rubric must reach the LLM via the `{task_block}` slot — not
     only via the strategy block. Exercises the path `_one_night_action` uses."""
     task_text = task_night_action(SubmissionType.WOLF_ATTACK, ["席1 A", "席2 B"])
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     assert "襲撃価値" in system_prompt
     assert "護衛されやすさ" in system_prompt
     assert "騎士候補度" in system_prompt
@@ -1265,9 +1263,7 @@ async def test_ask_system_prompt_wolf_vote_task_includes_partner_checklist(
         role=Role.WEREWOLF,
         wolf_partner_tokens=["席3 PartnerName"],
     )
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     for token in (
         "仲間の人狼",
         "席3 PartnerName",
@@ -1290,13 +1286,9 @@ async def test_ask_system_prompt_wolf_runoff_vote_task_includes_runoff_checklist
         role=Role.WEREWOLF,
         wolf_partner_tokens=["席3 PartnerName"],
     )
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     for token in ("決選投票", "透け", "PP/RPP", "仲間の人狼"):
-        assert token in system_prompt, (
-            f"wolf runoff vote system prompt missing {token!r}"
-        )
+        assert token in system_prompt, f"wolf runoff vote system prompt missing {token!r}"
 
 
 async def test_ask_system_prompt_non_wolf_vote_task_excludes_partner_vocabulary(
@@ -1307,18 +1299,12 @@ async def test_ask_system_prompt_non_wolf_vote_task_excludes_partner_vocabulary(
     even though `身内票` / `ライン切り` themselves are shared rules vocab."""
     for role in (Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER, Role.MADMAN):
         task_text = task_vote(["席1 H1"], runoff=False, role=role)
-        system_prompt = await _capture_ask_system_prompt(
-            repo, role, task_text=task_text
-        )
+        system_prompt = await _capture_ask_system_prompt(repo, role, task_text=task_text)
         assert "仲間の人狼" not in system_prompt, (
             f"'仲間の人狼' leaked into {role.name} vote prompt"
         )
-        assert "相方を救" not in system_prompt, (
-            f"'相方を救' leaked into {role.name} vote prompt"
-        )
-        assert "相方を切" not in system_prompt, (
-            f"'相方を切' leaked into {role.name} vote prompt"
-        )
+        assert "相方を救" not in system_prompt, f"'相方を救' leaked into {role.name} vote prompt"
+        assert "相方を切" not in system_prompt, f"'相方を切' leaked into {role.name} vote prompt"
 
 
 async def test_ask_system_prompt_madman_vote_task_drops_partner_token(
@@ -1335,9 +1321,7 @@ async def test_ask_system_prompt_madman_vote_task_drops_partner_token(
     )
     assert "仲間の人狼" not in task_text
     assert "席3 X" not in task_text
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.MADMAN, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN, task_text=task_text)
     assert "仲間の人狼" not in system_prompt
     assert "席3 X" not in system_prompt
 
@@ -1622,9 +1606,7 @@ async def test_ask_system_prompt_knight_guard_task_includes_checklist(
     forbidden literal substrings may appear — that would trip the existing
     parametrized leak test in the unit-level prompt builder tests."""
     task_text = task_night_action(SubmissionType.KNIGHT_GUARD, ["席1 A", "席2 B"])
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.KNIGHT, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT, task_text=task_text)
     # Positive — task-level checklist reached the LLM.
     assert "鉄板護衛" in system_prompt
     assert "捨て護衛" in system_prompt
@@ -1723,9 +1705,7 @@ async def test_ask_system_prompt_seer_divine_task_includes_targeting_checklist(
     parallel of the wolf-attack and knight-guard task tests above. Wolf-task
     forbidden substrings must remain absent (existing leak guard reinforced)."""
     task_text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.SEER, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER, task_text=task_text)
     # Positive — task-level targeting checklist reached the LLM.
     assert "占い価値" in system_prompt
     assert "灰を狭める" in system_prompt
@@ -2126,6 +2106,7 @@ async def test_ask_user_context_no_wolf_partner_block_for_villager(repo: SqliteR
 # test_llm_prompt_builder.py. Verify the new content actually reaches the LLM
 # via the full system-prompt assembly path.
 
+
 @pytest.mark.parametrize("role", list(Role))
 async def test_ask_system_prompt_pair_inference_reaches_any_role(
     repo: SqliteRepo, role: Role
@@ -2134,12 +2115,8 @@ async def test_ask_system_prompt_pair_inference_reaches_any_role(
     via the rules block. `相方候補` (inference noun) and `2 人狼` (the canonical
     pair label) are the two shared anchors."""
     system_prompt = await _capture_ask_system_prompt(repo, role)
-    assert "相方候補" in system_prompt, (
-        f"{role.name} missing pair-inference anchor '相方候補'"
-    )
-    assert "2 人狼" in system_prompt, (
-        f"{role.name} missing pair-inference anchor '2 人狼'"
-    )
+    assert "相方候補" in system_prompt, f"{role.name} missing pair-inference anchor '相方候補'"
+    assert "2 人狼" in system_prompt, f"{role.name} missing pair-inference anchor '2 人狼'"
 
 
 async def test_ask_system_prompt_wolf_seat_includes_two_wolf_set_framing(
@@ -2183,11 +2160,164 @@ async def test_ask_system_prompt_wolf_vote_task_extends_with_two_wolf_set(
         role=Role.WEREWOLF,
         wolf_partner_tokens=["席3 PartnerName"],
     )
-    system_prompt = await _capture_ask_system_prompt(
-        repo, Role.WEREWOLF, task_text=task_text
-    )
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF, task_text=task_text)
     assert "2 人狼セット" in system_prompt
     # Existing wolf-only vote anchors preserved.
     assert "相方" in system_prompt
     assert "身内票" in system_prompt
     assert "ライン切り" in system_prompt
+
+
+# ---------------------------------------------------------- provider deciders
+#
+# These tests exercise XAILLMActionDecider / DeepSeekLLMActionDecider directly
+# against a fake AsyncOpenAI to verify the exact kwargs sent to
+# `chat.completions.create` — the integration boundary that distinguishes the
+# two providers. The rest of this file uses Protocol-level fake deciders, but
+# kwargs assertions need a fake of the SDK's call surface.
+
+
+class _FakeChatCompletions:
+    """Records create() kwargs and returns a canned chat-completion response."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self._content))]
+        )
+
+
+class _FakeChat:
+    def __init__(self, content: str) -> None:
+        self.completions = _FakeChatCompletions(content)
+
+
+class _FakeAsyncOpenAI:
+    """Minimal stand-in for `openai.AsyncOpenAI` — exposes `.chat.completions.create`."""
+
+    def __init__(self, content: str) -> None:
+        self.chat = _FakeChat(content)
+
+
+def _canned_action_json() -> str:
+    return (
+        '{"intent": "speak", "public_message": "test",'
+        ' "target_name": null, "reason_summary": "ok", "confidence": 0.5}'
+    )
+
+
+async def test_xai_decider_sends_json_schema_response_format_no_reasoning_effort() -> None:
+    """The xAI path uses json_schema strict mode and must NOT send DeepSeek-only
+    knobs (`reasoning_effort`, `extra_body`) — Grok rejects them."""
+    from wolfbot.services.llm_service import RESPONSE_SCHEMA, XAILLMActionDecider
+
+    fake = _FakeAsyncOpenAI(_canned_action_json())
+    decider = XAILLMActionDecider(client=fake, model="grok-x", timeout=12.0)  # type: ignore[arg-type]
+    action = await decider.decide("sys", "ctx")
+
+    assert action.intent == "speak"
+    call = fake.chat.completions.calls[0]
+    assert call["model"] == "grok-x"
+    assert call["timeout"] == 12.0
+    assert call["response_format"] == {"type": "json_schema", "json_schema": RESPONSE_SCHEMA}
+    assert "reasoning_effort" not in call
+    assert "extra_body" not in call
+    assert call["messages"] == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "ctx"},
+    ]
+
+
+async def test_deepseek_decider_sends_json_object_thinking_and_reasoning_effort() -> None:
+    """DeepSeek path: json_object response_format, thinking enabled in extra_body,
+    reasoning_effort forwarded, JSON contract appended to system prompt, and
+    sampling controls deliberately omitted."""
+    from wolfbot.services.llm_service import DeepSeekLLMActionDecider
+
+    fake = _FakeAsyncOpenAI(_canned_action_json())
+    decider = DeepSeekLLMActionDecider(
+        client=fake,  # type: ignore[arg-type]
+        model="deepseek-v4-flash",
+        thinking="enabled",
+        reasoning_effort="max",
+        timeout=20.0,
+    )
+    action = await decider.decide("sys", "ctx")
+
+    assert action.intent == "speak"
+    call = fake.chat.completions.calls[0]
+    assert call["model"] == "deepseek-v4-flash"
+    assert call["timeout"] == 20.0
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert call["reasoning_effort"] == "max"
+    for forbidden in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+        assert forbidden not in call
+    messages = call["messages"]
+    assert isinstance(messages, list)
+    sys_msg = messages[0]["content"]
+    assert isinstance(sys_msg, str)
+    assert "sys" in sys_msg
+    assert "json" in sys_msg.lower()
+    assert messages[1] == {"role": "user", "content": "ctx"}
+
+
+async def test_deepseek_decider_omits_reasoning_effort_when_thinking_disabled() -> None:
+    """`thinking=disabled` should still send extra_body for symmetry but must
+    NOT send reasoning_effort (semantically meaningless without thinking)."""
+    from wolfbot.services.llm_service import DeepSeekLLMActionDecider
+
+    fake = _FakeAsyncOpenAI(_canned_action_json())
+    decider = DeepSeekLLMActionDecider(
+        client=fake,  # type: ignore[arg-type]
+        model="deepseek-v4-flash",
+        thinking="disabled",
+        reasoning_effort="high",
+    )
+    await decider.decide("sys", "ctx")
+
+    call = fake.chat.completions.calls[0]
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in call
+
+
+def test_make_llm_decider_branches_on_provider() -> None:
+    """The provider-aware factory must wire the right decider class for each
+    LLM_PROVIDER value. Construction goes through Settings so the validator
+    runs end-to-end."""
+    from pydantic import SecretStr
+
+    from wolfbot.config import Settings
+    from wolfbot.services.llm_service import (
+        DeepSeekLLMActionDecider,
+        XAILLMActionDecider,
+        make_llm_decider,
+    )
+
+    base_kwargs: dict[str, object] = {
+        "DISCORD_TOKEN": SecretStr("t"),
+        "DISCORD_GUILD_ID": 1,
+        "MAIN_TEXT_CHANNEL_ID": 2,
+        "MAIN_VOICE_CHANNEL_ID": 3,
+    }
+    s_xai = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **base_kwargs,
+        LLM_PROVIDER="xai",
+        XAI_API_KEY=SecretStr("x"),
+    )
+    assert isinstance(make_llm_decider(s_xai), XAILLMActionDecider)
+
+    s_ds = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **base_kwargs,
+        LLM_PROVIDER="deepseek",
+        DEEPSEEK_API_KEY=SecretStr("d"),
+    )
+    assert isinstance(make_llm_decider(s_ds), DeepSeekLLMActionDecider)
