@@ -28,6 +28,7 @@ log = logging.getLogger("wolfbot")
 async def _run() -> None:
     load_dotenv(".env.master")
     settings = MasterSettings()  # type: ignore[call-arg]
+    settings.apply_phase_durations()
     logging.basicConfig(
         level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

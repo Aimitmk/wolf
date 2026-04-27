@@ -34,14 +34,17 @@ def assign_roles(seats: Sequence[Seat], rng: Random) -> dict[int, Role]:
 
 
 def day_discussion_duration(day_number: int) -> int:
-    """Seconds for the discussion phase. Day 1: 300, day 2: 240, day 3+: 180."""
-    if day_number <= 0:
-        raise ValueError("day_number must be >= 1 for discussion")
-    if day_number == 1:
-        return 300
-    if day_number == 2:
-        return 240
-    return 180
+    """Seconds for the discussion phase. Defaults: day 1: 300, day 2:
+    240, day 3+: 180.
+
+    Reads the live :class:`PhaseDurations` singleton — runtime-mutable
+    so a future ``/wolf settings`` slash command can change durations
+    without restarting Master. See :mod:`wolfbot.domain.durations` for
+    the full singleton contract.
+    """
+    from wolfbot.domain.durations import current_phase_durations
+
+    return current_phase_durations().discussion_for_day(day_number)
 
 
 def legal_attack_targets(players: Sequence[Player], actor_seat: int) -> list[int]:

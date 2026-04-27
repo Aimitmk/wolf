@@ -100,6 +100,27 @@ class MasterSettings(BaseSettings):
             )
         return self
 
+    def apply_phase_durations(self) -> None:
+        """Initialize the global :class:`PhaseDurations` singleton from env.
+
+        Called once during boot from :mod:`wolfbot.main` after the
+        Settings instance is constructed. Subsequent runtime mutations
+        (a future ``/wolf settings duration_factor ...`` slash command,
+        for example) should call :func:`set_phase_durations` directly
+        rather than re-running this method, so the env-derived values
+        don't accidentally clobber a UI-driven override.
+
+        See :class:`wolfbot.domain.durations.PhaseDurations.from_env`
+        for the env-var contract (``WOLFBOT_PHASE_DURATION_FACTOR`` plus
+        per-phase ``WOLFBOT_*_DURATION`` overrides).
+        """
+        from wolfbot.domain.durations import (
+            PhaseDurations,
+            set_phase_durations,
+        )
+
+        set_phase_durations(PhaseDurations.from_env())
+
     def gameplay_decider_config(self, *, timeout: float = 30.0) -> LLMDeciderConfig:
         """Project this Settings instance onto the provider-agnostic
         ``LLMDeciderConfig`` consumed by the decider factory.
