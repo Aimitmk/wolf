@@ -6,7 +6,20 @@
 # Usage:
 #   scripts/run-bots.sh                # auto-detect personas from envs/npc/.env.*
 #   scripts/run-bots.sh setsu gina sq  # only the listed personas
+#   scripts/run-bots.sh --mock         # offline mock mode (no LLM API calls,
+#                                      # no real VOICEVOX needed beyond local
+#                                      # daemon, fast phase durations)
+#   scripts/run-bots.sh --mock setsu   # mock mode + persona filter
 #   FORCE=1 scripts/run-bots.sh        # kill & recreate a stale session
+#
+# Mock mode injects these env vars into every spawned bot, overriding the
+# values in the user's real .env.master / envs/npc/.env.<persona> via
+# pydantic-settings precedence (process env beats .env file):
+#   GAMEPLAY_LLM_PROVIDER=mock         # Master gameplay LLM → mock decider
+#   NPC_LLM_PROVIDER=mock              # NPC speech LLM → scripted phrases
+#   WOLFBOT_PHASE_DURATION_FACTOR=0.1  # phases 10x faster (60s vote → 6s)
+# So the user keeps their real Discord token / VOICEVOX URL etc. and only
+# the LLM and pacing layers swap to deterministic test stand-ins.
 #
 # After the session is up:
 #   tmux attach -t wolfbot             # open the session
@@ -17,6 +30,29 @@
 # Stop everything:  scripts/stop-bots.sh
 
 set -euo pipefail
+
+# ─── parse --mock flag (must come before persona args) ────────────────────
+MOCK_MODE=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mock)
+            MOCK_MODE=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "ERROR: unknown flag: $1"
+            echo "Usage: $0 [--mock] [persona ...]"
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 # ─── locate repo root (parent of this script's dir) ───────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +83,24 @@ if [[ ! -f "${REPO_ROOT}/.env.master" ]]; then
     exit 1
 fi
 
+# ─── VOICEVOX engine reachability probe (warn, don't block) ───────────────
+# In reactive_voice mode every NPC bot needs the VOICEVOX HTTP engine on
+# its NPC_LLM_VOICEVOX_URL (default localhost:50021). Probing once before
+# launch saves debugging time when the engine wasn't started — NPCs
+# would otherwise spin up, register on the WS, and fail silently the
+# moment a SpeakRequest arrives.
+VOICEVOX_URL="${WOLFBOT_VOICEVOX_URL:-http://localhost:50021}"
+if command -v curl >/dev/null 2>&1; then
+    if ! curl -fsS --max-time 2 "${VOICEVOX_URL}/version" >/dev/null 2>&1; then
+        echo "WARNING: VOICEVOX engine not reachable at ${VOICEVOX_URL}/version"
+        echo "         NPCs will register with Master but fail on the first SpeakRequest."
+        echo "         Start it before NPCs are dispatched. Examples:"
+        echo "           macOS app:    open -a VOICEVOX"
+        echo "           Docker:       docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest"
+        echo "         Override the probe target via WOLFBOT_VOICEVOX_URL=..."
+    fi
+fi
+
 # We invoke .venv/bin/wolfbot* directly rather than `uv run` so that the
 # project's pinned Python 3.11 is used regardless of the user's shell
 # environment. UV_PYTHON / VIRTUAL_ENV pointing elsewhere (3.12 / 3.14
@@ -54,6 +108,23 @@ fi
 # `uv run` to error out with "incompatible interpreter".
 WOLFBOT_BIN="${REPO_ROOT}/.venv/bin/wolfbot"
 WOLFBOT_NPC_BIN="${REPO_ROOT}/.venv/bin/wolfbot-npc"
+
+# ─── mock-mode env injection ──────────────────────────────────────────────
+# Built once, then prefixed to every bot's command line so it shows up as
+# real OS env at process start. pydantic-settings reads OS env *before*
+# the .env file, so these values cleanly override whatever the user has
+# in .env.master / envs/npc/.env.<persona>.
+MOCK_ENV_PREFIX=""
+if [[ "${MOCK_MODE}" == "1" ]]; then
+    # Each variable is double-quoted so a value with shell-special chars
+    # would still be safe — there's nothing to interpolate today, but
+    # this keeps the pattern future-proof.
+    MOCK_ENV_PREFIX="\
+GAMEPLAY_LLM_PROVIDER='mock' \
+NPC_LLM_PROVIDER='mock' \
+WOLFBOT_PHASE_DURATION_FACTOR='0.1' "
+    echo "Mock mode ON — injecting GAMEPLAY_LLM_PROVIDER=mock, NPC_LLM_PROVIDER=mock, WOLFBOT_PHASE_DURATION_FACTOR=0.1"
+fi
 
 # ─── work out which NPC personas to launch ────────────────────────────────
 declare -a PERSONAS=()
@@ -128,7 +199,7 @@ launch_in_window() {
 echo "Starting tmux session '${SESSION}' with 1 master + ${#PERSONAS[@]} NPC bot(s)..."
 tmux new-session -d -s "${SESSION}" -c "${REPO_ROOT}"
 
-launch_in_window "master" "${LOG_DIR}/master.log" "'${WOLFBOT_BIN}'" "no"
+launch_in_window "master" "${LOG_DIR}/master.log" "${MOCK_ENV_PREFIX}'${WOLFBOT_BIN}'" "no"
 
 # Wait for Master to announce its WebSocket bind in the log. Polling with
 # a TCP probe (e.g. /dev/tcp) would write bytes to the socket and trigger
@@ -157,7 +228,7 @@ for persona in "${PERSONAS[@]}"; do
     launch_in_window \
         "${persona}" \
         "${LOG_DIR}/${persona}.log" \
-        "WOLFBOT_NPC_ENV=envs/npc/.env.${persona} '${WOLFBOT_NPC_BIN}'"
+        "${MOCK_ENV_PREFIX}WOLFBOT_NPC_ENV=envs/npc/.env.${persona} '${WOLFBOT_NPC_BIN}'"
 done
 
 # Land on the master window when the user attaches.
@@ -165,7 +236,7 @@ tmux select-window -t "${SESSION}:master"
 
 cat <<EOF
 
-✅ tmux session '${SESSION}' is up.
+✅ tmux session '${SESSION}' is up$( [[ "${MOCK_MODE}" == "1" ]] && echo " (MOCK MODE)" ).
    Master log:  ${LOG_DIR}/master.log
    NPC logs:    ${LOG_DIR}/<persona>.log
 
