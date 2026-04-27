@@ -71,6 +71,14 @@ DISCUSSION_INTER_ROUND_DELAY: tuple[float, float] = (
     2.0,
 )  # 5-10がdefaultだったが、実行テスト目的で短くしている
 
+# Sleep range between consecutive LLM runoff candidate speeches.
+# Mirrors DISCUSSION_INTRA_ROUND_DELAY for the runoff phase, which is also a
+# sequential per-seat loop (each candidate reads previous candidates' logs).
+RUNOFF_INTER_SPEECH_DELAY: tuple[float, float] = (
+    1.0,
+    2.0,
+)  # 5-10がdefaultだったが、実行テスト目的で短くしている
+
 
 class MessagePoster(Protocol):
     """Subset of DiscordBotAdapter's public-post API; decoupled for testing."""
@@ -944,6 +952,10 @@ class LLMAdapter:
                 )
             finally:
                 await self.repo.mark_llm_runoff_speech_done(game.id, game.day_number, llm.seat_no)
+            try:
+                await asyncio.sleep(self.rng.uniform(*RUNOFF_INTER_SPEECH_DELAY))
+            except asyncio.CancelledError:
+                return
         try:
             gs = self._gs_slot.get("gs")
             if gs is not None:
