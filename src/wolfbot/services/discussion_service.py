@@ -93,8 +93,9 @@ class SqliteSpeechEventStore:
             INSERT INTO speech_events (
                 event_id, game_id, phase_id, day, phase, source, speaker_kind,
                 speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                alive_seat_nos_json, summary, co_declaration, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
+                created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.event_id,
@@ -112,6 +113,7 @@ class SqliteSpeechEventStore:
                 event.alive_seat_nos_json,
                 event.summary,
                 event.co_declaration,
+                event.addressed_seat_no,
                 event.created_at_ms,
             ),
         )
@@ -122,7 +124,8 @@ class SqliteSpeechEventStore:
             """
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                   alive_seat_nos_json, summary, co_declaration, created_at_ms
+                   alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
+                   created_at_ms
               FROM speech_events
              WHERE game_id=? AND phase_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -137,7 +140,8 @@ class SqliteSpeechEventStore:
             """
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                   alive_seat_nos_json, summary, co_declaration, created_at_ms
+                   alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
+                   created_at_ms
               FROM speech_events
              WHERE game_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -165,7 +169,8 @@ def _row_to_event(row: Any) -> SpeechEvent:
         alive_seat_nos_json=row[12],
         summary=row[13],
         co_declaration=row[14],
-        created_at_ms=row[15],
+        addressed_seat_no=row[15],
+        created_at_ms=row[16],
     )
 
 
@@ -279,6 +284,7 @@ def make_voice_stt_event(
     audio_start_ms: int,
     audio_end_ms: int,
     co_declaration: str | None = None,
+    addressed_seat_no: int | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -295,6 +301,7 @@ def make_voice_stt_event(
         audio_start_ms=audio_start_ms,
         audio_end_ms=audio_end_ms,
         co_declaration=co_declaration,
+        addressed_seat_no=addressed_seat_no,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -498,6 +505,22 @@ def apply_speech_event(
 
     recent = [*state.recent_speech_event_ids, event.event_id][-10:]
 
+    # An NPC utterance answers any pending address; a fresh human address
+    # supersedes prior ones. Anything else (other human speech without an
+    # `addressed_seat_no`) keeps the standing address — humans often cluster
+    # short sentences and we don't want a generic follow-up to clear the hint.
+    last_addressed_seat = state.last_addressed_seat
+    last_addressed_speaker_seat = state.last_addressed_speaker_seat
+    last_addressed_text = state.last_addressed_text
+    if event.source == SpeechSource.NPC_GENERATED:
+        last_addressed_seat = None
+        last_addressed_speaker_seat = None
+        last_addressed_text = ""
+    elif event.addressed_seat_no is not None:
+        last_addressed_seat = event.addressed_seat_no
+        last_addressed_speaker_seat = speaker
+        last_addressed_text = event.text
+
     return PublicDiscussionState(
         game_id=state.game_id,
         phase_id=state.phase_id,
@@ -509,6 +532,9 @@ def apply_speech_event(
         open_topics=state.open_topics,
         silent_seats=frozenset(silent),
         recent_speech_event_ids=tuple(recent),
+        last_addressed_seat=last_addressed_seat,
+        last_addressed_speaker_seat=last_addressed_speaker_seat,
+        last_addressed_text=last_addressed_text,
     )
 
 
@@ -556,12 +582,23 @@ def rebuild_public_state_from_events(
     co_claims: list[CoClaim] = []
     recent_ids: list[str] = []
     seen_co: set[tuple[int, str]] = set()
+    last_addressed_seat: int | None = None
+    last_addressed_speaker_seat: int | None = None
+    last_addressed_text: str = ""
     for event in events:
         if event.source == SpeechSource.PHASE_BASELINE:
             continue
         if event.speaker_seat is not None:
             spoken_seats.add(event.speaker_seat)
         recent_ids.append(event.event_id)
+        if event.source == SpeechSource.NPC_GENERATED:
+            last_addressed_seat = None
+            last_addressed_speaker_seat = None
+            last_addressed_text = ""
+        elif event.addressed_seat_no is not None:
+            last_addressed_seat = event.addressed_seat_no
+            last_addressed_speaker_seat = event.speaker_seat
+            last_addressed_text = event.text
         if event.speaker_seat is None:
             continue
         role_key = _resolve_co_role(event)
@@ -582,6 +619,9 @@ def rebuild_public_state_from_events(
     state.co_claims = tuple(co_claims)
     state.silent_seats = frozenset(alive_seats - spoken_seats)
     state.recent_speech_event_ids = tuple(recent_ids[-10:])
+    state.last_addressed_seat = last_addressed_seat
+    state.last_addressed_speaker_seat = last_addressed_speaker_seat
+    state.last_addressed_text = last_addressed_text
     return state
 
 

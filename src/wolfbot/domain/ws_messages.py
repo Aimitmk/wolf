@@ -205,6 +205,15 @@ class SpeechEventPayload(BaseEnvelope):
             "analyzer (`co_claim` field). Master persists it on SpeechEvent."
         ),
     )
+    addressed_name: str | None = Field(
+        default=None,
+        description=(
+            "Literal name/handle the speaker called out (e.g. 'セツ', "
+            "'ジーナさん', '席3'). Master resolves this against the current "
+            "seats table to populate SpeechEvent.addressed_seat_no. None when "
+            "the analyzer didn't detect a named address."
+        ),
+    )
 
 
 class SttFailed(BaseEnvelope):

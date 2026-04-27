@@ -47,6 +47,7 @@ class SttResult:
     duration_ms: int
     summary: str | None = None
     co_declaration: str | None = None
+    addressed_name: str | None = None
 
 
 class SttProviderError(RuntimeError):
@@ -176,7 +177,8 @@ class GeminiAudioAnalyzer:
         '  "confidence": 0.95,\n'
         '  "co_claim": null,\n'
         '  "vote_target_seat": null,\n'
-        '  "stance": {}\n'
+        '  "stance": {},\n'
+        '  "addressed_name": null\n'
         "}\n"
         "```\n\n"
         "フィールド説明:\n"
@@ -186,6 +188,8 @@ class GeminiAudioAnalyzer:
         "- co_claim: 役職CO(自称)があれば \"seer\"/\"medium\"/\"knight\"、なければ null\n"
         "- vote_target_seat: 処刑対象として名指しした席番号(1〜9)、なければ null\n"
         "- stance: 言及した席への態度 {\"席番号\": \"positive\"/\"negative\"/\"neutral\"}\n"
+        "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
+        "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。\n"
         "\n音声が不明瞭な場合は confidence を低くし、transcript は聞き取れた範囲で。"
     )
 
@@ -278,6 +282,12 @@ class GeminiAudioAnalyzer:
                     co_raw if co_raw in ("seer", "medium", "knight") else None
                 )
 
+                addressed_raw = parsed.get("addressed_name")
+                addressed_name: str | None = None
+                if isinstance(addressed_raw, str):
+                    stripped = addressed_raw.strip()
+                    addressed_name = stripped or None
+
                 # Estimate duration from audio size (assume 16kHz 16-bit mono WAV)
                 data_bytes = max(0, len(audio) - 44)
                 duration_ms = int(data_bytes / (16_000 * 2) * 1000)
@@ -288,6 +298,7 @@ class GeminiAudioAnalyzer:
                     duration_ms=duration_ms,
                     summary=summary_str,
                     co_declaration=co_declaration,
+                    addressed_name=addressed_name,
                 )
 
         except SttProviderError:

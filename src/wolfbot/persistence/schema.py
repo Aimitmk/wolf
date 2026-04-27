@@ -168,6 +168,7 @@ DDL: list[str] = [
         alive_seat_nos_json TEXT,
         summary TEXT,
         co_declaration TEXT,
+        addressed_seat_no INTEGER,
         created_at_ms INTEGER NOT NULL
     )
     """,
@@ -294,5 +295,9 @@ async def migrate(db_path: str | Path) -> None:
         if "co_declaration" not in cols:
             await db.execute(
                 "ALTER TABLE speech_events ADD COLUMN co_declaration TEXT"
+            )
+        if "addressed_seat_no" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events ADD COLUMN addressed_seat_no INTEGER"
             )
         await db.commit()

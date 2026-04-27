@@ -300,6 +300,7 @@ class VoiceIngestService:
                 audio_end_ms=audio_end_ms,
                 summary=result.summary,
                 co_declaration=co_decl,  # type: ignore[arg-type]
+                addressed_name=result.addressed_name,
             )
         )
 

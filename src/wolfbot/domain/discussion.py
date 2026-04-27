@@ -87,6 +87,18 @@ class SpeechEvent(BaseModel):
             "legacy events fall back to `_CO_MARKERS` substring scan."
         ),
     )
+    addressed_seat_no: int | None = Field(
+        default=None,
+        ge=1,
+        le=9,
+        description=(
+            "Seat number this utterance is addressed to "
+            "('〜さん、どう思う' style direct address). "
+            "Resolved on Master from the analyzer's `addressed_name` against the "
+            "current seats table. SpeakArbiter prefers this NPC when picking "
+            "the next speaker."
+        ),
+    )
     created_at_ms: int
 
     def is_baseline(self) -> bool:
@@ -138,3 +150,6 @@ class PublicDiscussionState(BaseModel):
     open_topics: tuple[str, ...] = ()
     silent_seats: frozenset[int] = frozenset()
     recent_speech_event_ids: tuple[str, ...] = ()
+    last_addressed_seat: int | None = None
+    last_addressed_speaker_seat: int | None = None
+    last_addressed_text: str = ""
