@@ -17,7 +17,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from random import Random
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import discord
 from discord import app_commands
@@ -419,6 +419,7 @@ class WolfCog(commands.Cog):
         discussion_service: DiscussionService | None = None,
         on_speech_recorded: Callable[[str], Awaitable[None]] | None = None,
         npc_registry: NpcRegistry | None = None,
+        text_analyzer: Any = None,
     ) -> None:
         super().__init__()
         self.bot = bot
@@ -436,6 +437,13 @@ class WolfCog(commands.Cog):
         # start` fills LLM seats from online NPC bots (each carrying a fixed
         # persona) instead of randomly drawing from NPC_PERSONAS.
         self._npc_registry = npc_registry
+        # Optional structured analyzer for text-channel utterances. Mirrors
+        # the voice path's `GeminiAudioAnalyzer` — extracts `addressed_name`
+        # and `co_declaration` so SpeakArbiter can route replies to the
+        # named NPC seat just like for voice. Wired only when reactive_voice
+        # is active and a Voice LLM key is set; falls back to plain raw
+        # capture when None.
+        self._text_analyzer = text_analyzer
 
     def _select_llm_seat_personas(
         self,
@@ -540,6 +548,45 @@ class WolfCog(commands.Cog):
                         alive_seat_nos=alive_seat_nos,
                     )
                     phase_id = make_phase_id(game.id, game.day_number, game.phase)
+
+                    # Mirror the voice path: when a TextAnalyzer is wired,
+                    # extract `addressed_name` + `co_declaration` so the
+                    # downstream SpeakArbiter / state fold see the same
+                    # structured signal regardless of whether the human
+                    # spoke or typed. Failures are best-effort — a slow or
+                    # broken analyzer must not block the SpeechEvent write.
+                    addressed_seat_no: int | None = None
+                    co_declaration: str | None = None
+                    if self._text_analyzer is not None:
+                        try:
+                            analysis = await self._text_analyzer.analyze(
+                                text=message.content, timeout_s=8.0
+                            )
+                        except Exception:
+                            log.exception(
+                                "text_analyzer_failed game=%s seat=%s",
+                                game.id,
+                                author_seat,
+                            )
+                        else:
+                            co_declaration = analysis.co_declaration
+                            if analysis.addressed_name:
+                                from wolfbot.master.ingest_service import (
+                                    resolve_seat_by_name,
+                                )
+
+                                seats = await self.repo.load_seats(game.id)
+                                alive_set = {
+                                    p.seat_no for p in players if p.alive
+                                }
+                                seat_no = resolve_seat_by_name(
+                                    analysis.addressed_name,
+                                    seats,
+                                    alive=frozenset(alive_set),
+                                )
+                                if seat_no is not None and seat_no != author_seat:
+                                    addressed_seat_no = seat_no
+
                     event = make_human_text_event(
                         game_id=game.id,
                         phase_id=phase_id,
@@ -547,6 +594,8 @@ class WolfCog(commands.Cog):
                         phase=game.phase,
                         speaker_seat=author_seat,
                         text=message.content,
+                        co_declaration=co_declaration,
+                        addressed_seat_no=addressed_seat_no,
                     )
                     await self._discussion_service.record(event)
                     # Trigger arbiter dispatch so NPCs can respond to new text.

@@ -469,6 +469,107 @@ def test_logic_packet_summary_omits_address_when_none() -> None:
 # ------------------------------------------------------ End-to-end: payload → arbiter
 
 
+async def test_wolfcog_on_message_uses_text_analyzer_to_set_addressed_seat(
+    repo: SqliteRepo,
+) -> None:
+    """When a TextAnalyzer is wired, `WolfCog.on_message` must call it and
+    propagate the resolved `addressed_seat_no` onto the SpeechEvent so the
+    text path matches the voice path."""
+    from unittest.mock import MagicMock
+
+    from wolfbot.domain.discussion import SpeechSource
+    from wolfbot.master.text_analyzer import FakeTextAnalyzer, TextAnalysis
+    from wolfbot.services.discord_service import WolfCog
+    from wolfbot.services.discussion_service import SqliteSpeechEventStore
+
+    g, _seats = await _make_seated_game(repo)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store, log_sink=repo)
+    fake_analyzer = FakeTextAnalyzer(
+        scripted=[TextAnalysis(addressed_name="ジナ")]
+    )
+
+    cog = WolfCog(
+        bot=MagicMock(),
+        repo=repo,
+        game_service=MagicMock(),
+        discord_adapter=MagicMock(),
+        llm_adapter=MagicMock(),
+        registry=MagicMock(),
+        settings=MagicMock(MAIN_TEXT_CHANNEL_ID=100, MAIN_VOICE_CHANNEL_ID=200),
+        discussion_service=discussion,
+        text_analyzer=fake_analyzer,
+    )
+
+    msg = MagicMock()
+    msg.author.bot = False
+    msg.author.id = "u1"
+    msg.guild.id = g.guild_id
+    msg.channel.id = "c1"  # main_text_channel_id
+    msg.content = "ジナさん、どう思う？"
+
+    # Patch the message channel to match game.main_text_channel_id ("c1").
+    await WolfCog.on_message(cog, msg)
+
+    # The fake analyzer should have been called once with the message body.
+    assert fake_analyzer.call_count == 1
+    assert fake_analyzer.last_text == "ジナさん、どう思う？"
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    events = await store.load_phase(g.id, phase_id)
+    text_events = [e for e in events if e.source == SpeechSource.TEXT]
+    assert len(text_events) == 1
+    assert text_events[0].addressed_seat_no == 3
+    assert text_events[0].speaker_seat == 1
+
+
+async def test_wolfcog_on_message_skips_addressed_when_analyzer_fails(
+    repo: SqliteRepo,
+) -> None:
+    """A broken analyzer must not block the SpeechEvent write — the row
+    should still land with `addressed_seat_no=None` so plain text capture
+    keeps working."""
+    from unittest.mock import MagicMock
+
+    from wolfbot.domain.discussion import SpeechSource
+    from wolfbot.master.text_analyzer import FakeTextAnalyzer
+    from wolfbot.services.discord_service import WolfCog
+    from wolfbot.services.discussion_service import SqliteSpeechEventStore
+
+    g, _seats = await _make_seated_game(repo)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store, log_sink=repo)
+    broken = FakeTextAnalyzer(scripted=[RuntimeError("provider down")])
+
+    cog = WolfCog(
+        bot=MagicMock(),
+        repo=repo,
+        game_service=MagicMock(),
+        discord_adapter=MagicMock(),
+        llm_adapter=MagicMock(),
+        registry=MagicMock(),
+        settings=MagicMock(MAIN_TEXT_CHANNEL_ID=100, MAIN_VOICE_CHANNEL_ID=200),
+        discussion_service=discussion,
+        text_analyzer=broken,
+    )
+
+    msg = MagicMock()
+    msg.author.bot = False
+    msg.author.id = "u1"
+    msg.guild.id = g.guild_id
+    msg.channel.id = "c1"
+    msg.content = "セツさん、どう？"
+
+    await WolfCog.on_message(cog, msg)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    events = await store.load_phase(g.id, phase_id)
+    text_events = [e for e in events if e.source == SpeechSource.TEXT]
+    assert len(text_events) == 1
+    assert text_events[0].addressed_seat_no is None
+    assert text_events[0].text == "セツさん、どう？"
+
+
 async def test_end_to_end_addressed_dispatch(repo: SqliteRepo) -> None:
     """A SpeechEventPayload carrying `addressed_name='ジナ'` must result in
     the seat-3 NPC receiving the next SpeakRequest, not seat 2."""

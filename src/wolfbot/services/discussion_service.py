@@ -229,6 +229,7 @@ def make_human_text_event(
     speaker_seat: int,
     text: str,
     co_declaration: str | None = None,
+    addressed_seat_no: int | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -242,6 +243,7 @@ def make_human_text_event(
         speaker_seat=speaker_seat,
         text=text,
         co_declaration=co_declaration,
+        addressed_seat_no=addressed_seat_no,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 

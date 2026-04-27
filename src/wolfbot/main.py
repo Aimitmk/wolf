@@ -146,6 +146,25 @@ async def _run() -> None:
         if _reactive_phase_cb:
             await _reactive_phase_cb[0].try_dispatch_next(game_id)
 
+    # Mirror the voice path's structured analysis on the text channel:
+    # one Gemini call per typed message yields the same `addressed_name`
+    # / `co_claim` signal so SpeakArbiter can route a text address to
+    # the right NPC seat. Wired only when reactive_voice is enabled and a
+    # Voice LLM key is present; absent → WolfCog falls back to plain raw
+    # capture (the historical behavior).
+    text_analyzer: Any = None
+    if (
+        settings.LLM_DISCUSSION_MODE == "reactive_voice"
+        and settings.MASTER_NPC_PSK is not None
+        and settings.VOICE_LLM_API_KEY is not None
+    ):
+        from wolfbot.master.text_analyzer import GeminiTextAnalyzer
+
+        text_analyzer = GeminiTextAnalyzer(
+            api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
+            model=settings.VOICE_LLM_MODEL,
+        )
+
     cog = WolfCog(
         bot=bot,
         repo=repo,
@@ -157,6 +176,7 @@ async def _run() -> None:
         discussion_service=discussion_service,
         on_speech_recorded=_on_speech_recorded,
         npc_registry=npc_registry,
+        text_analyzer=text_analyzer,
     )
     await bot.add_cog(cog)
     bot.tree.add_command(cog.wolf, guild=discord.Object(
