@@ -1184,6 +1184,40 @@ async def test_ask_system_prompt_contains_co_overflow_examples_for_any_role(
         assert "4-1-1" in system_prompt, f"{role.name} missed 4-1-1 example"
 
 
+async def test_ask_system_prompt_contains_rope_margin_rules_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """残り縄・推定残り人狼数・吊り余裕 の共通勝ち筋ルールは、共通ルール経由で
+    全 role の system prompt に届く。9 人村は残り縄のうち推定残り人狼数ぶんを
+    投票で吊り切る必要があり、吊り余裕 = 残り縄 - 推定残り人狼数 が小さい
+    ほど非狼濃厚位置・確白級・狂人っぽい位置を吊らない、という方針を全席に
+    渡す。残り人狼数自体は秘匿情報として bot から渡されない原則も維持する。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "吊り余裕" in system_prompt, f"{role.name} missed 吊り余裕"
+        assert "残り縄 - 推定残り人狼数" in system_prompt, (
+            f"{role.name} missed margin formula"
+        )
+        assert "推定残り人狼数" in system_prompt, f"{role.name} missed 推定残り人狼数"
+        assert "投票で吊り切る" in system_prompt, f"{role.name} missed 投票で吊り切る"
+        assert "吊り余裕が 0 以下" in system_prompt, (
+            f"{role.name} missed zero-margin rule"
+        )
+        assert "非狼濃厚位置" in system_prompt, f"{role.name} missed 非狼濃厚位置"
+        assert "敗着になり得る" in system_prompt, f"{role.name} missed 敗着"
+        # Estimation source is public info, not a bot-provided secret.
+        assert "秘匿情報として教える値ではなく" in system_prompt, (
+            f"{role.name} missed public-info estimation framing"
+        )
+
+
 async def test_ask_system_prompt_villager_strategy_includes_co_overflow_action(
     repo: SqliteRepo,
 ) -> None:

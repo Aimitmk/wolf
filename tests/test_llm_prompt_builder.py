@@ -515,6 +515,64 @@ def test_game_rules_block_contains_rope_calculation_formula() -> None:
     assert "4縄" in block
 
 
+def test_game_rules_block_states_kill_estimated_wolves_within_remaining_ropes() -> None:
+    """9 人村の勝ち筋として、残り縄のうち推定残り人狼数ぶんを投票で吊り切る
+    必要があることを共通ルールに明記する。"""
+    block = _build_game_rules_block()
+    assert "残り縄" in block
+    assert "推定残り人狼数" in block
+    assert "投票で吊り切る" in block
+
+
+def test_game_rules_block_defines_hanging_margin_formula() -> None:
+    """吊り余裕 = 残り縄 - 推定残り人狼数 を投票判断・ローラー継続・決め打ち
+    判断の核として明示する。"""
+    block = _build_game_rules_block()
+    assert "吊り余裕" in block
+    assert "残り縄 - 推定残り人狼数" in block
+    assert "ローラー継続" in block
+    assert "決め打ち判断" in block
+
+
+def test_game_rules_block_describes_zero_margin_must_target_wolves() -> None:
+    """吊り余裕が 0 以下の局面では、非狼濃厚位置・真寄り情報役・確白級・
+    狂人候補を吊ると敗着になり得る。残った処刑をすべて人狼候補に当てる。"""
+    block = _build_game_rules_block()
+    assert "吊り余裕が 0 以下" in block
+    assert "非狼濃厚位置" in block
+    assert "真寄り情報役" in block
+    assert "確白級" in block
+    assert "狂人っぽい" in block
+    assert "敗着になり得る" in block
+    assert "人狼候補へ集中" in block
+
+
+def test_game_rules_block_describes_positive_margin_use_explained_by_public_info() -> None:
+    """吊り余裕がある局面でも、その余裕をローラー継続・情報吊り・灰吊りの
+    どれに使うかを CO 履歴・判定履歴・票筋・噛み筋・PP/RPP リスクで説明する。
+    狂人生存可能性が高い、または PP/RPP が近いほど余裕を小さく見積もる。"""
+    block = _build_game_rules_block()
+    assert "吊り余裕がある局面" in block
+    assert "情報吊り" in block
+    assert "灰吊り" in block
+    assert "余裕を小さく見積もる" in block
+
+
+def test_game_rules_block_estimates_wolf_count_from_public_info() -> None:
+    """残り人狼数は bot が秘匿情報として教える値ではなく、公開ログ上の
+    霊媒結果・処刑結果・襲撃死・CO 破綻・対抗 CO 数・投票履歴から推定する。
+    断定せず推定根拠を短く添える原則を明文化する。"""
+    block = _build_game_rules_block()
+    assert "秘匿情報として教える値ではなく" in block
+    assert "霊媒結果" in block
+    assert "処刑結果" in block
+    assert "襲撃死" in block
+    assert "CO 破綻" in block
+    assert "対抗 CO 数" in block
+    assert "投票履歴" in block
+    assert "推定根拠" in block
+
+
 def test_game_rules_block_clarifies_white_is_not_village_confirmed() -> None:
     """Every LLM seat must see the contract that 白判定 ≠ 村陣営確定 because
     the madman reads white. This also cross-references the existing rule on
@@ -2430,3 +2488,90 @@ def test_task_vote_madman_inference_present_but_no_actor_partner() -> None:
     assert "相方を切" not in text
     # Bare `相方` (actor mode) must be absent in the madman vote text.
     assert not re.search(r"相方(?!候補)", text)
+
+
+# ----------------------------------- 縄計算・吊り余裕 (rope plan) in task_vote
+# The rope-plan guidance lives in `task_vote`'s base text so every role — wolf
+# or not — votes with awareness of `残り縄 - 推定残り人狼数` as the margin.
+# Wolf-only enrichment (相方救済 / 身内票 / ライン切り) must remain isolated.
+
+
+def test_task_vote_base_includes_rope_plan_for_all_roles() -> None:
+    """The shared `task_vote` body must teach the rope plan: every vote is
+    chosen against the plan to hang the estimated remaining wolves within the
+    remaining ropes. Bare `相方` (actor mode) must not leak into the base."""
+    text = task_vote(["席1 A", "席2 B"], runoff=False)
+    assert "残り縄" in text
+    assert "推定残り人狼数" in text
+    assert "吊り余裕" in text
+    assert "残り縄 - 推定残り人狼数" in text
+    assert "人狼候補へ票を集中" in text
+    # Reason summary guidance points at rope calculation, not just suspicion.
+    assert "reason_summary" in text
+    assert "縄計算上なぜ今日必要か" in text
+    # Wolf-only block must not leak into base.
+    assert "仲間の人狼" not in text
+    assert not re.search(r"相方(?!候補)", text)
+
+
+@pytest.mark.parametrize(
+    "role",
+    [Role.VILLAGER, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.MADMAN],
+)
+def test_task_vote_rope_plan_reaches_non_wolf_roles(role: Role) -> None:
+    """Non-wolf voters receive the rope-plan guidance through the same base
+    text, with no wolf-only enrichment regardless of role."""
+    text = task_vote(["席1 A", "席2 B"], runoff=False, role=role)
+    assert "吊り余裕" in text
+    assert "残り縄 - 推定残り人狼数" in text
+    # Wolf-only enrichment must stay out.
+    assert "仲間の人狼" not in text
+    assert "身内票" not in text
+    assert "ライン切り" not in text
+    assert not re.search(r"相方(?!候補)", text)
+
+
+def test_task_vote_wolf_path_keeps_rope_plan_alongside_partner_checklist() -> None:
+    """A wolf voter sees the base rope plan AND the wolf-only partner
+    checklist. The two layers must coexist so the wolf reasons about both
+    rope arithmetic and partner discipline."""
+    text = task_vote(
+        ["席1 A", "席2 B"],
+        runoff=False,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席2 B"],
+    )
+    # Base rope-plan reaches the wolf seat too.
+    assert "吊り余裕" in text
+    assert "残り縄 - 推定残り人狼数" in text
+    # Wolf-only enrichment still appended.
+    assert "仲間の人狼" in text
+    assert "身内票" in text
+
+
+# --------------------------- user_context rope block — margin reminder line
+# The rope block lives in user_context. It must NOT print the actual remaining
+# wolf count, but it should remind the LLM to apply
+# `吊り余裕 = 残り縄 - 推定残り人狼数` against the public-info estimate.
+
+
+def test_build_user_context_rope_block_reminds_hanging_margin() -> None:
+    """The user-context rope block reminds the LLM to compute the hanging
+    margin against the public-info-derived wolf count estimate. The existing
+    `公開情報から推定` line is preserved alongside the new reminder."""
+    seats = [_ctx_seat(i, f"S{i}") for i in range(1, 10)]
+    players = [_ctx_player(i, alive=True) for i in range(1, 10)]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[],
+        private_logs=[],
+    )
+    # Existing public-info estimation note preserved.
+    assert "公開情報から推定" in out
+    # New margin reminder.
+    assert "推定残り人狼数を踏まえ" in out
+    assert "吊り余裕 = 残り縄 - 推定残り人狼数" in out
