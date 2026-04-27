@@ -818,7 +818,11 @@ class LLMAdapter:
             seat,
             players,
             seats,
-            task_text=task_daytime_speech(game.day_number, discussion_round=discussion_round),
+            task_text=task_daytime_speech(
+                game.day_number,
+                discussion_round=discussion_round,
+                role=player.role,
+            ),
         )
         if action.intent != "speak":
             return
@@ -952,7 +956,7 @@ class LLMAdapter:
             seat,
             players,
             seats,
-            task_text=task_daytime_speech(game.day_number),
+            task_text=task_daytime_speech(game.day_number, role=player.role),
         )
         if action.intent != "speak":
             return

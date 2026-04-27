@@ -1070,20 +1070,25 @@ def test_task_wolf_chat_includes_guard_and_knight_candidate_reasons() -> None:
 
 # ----------------------------------------------------- daytime speech task
 def test_task_daytime_speech_default_omits_first_round_rule() -> None:
-    """Default call (no `discussion_round`) — runoff and any backward-compat
-    caller — must NOT include the day-2+ first-round mandatory result rule."""
+    """Default call (no `discussion_round`, no `role`) — runoff and any
+    backward-compat caller — must NOT include the day-2+ first-round mandatory
+    result rule, NOR the day-1 wolf-side fake-CO selection nudge."""
     text = task_daytime_speech(2)
     assert "1 巡目" not in text
     assert "前夜の能力結果" not in text
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
 
 
 def test_task_daytime_speech_day1_round1_omits_day2_rule() -> None:
     """Day 1 round 1 must NOT include the day-2+ rule. Day 1 first results are
     already constrained by NIGHT_0 random white / day-1 first white in the
-    game rules block; the day-2+ rule does not apply on day 1."""
+    game rules block; the day-2+ rule does not apply on day 1. The default
+    (no `role`) call must also not include the wolf-side fake-CO selection
+    nudge — only WEREWOLF / MADMAN callers see it."""
     text = task_daytime_speech(1, discussion_round=1)
     assert "1 巡目" not in text
     assert "前夜の能力結果" not in text
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
 
 
 def test_task_daytime_speech_day2_round2_omits_first_round_rule() -> None:
@@ -1189,6 +1194,93 @@ def test_madman_fake_strategy_acknowledges_misfire_and_legal_constraints() -> No
     # Existing leak guard: bare 相方 absent; 相方候補 (inference) allowed.
     assert not re.search(r"相方(?!候補)", block)
     assert "襲撃先を揃える" not in block
+
+
+# ------------------------------------------ day 1 medium fake-CO / 2-2 / 1-2 layout
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_offers_medium_fake_as_day1_option(role: Role) -> None:
+    """Wolf and madman must teach day-1 medium fake-CO as a real choice
+    alongside seer fake and 潜伏 — not just a day-2+ post-hoc move. The
+    existing day-2+ post-hoc framing must remain (no regression)."""
+    block = _build_strategy_block(role)
+    assert "霊媒師騙りも day 1 の選択肢" in block
+    assert "占い師騙り" in block
+    assert "潜伏" in block
+    assert "対抗占い師 CO が出ている場合は、day 2 以降に霊媒師騙り" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_frames_2_2_and_1_2_as_engineerable_layouts(role: Role) -> None:
+    """Wolf-side strategy must frame 2-2 and 1-2 as boards the wolf side can
+    engineer through medium fake-CO, not just descriptive labels. The
+    creation-mode form `2-2 を作` is the directive anchor."""
+    block = _build_strategy_block(role)
+    assert "1-2" in block
+    assert "2-2 を作" in block
+    assert "霊媒ローラー" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_day1_medium_co_does_not_publish_result(role: Role) -> None:
+    """day-1 medium fake-CO must explicitly NOT publish an execution result —
+    no execution has happened yet. This composes with (does not replace) the
+    existing day-2+ '前日処刑者だけに結果を出す' rule."""
+    block = _build_strategy_block(role)
+    assert "day 1 に霊媒師騙りで CO する場合" in block
+    assert "まだ処刑が発生していない" in block
+    assert "存在しない初日結果を捏造しない" in block
+
+
+def test_madman_medium_fake_carries_misfire_awareness_for_both_colors() -> None:
+    """Madman-only: the medium-fake guidance must say even when picking
+    medium-black or medium-white, the madman never knows real wolf positions,
+    so 誤爆 / 誤支援 risk persists for both colors. Wolf-coordination
+    vocabulary stays absent."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "霊媒黒で本物の狼を切ってしまう" in block
+    assert "霊媒白で真占いを補強してしまう" in block
+    assert "誤爆" in block
+    assert "誤支援" in block
+    # Leak guard preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_layout_creation_directives_only_in_wolf_madman_strategy(role: Role) -> None:
+    """The wolf-side directive form '2-2 を作' / '1-2 を作' / '霊媒師騙りを選'
+    is creation-mode wolf-side guidance and must appear only in WEREWOLF and
+    MADMAN strategies — never in SEER / MEDIUM / KNIGHT / VILLAGER. The
+    descriptive board labels in the shared rules block are not wolf-side
+    directives and are unaffected by this guard."""
+    block = _build_strategy_block(role)
+    if role in (Role.WEREWOLF, Role.MADMAN):
+        # Creation directive must reach wolf side.
+        assert "2-2 を作" in block
+    else:
+        assert "2-2 を作" not in block, f"'2-2 を作' (creation directive) leaked into {role.name}"
+        assert "1-2 を作" not in block, f"'1-2 を作' (creation directive) leaked into {role.name}"
+        assert "霊媒師騙りを選" not in block, (
+            f"'霊媒師騙りを選' (wolf-side selection directive) leaked into {role.name}"
+        )
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round1_wolf_or_madman_offers_medium_fake_as_option(
+    role: Role,
+) -> None:
+    """At day-1 round-1 only, the daytime speech task injects a 3-way fake-CO
+    selection nudge for wolf and madman — a per-call task-level reminder that
+    re-surfaces the day-1 selection at the moment of speech generation.
+    Default (no role) and other rounds must not include it (verified by
+    sibling default-omission tests)."""
+    text = task_daytime_speech(1, discussion_round=1, role=role)
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" in text
+    assert "1-2" in text
+    assert "2-2 を作" in text
+    # Leak-guard regression — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
 
 
 # ------------------------------------------------ seer night-divination axes
