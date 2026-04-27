@@ -1134,6 +1134,135 @@ async def test_ask_system_prompt_villager_seat_includes_three_seer_co_eliminatio
     assert "前提が崩れた瞬間" in system_prompt
 
 
+async def test_ask_system_prompt_contains_co_overflow_rule_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """3 役職横断 CO 数・対抗 CO 超過分推理は共通ルール経由で全 role の
+    system prompt に届く。`CO 数 - 1` の式、超過分合計 3 で非 CO が確白級、
+    超過分合計 0〜2 で非 CO 断定しない、超過分合計 4 以上で再整理という
+    境界条件のすべてを LLM が読める状態にする。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "対抗 CO 超過分" in system_prompt, f"{role.name} missed 対抗 CO 超過分"
+        assert "CO 数 - 1" in system_prompt, f"{role.name} missed CO 数 - 1"
+        assert "超過分合計が 3 に達した場合" in system_prompt, (
+            f"{role.name} missed sum-3 trigger"
+        )
+        assert "村陣営の確白級" in system_prompt, (
+            f"{role.name} missed non-CO 確白級 consequence"
+        )
+        assert "0〜2" in system_prompt, f"{role.name} missed sum 0〜2 caveat"
+        assert "4 以上" in system_prompt, f"{role.name} missed sum 4+ contradiction"
+        assert "配役上の消去法" in system_prompt, (
+            f"{role.name} missed 配役上の消去法 framing"
+        )
+
+
+async def test_ask_system_prompt_contains_co_overflow_examples_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """3-2-1 / 2-2-2 / 3-1-1 / 4-1-1 の短い例も共通ルール経由で全 role に届く。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "3-2-1" in system_prompt, f"{role.name} missed 3-2-1 example"
+        assert "2-2-2" in system_prompt, f"{role.name} missed 2-2-2 example"
+        assert "3-1-1" in system_prompt, f"{role.name} missed 3-1-1 example"
+        assert "4-1-1" in system_prompt, f"{role.name} missed 4-1-1 example"
+
+
+async def test_ask_system_prompt_villager_strategy_includes_co_overflow_action(
+    repo: SqliteRepo,
+) -> None:
+    """村人席の system prompt には、共通ルールに加え、村人視点の運用
+    (CO 群と非 CO 確白を整理し投票先を CO 群に絞る) が届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "対抗 CO 超過分を毎日整理する" in system_prompt
+    assert "投票先を CO 群に絞る" in system_prompt
+
+
+async def test_ask_system_prompt_seer_strategy_avoids_wasting_divination(
+    repo: SqliteRepo,
+) -> None:
+    """占い師席の system prompt には、超過分合計 3 で非 CO 位置が確白級に
+    なった場合に無駄占いせず対抗 CO 群やまだ確定しない位置を優先する旨が届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
+    assert "非 CO 確白級" in system_prompt
+    assert "無駄占い" in system_prompt
+    assert "対抗 CO 群やまだ確定しない位置を優先して占う" in system_prompt
+
+
+async def test_ask_system_prompt_medium_strategy_updates_co_inference(
+    repo: SqliteRepo,
+) -> None:
+    """霊媒師席の system prompt には、霊媒結果で CO 数推理を更新する運用が
+    届く。霊媒白は非狼だけを示す既存ルールと整合する形 (真役職 / 狂人)。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
+    assert "霊媒結果は対抗 CO 超過分の CO 数推理を更新する材料" in system_prompt
+    assert "対抗 CO 群内の狼数を絞り" in system_prompt
+    assert "白なら真役職または狂人の可能性を分け" in system_prompt
+    assert "非 CO 確白の前提が保たれるか" in system_prompt
+
+
+async def test_ask_system_prompt_knight_strategy_protects_non_co_certified_white(
+    repo: SqliteRepo,
+) -> None:
+    """騎士席の system prompt には、超過分合計 3 で生まれた非 CO 確白級と
+    単独で対抗のない真寄り情報役を護衛価値が高いと扱う運用が届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
+    assert "対抗 CO 超過分合計 3 で生まれた非 CO 確白級" in system_prompt
+    assert "単独で対抗のない真寄り情報役は護衛価値が高い" in system_prompt
+
+
+async def test_ask_system_prompt_werewolf_strategy_acknowledges_overcounter_risk(
+    repo: SqliteRepo,
+) -> None:
+    """人狼席の system prompt には、騙りすぎで非 CO が確白級になるリスクを
+    超過分集計の枠組みで認識する運用が届く。相方語彙は wolf 専用として
+    ここに含まれてよい。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "対抗 CO 超過分" in system_prompt
+    assert "超過分合計が 3 に達した時点で" in system_prompt
+    assert "処刑候補が CO 群に集中する" in system_prompt
+    assert "相方と整合する形で選ぶ" in system_prompt
+
+
+async def test_ask_system_prompt_madman_co_overflow_addition_keeps_partner_isolation(
+    repo: SqliteRepo,
+) -> None:
+    """狂人席の system prompt には、同じリスクを公開情報視点で認識する運用が
+    届く一方、wolf-coordination 語彙 (bare `相方` / `襲撃先を揃える`) は
+    引き続き混入してはならず、本物の人狼位置を知っている前提の禁止文言も
+    保持される (既存 leak guard との整合)。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    # 新規 CO-overflow 文言は届く。
+    assert "対抗 CO 超過分" in system_prompt
+    assert "超過分合計が 3 に達した時点で" in system_prompt
+    assert "処刑候補が CO 群に集中するリスクを認識する" in system_prompt
+    assert "公開情報の各 CO 数と残り縄から判断する" in system_prompt
+    # Wolf-coordination 語彙が漏れていないこと。
+    assert not re.search(r"相方(?!候補)", system_prompt), (
+        "bare '相方' (actor mode) leaked into madman system prompt via "
+        "CO-overflow addition"
+    )
+    assert "襲撃先を揃える" not in system_prompt
+    # 既存 prohibition 文言が残っていること。
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt
+
+
 async def test_ask_system_prompt_contains_advanced_guard_vocab_for_any_role(
     repo: SqliteRepo,
 ) -> None:

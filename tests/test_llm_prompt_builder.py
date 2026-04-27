@@ -356,6 +356,111 @@ def test_game_rules_block_releases_fixed_black_when_premise_collapses() -> None:
     assert "CO 履歴と判定履歴を時系列で再整理" in block
 
 
+# ----------- 3 役職横断: CO 数・対抗 CO 超過分から非 CO 確白を読む消去法
+# 占い師・霊媒師・騎士の各 CO 数を時系列で整理し、各役職について `CO 数 - 1`
+# を「対抗 CO 超過分」(騙り最低数) として数える。3 役職分の超過分を合計して 3 に
+# 達した場合、人狼 2 + 狂人 1 の狼陣営 3 名が能力役職 CO 群に出切っているため、
+# 能力役職 CO していない位置は配役上の消去法で村陣営の確白級として扱える。
+def test_game_rules_block_defines_co_overflow_term() -> None:
+    """占い師・霊媒師・騎士の各 CO 数を時系列で整理し、CO 数 - 1 を対抗 CO 超過分
+    (騙り最低数) として数える、という用語と式が共通ルールに入っていること。"""
+    block = _build_game_rules_block()
+    assert "対抗 CO 超過分" in block
+    assert "CO 数 - 1" in block
+    assert "騙り最低数" in block
+    assert "真役職は各 1 人だけ" in block
+
+
+def test_game_rules_block_overflow_sum_three_marks_non_co_as_village_white() -> None:
+    """超過分合計が 3 に達した場合、能力役職 CO していない位置を村陣営の確白級
+    として扱う。配役上の消去法で狼陣営 3 名が CO 群に出切ったと数える。"""
+    block = _build_game_rules_block()
+    assert "超過分合計が 3 に達した場合" in block
+    assert "人狼 2 + 狂人 1" in block
+    assert "能力役職 CO していない位置" in block
+    assert "村陣営の確白級" in block
+    assert "配役上の消去法" in block
+
+
+def test_game_rules_block_overflow_sum_three_promotes_independent_single_co() -> None:
+    """超過分合計 3 のとき、対抗のない単独 CO 役職が別にあれば、
+    その単独 CO 者も狼陣営ではないため真役職としてかなり強く扱える。"""
+    block = _build_game_rules_block()
+    assert "対抗のない単独 CO 役職" in block
+    assert "狼陣営ではないため真役職としてかなり強く扱える" in block
+
+
+def test_game_rules_block_distinguishes_overflow_inference_from_madman_white() -> None:
+    """超過分合計 3 による非 CO 確白は、単発の白判定 (狂人白) とは別根拠で、
+    固定配役上の消去法で狼陣営 3 名が出切ったと数える点で村陣営まで強く推せる。"""
+    block = _build_game_rules_block()
+    assert "単発の白判定" in block
+    # 既存の確白語彙ルール (狂人白との整合) と矛盾しない言い回し。
+    assert "固定配役上の消去法で狼陣営 3 名が CO 群に出切った" in block
+    assert "村陣営まで強く推せる" in block
+
+
+def test_game_rules_block_overflow_sum_three_within_group_truth_still_needs_signals() -> None:
+    """対抗 CO 群の中で誰が真役職かまでは、超過分合計 3 だけでは決まらない。
+    判定結果・霊媒結果・投票・襲撃・死亡タイミング・破綻で詰める。"""
+    block = _build_game_rules_block()
+    assert "対抗 CO 群の中で誰が真役職かまでは超過分合計だけでは特定できない" in block
+    # 詰めに使う材料: 4 軸以上の言及。
+    assert "判定結果・霊媒結果・投票・襲撃" in block
+    assert "死亡タイミング" in block
+    assert "破綻" in block
+
+
+def test_game_rules_block_overflow_sum_low_does_not_confirm_non_co() -> None:
+    """超過分合計が 0〜2 の段階では、狼陣営が非 CO や単独 CO に残っている
+    可能性があるため、非 CO 位置を CO 数だけで確白とは断定しない。"""
+    block = _build_game_rules_block()
+    assert "0〜2" in block
+    assert "断定しない" in block
+    assert "狼陣営が非 CO や単独 CO に残っている可能性" in block
+
+
+def test_game_rules_block_overflow_sum_high_triggers_recheck() -> None:
+    """超過分合計が 4 以上に見える場合は固定配役と矛盾する。CO 撤回・
+    同一人物の複数 CO・話題としての CO 語彙の誤読・村騙り・死亡済み CO
+    見落とし・ログ見落としを疑い、確白扱いを保留して時系列を再整理する。"""
+    block = _build_game_rules_block()
+    assert "4 以上" in block
+    assert "固定配役と矛盾" in block
+    assert "CO 撤回" in block
+    assert "同一人物の複数 CO" in block
+    assert "村騙り" in block
+    assert "死亡済み CO 見落とし" in block
+    assert "確白扱いを保留して時系列を再整理する" in block
+
+
+def test_game_rules_block_includes_co_overflow_examples() -> None:
+    """LLM が数え方を誤らないよう、3-2-1 / 2-2-2 / 3-1-1 / 4-1-1 の
+    短い例が共通ルールに入っていること。"""
+    block = _build_game_rules_block()
+    # 数え方の型: 超過分合計 3 / 2 の境界、4-1-1 のような偏ったケース。
+    assert "3-2-1" in block
+    assert "2-2-2" in block
+    assert "3-1-1" in block
+    assert "4-1-1" in block
+    # 計算式が例の中に明示されているか (LLM が暗算を間違えない補助)。
+    assert "2 + 1 + 0 = 3" in block
+    assert "1 + 1 + 1 = 3" in block
+    assert "2 + 0 + 0 = 2" in block
+    assert "3 + 0 + 0 = 3" in block
+
+
+def test_game_rules_block_co_overflow_no_wolf_coordination_leak() -> None:
+    """新規追加した CO 超過分推理ブロックが、wolf-coordination 語彙
+    (bare `相方`, `襲撃先を揃える`) を共通ルールに漏らさないこと。
+    `相方候補` (公開ログからの推理用語) は許容。"""
+    block = _build_game_rules_block()
+    assert not re.search(r"相方(?!候補)", block), (
+        "bare '相方' (actor mode) leaked into shared rules block"
+    )
+    assert "襲撃先を揃える" not in block
+
+
 # ------------------------------------- terminology (推理語彙) in rules block
 # Advanced jinro vocabulary is shared across every LLM seat via the game-rules
 # block (not per-role strategy). These assertions pin the substrings that the
@@ -1036,6 +1141,127 @@ def test_three_seer_co_elimination_role_framings_do_not_cross_leak(role: Role) -
     if role is not Role.KNIGHT:
         assert knight_phrase not in block, (
             f"knight-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+
+
+# ----------- 3 役職横断 CO 数・対抗 CO 超過分 推理: role 別運用面の追加
+# 共通ルール側の数学的整理 (CO 数 - 1 を超過分として 3 役職分集計、合計 3 で
+# 非 CO 位置が確白級) は `_build_game_rules_block` で全 seat に届く。
+# 各 role strategy には「その役職ならどう使うか」だけを短く追加する。
+def test_villager_strategy_uses_co_overflow_inference() -> None:
+    """村人は公開ログから占い師・霊媒師・騎士の CO 数と対抗 CO 超過分を
+    毎日整理し、超過分合計 3 なら能力役職 CO していない位置を村陣営の
+    確白級として扱い、投票先を CO 群に絞る。"""
+    block = _build_strategy_block(Role.VILLAGER)
+    assert "対抗 CO 超過分を毎日整理する" in block
+    assert "超過分合計が 3 に達したら能力役職 CO していない位置を村陣営の確白級" in block
+    assert "投票先を CO 群に絞る" in block
+    # 0〜2 と 4 以上の境界条件も村人 framing に含まれていること。
+    assert "超過分合計が 0〜2 のうちは" in block
+    assert "超過分合計が 4 以上に見えたら" in block
+
+
+def test_seer_strategy_avoids_wasting_divination_on_non_co_white() -> None:
+    """占い師は超過分合計 3 で非 CO 位置が確白級になった場合、そこを
+    無駄占いせず、対抗 CO 群やまだ確定しない位置を優先して占う。"""
+    block = _build_strategy_block(Role.SEER)
+    assert "対抗 CO 超過分合計が 3 に達して能力役職 CO していない位置が非 CO 確白級" in block
+    assert "無駄占い" in block
+    assert "対抗 CO 群やまだ確定しない位置を優先して占う" in block
+
+
+def test_medium_strategy_updates_co_inference_via_medium_result() -> None:
+    """霊媒師は霊媒結果で CO 数推理を更新する。処刑された CO 者が黒なら
+    対抗 CO 群内の狼数を絞り、白なら真役職または狂人の可能性を分け、
+    非 CO 確白の前提が保たれるかを確認する (霊媒白=非狼のみのルール維持)。"""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "霊媒結果は対抗 CO 超過分の CO 数推理を更新する材料" in block
+    assert "対抗 CO 群内の狼数を絞り" in block
+    # 霊媒白は非狼だけを示す既存ルールとの整合: 真役職 / 狂人 を分ける。
+    assert "白なら真役職または狂人の可能性を分け" in block
+    assert "非 CO 確白の前提が保たれるか" in block
+
+
+def test_knight_strategy_protects_non_co_certified_white() -> None:
+    """騎士は超過分合計 3 で生まれた非 CO 確白級や、単独で対抗のない真寄り
+    情報役を護衛価値が高い対象として扱う。連続護衛不可・襲撃読み・
+    CO 時の説明可能性も合わせて判断。"""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "対抗 CO 超過分合計 3 で生まれた非 CO 確白級" in block
+    assert "単独で対抗のない真寄り情報役は護衛価値が高い" in block
+    # 既存制約 (連続護衛不可・襲撃読み・CO 時の説明可能性) との整合。
+    assert "連続護衛不可" in block
+    assert "襲撃読み" in block
+    assert "CO 時の説明可能性" in block
+
+
+def test_werewolf_strategy_acknowledges_overcounter_risk() -> None:
+    """人狼は能力役職 CO を増やしすぎると、対抗 CO 超過分合計が 3 に達した
+    時点で非 CO 位置が村陣営の確白級として扱われ、処刑候補が CO 群に
+    集中するリスクを認識する。騙りに出るか潜伏するかは CO 数と残り縄を
+    見て、相方と整合する形で選ぶ (相方語彙は wolf 専用)。"""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "対抗 CO 超過分" in block
+    assert "超過分合計が 3 に達した時点で" in block
+    assert "村陣営の確白級として扱われ" in block
+    assert "処刑候補が CO 群に集中する" in block
+    assert "相方と整合する形で選ぶ" in block
+
+
+def test_madman_strategy_acknowledges_overcounter_risk_without_partner_vocab() -> None:
+    """狂人は同じリスクを公開情報視点で認識する。本物の人狼位置を
+    知っている前提や bare `相方` (actor mode) を使ってはいけない。
+    `相方候補` (公開ログからの推理用語) は引き続き許容。"""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "対抗 CO 超過分" in block
+    assert "超過分合計が 3 に達した時点で" in block
+    assert "処刑候補が CO 群に集中するリスクを認識する" in block
+    # 公開情報視点であることが明示されていること。
+    assert "公開情報の各 CO 数と残り縄から判断する" in block
+    # Wolf-coordination 語彙の漏れがないこと (既存 leak guard と同形)。
+    assert not re.search(r"相方(?!候補)", block), (
+        "bare '相方' (actor mode) leaked into madman CO-overflow addition"
+    )
+    assert "襲撃先を揃える" not in block
+    # 既存 prohibition 文言は残ること。
+    assert "人狼位置を知っている前提で話してはならない" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_co_overflow_role_framings_do_not_cross_leak(role: Role) -> None:
+    """各 role の CO 超過分 framing 文言が他 role の strategy block へ
+    流れ込まないこと。共通ルールの数学的整理は `_build_game_rules_block`
+    側にあるため、strategy 側の役職別フレーズが横滑りしてはいけない。"""
+    block = _build_strategy_block(role)
+    villager_phrase = "投票先を CO 群に絞る"
+    seer_phrase = "非 CO 確白級になった場合、そこを無駄占いせず"
+    medium_phrase = "霊媒結果は対抗 CO 超過分の CO 数推理を更新する材料"
+    knight_phrase = "対抗 CO 超過分合計 3 で生まれた非 CO 確白級"
+    werewolf_phrase = "相方と整合する形で選ぶ"
+    madman_phrase = "公開情報の各 CO 数と残り縄から判断する"
+    if role is not Role.VILLAGER:
+        assert villager_phrase not in block, (
+            f"villager-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.SEER:
+        assert seer_phrase not in block, (
+            f"seer-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.MEDIUM:
+        assert medium_phrase not in block, (
+            f"medium-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.KNIGHT:
+        assert knight_phrase not in block, (
+            f"knight-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.WEREWOLF:
+        assert werewolf_phrase not in block, (
+            f"werewolf-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.MADMAN:
+        assert madman_phrase not in block, (
+            f"madman-framing of CO-overflow inference leaked into {role.name}"
         )
 
 
