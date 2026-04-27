@@ -8,6 +8,12 @@ __pycache__/
 dist/
 build/
 .env
+.env.master
+# NPC bot env files live under envs/npc/. The committed `.env.*.example`
+# templates are explicitly un-ignored; the corresponding real `.env.*`
+# files (with secrets filled in) stay out of git.
+envs/npc/.env.*
+!envs/npc/.env.*.example
 *.db
 *.db-journal
 *.db-wal

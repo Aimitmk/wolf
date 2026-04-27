@@ -1,13 +1,24 @@
-"""Concrete NpcGenerator that calls xAI Grok for reactive speech.
+"""Concrete NpcGenerator that calls any OpenAI-compatible chat-completions
+endpoint for reactive speech.
 
 Given a ``LogicPacket`` (summarised game state, logic candidates, pressure
 map) and a ``SpeakRequest`` (max chars, phase, intent), this module builds
-a minimal Japanese prompt and hits the xAI chat completions endpoint with
-structured JSON output.
+a minimal Japanese prompt and hits the configured chat-completions endpoint
+with structured JSON output.
 
-The prompt is deliberately simpler than the full ``llm_service`` prompt
-pipeline — reactive utterances are short (80-char cap) situational remarks,
-not multi-paragraph analytical speeches. The persona's ``style_guide`` and
+The provider is intentionally not baked into the class name. Swap it by
+changing :class:`OpenAICompatibleConfig.base_url` and ``model``:
+
+* xAI Grok — ``base_url="https://api.x.ai/v1"``, ``model="grok-..."``
+* OpenAI — ``base_url="https://api.openai.com/v1"``, ``model="gpt-..."``
+* Groq — ``base_url="https://api.groq.com/openai/v1"``
+* Together AI — ``base_url="https://api.together.xyz/v1"``
+* vLLM / Ollama (OpenAI-compatible mode) — local ``base_url``
+
+The default is xAI for back-compat with existing deployments. The prompt is
+deliberately simpler than the full ``llm_service`` prompt pipeline —
+reactive utterances are short (80-char cap) situational remarks, not
+multi-paragraph analytical speeches. The persona's ``style_guide`` and
 ``speech_profile`` are included for voice consistency but the strategic
 rules sections are omitted.
 """
@@ -19,12 +30,11 @@ import logging
 from dataclasses import dataclass
 
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
-from wolfbot.llm.personas import PERSONAS, Persona
-from wolfbot.services.npc_speech_service import NpcGeneratedSpeech
+from wolfbot.llm.persona_base import Persona
+from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+from wolfbot.npc.speech_service import NpcGeneratedSpeech
 
 log = logging.getLogger(__name__)
-
-PERSONAS_BY_KEY: dict[str, Persona] = {p.key: p for p in PERSONAS}
 
 _RESPONSE_SCHEMA: dict[str, object] = {
     "name": "reactive_speech",
@@ -103,28 +113,46 @@ def _format_candidate(c: LogicCandidate) -> str:
 
 
 @dataclass
-class GrokNpcGeneratorConfig:
+class OpenAICompatibleConfig:
+    """Backend-agnostic config for any OpenAI Chat Completions endpoint.
+
+    Defaults target xAI Grok for back-compat; override ``base_url`` and
+    ``model`` to point at OpenAI, Groq, Together, vLLM, Ollama, etc.
+    """
+
     model: str = "grok-4-1-fast"
+    base_url: str = "https://api.x.ai/v1"
     timeout: float = 15.0
     temperature: float = 0.8
-    default_persona_key: str = "setsu"
 
 
-class GrokNpcGenerator:
-    """Production NpcGenerator backed by xAI Grok."""
+class OpenAICompatibleNpcGenerator:
+    """Production NpcGenerator backed by any OpenAI-compatible LLM endpoint.
+
+    Implements :class:`wolfbot.npc.speech_service.NpcGenerator` via the
+    ``openai`` SDK's ``chat.completions`` API. The choice of provider is
+    a config decision (``base_url`` + ``model``), not a code decision.
+    """
 
     def __init__(
         self,
         *,
         api_key: str,
-        config: GrokNpcGeneratorConfig | None = None,
+        config: OpenAICompatibleConfig | None = None,
     ) -> None:
         self._api_key = api_key
-        self.config = config or GrokNpcGeneratorConfig()
+        self.config = config or OpenAICompatibleConfig()
         self._persona_key: str | None = None
 
     def set_persona(self, persona_key: str) -> None:
-        """Set the persona key for this NPC. Called after seat assignment."""
+        """Set the persona key for this NPC. Must be called once at startup,
+        before any ``generate()`` invocation.  Raises if the key is unknown.
+        """
+        if persona_key not in NPC_PERSONAS_BY_KEY:
+            valid = ", ".join(sorted(NPC_PERSONAS_BY_KEY.keys()))
+            raise ValueError(
+                f"unknown persona_key {persona_key!r}; valid keys: {valid}"
+            )
         self._persona_key = persona_key
 
     async def generate(
@@ -135,15 +163,18 @@ class GrokNpcGenerator:
     ) -> NpcGeneratedSpeech | None:
         from openai import AsyncOpenAI
 
-        persona = PERSONAS_BY_KEY.get(
-            self._persona_key or self.config.default_persona_key, PERSONAS[0]
-        )
+        if self._persona_key is None:
+            raise RuntimeError(
+                "OpenAICompatibleNpcGenerator.generate() called before set_persona(); "
+                "each NPC bot must declare its persona at startup."
+            )
+        persona = NPC_PERSONAS_BY_KEY[self._persona_key]
         system = _build_system(persona, max_chars=request.max_chars)
         user = _build_user(logic, request)
 
         client = AsyncOpenAI(
             api_key=self._api_key,
-            base_url="https://api.x.ai/v1",
+            base_url=self.config.base_url,
         )
         try:
             resp = await client.chat.completions.create(  # type: ignore[call-overload]
@@ -160,14 +191,17 @@ class GrokNpcGenerator:
                 timeout=self.config.timeout,
             )
         except Exception:
-            log.exception("grok_npc_generate_failed")
+            log.exception(
+                "npc_generate_failed model=%s base_url=%s",
+                self.config.model, self.config.base_url,
+            )
             return None
 
         content = resp.choices[0].message.content or "{}"
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
-            log.warning("grok_npc_invalid_json response=%s", content[:200])
+            log.warning("npc_generate_invalid_json response=%s", content[:200])
             return None
 
         text = data.get("text", "").strip()
@@ -187,4 +221,4 @@ class GrokNpcGenerator:
         )
 
 
-__all__ = ["GrokNpcGenerator", "GrokNpcGeneratorConfig"]
+__all__ = ["OpenAICompatibleConfig", "OpenAICompatibleNpcGenerator"]

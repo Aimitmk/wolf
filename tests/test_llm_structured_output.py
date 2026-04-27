@@ -10,7 +10,8 @@ import pytest
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, Seat
-from wolfbot.llm.personas import PERSONAS, pick_personas
+from wolfbot.llm.persona_base import pick_personas
+from wolfbot.npc.personas import NPC_PERSONAS
 from wolfbot.services.llm_service import (
     RESPONSE_SCHEMA,
     FakeLLMActionDecider,
@@ -71,7 +72,7 @@ def test_response_schema_has_required_fields() -> None:
 
 def test_pick_personas_returns_requested_count_and_no_duplicates() -> None:
     rng = random.Random(0)
-    picks = pick_personas(5, rng)
+    picks = pick_personas(NPC_PERSONAS, 5, rng)
     assert len(picks) == 5
     assert len({p.key for p in picks}) == 5
 
@@ -79,7 +80,7 @@ def test_pick_personas_returns_requested_count_and_no_duplicates() -> None:
 def test_pick_personas_rejects_over_capacity() -> None:
     rng = random.Random(0)
     with pytest.raises(ValueError):
-        pick_personas(len(PERSONAS) + 1, rng)
+        pick_personas(NPC_PERSONAS, len(NPC_PERSONAS) + 1, rng)
 
 
 # ---------------------------------------------------------- LLMAdapter

@@ -34,7 +34,6 @@ from wolfbot.domain.rules import (
     legal_guard_targets,
     previous_guard_seat_for_night,
 )
-from wolfbot.llm.personas import PERSONAS_BY_KEY
 from wolfbot.llm.prompt_builder import (
     build_system_prompt,
     build_user_context,
@@ -43,6 +42,7 @@ from wolfbot.llm.prompt_builder import (
     task_vote,
     task_wolf_chat,
 )
+from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 
 if TYPE_CHECKING:  # avoid importing heavy modules unless needed
     from openai import AsyncOpenAI
@@ -943,7 +943,7 @@ class LLMAdapter:
         seats: Sequence[Seat],
         task_text: str,
     ) -> LLMAction:
-        persona = PERSONAS_BY_KEY.get(seat.persona_key or "")
+        persona = NPC_PERSONAS_BY_KEY.get(seat.persona_key or "")
         if persona is None:
             return LLMAction(intent="skip", reason_summary="persona missing")
         assert player.role is not None

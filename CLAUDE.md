@@ -33,21 +33,37 @@ uv run mypy                                              # strict typecheck (pac
 
 ## Required environment variables
 
-From `.env.example`. All must be set for the bot to start:
+Two env files, one per process:
 
-- `DISCORD_TOKEN` — bot token (SecretStr)
-- `XAI_API_KEY` — xAI API key (SecretStr)
-- `XAI_MODEL` — model name (default `grok-4-1-fast`)
+**Master** (`.env.master`, see `.env.master.example`) — loaded by `src/wolfbot/config.py::MasterSettings`, instantiated once in `main.py`:
+
+- `DISCORD_TOKEN` — Master bot token (SecretStr)
 - `DISCORD_GUILD_ID`, `MAIN_TEXT_CHANNEL_ID`, `MAIN_VOICE_CHANNEL_ID` — ints
 - `WOLFBOT_DB_PATH` — SQLite path (default `./wolfbot.db`)
 - `LOG_LEVEL` — default `INFO`
 - `LLM_DISCUSSION_MODE` — `rounds` (default) or `reactive_voice`
 - `MASTER_WS_LISTEN` — Master WS bind address (default `127.0.0.1:8800`)
 - `MASTER_NPC_PSK` — optional PSK for NPC/voice-ingest WS auth (SecretStr)
-- `GEMINI_API_KEY` — optional Gemini API key for voice-ingest audio analysis (SecretStr)
-- `GEMINI_MODEL` — Gemini model name (default `gemini-2.0-flash-lite`)
+- `GAMEPLAY_LLM_API_KEY` — Gameplay LLM API key. The LLM Master uses to make every gameplay decision on behalf of LLM seats: votes (always), night actions (always — wolf attack / divine / guard), and day-discussion text **in rounds mode** (in reactive_voice mode the discussion text is offloaded to NPC bots, but votes / night actions still go through this LLM). Any OpenAI Chat Completions–compatible endpoint works; default targets xAI Grok. (SecretStr)
+- `GAMEPLAY_LLM_MODEL` — Gameplay LLM model name (default `grok-4-1-fast`)
+- `VOICE_LLM_API_KEY` — optional Voice LLM API key (the multimodal LLM that *understands human voice* — transcription + summary + CO detection in one call). Default targets Google Gemini. Required when `MASTER_NPC_PSK` is set and you want voice-ingest active. (SecretStr)
+- `VOICE_LLM_MODEL` — Voice LLM model name (default `gemini-2.0-flash-lite`)
 
-Loaded at boot by `src/wolfbot/config.py::Settings` (pydantic-settings, reads `.env`, instantiated once in `main.py`). Adding a new env var = adding a typed field to `Settings` — do not parse `os.environ` directly from code paths.
+**NPC bot** (`envs/npc/.env.<persona>`, one file per persona — see committed `envs/npc/.env.<persona>.example` templates plus [envs/npc/README.md](envs/npc/README.md)) — loaded by `src/wolfbot/npc/config.py::NpcSettings`, instantiated once per worker in `wolfbot.npc.main`. **Each NPC bot process is bound to exactly one persona at startup** (`NPC_PERSONA_KEY`); NPC bots are not interchangeable. Required fields:
+
+- `NPC_ID` — unique NPC identifier on the WS (e.g. `npc_setsu`)
+- `NPC_DISCORD_TOKEN` — this persona's Discord bot token (each persona has its own bot app, manually invited to the guild once)
+- `NPC_PERSONA_KEY` — must be a key from `wolfbot.npc.personas.NPC_PERSONAS_BY_KEY` (`setsu`, `gina`, `sq`, `raqio`, `stella`, `shigemichi`, `chipie`, `comet`, `jonas`, `kukrushka`, `otome`, `sha_ming`, `remnan`, `yuriko`)
+- `MASTER_WS_URL` — e.g. `ws://127.0.0.1:8800`
+- `MASTER_NPC_PSK` — must match Master's value (SecretStr)
+- `NPC_LLM_API_KEY`, `NPC_LLM_MODEL`, `NPC_LLM_BASE_URL` — NPC LLM backend. Used **only** to generate this NPC bot's short reactive utterances during DAY_DISCUSSION (in reactive_voice mode). It does NOT decide votes or night actions — Master's `GAMEPLAY_LLM_*` handles those. Any OpenAI Chat Completions–compatible endpoint works; the same credential may be reused across personas, and may also be shared with Master's `GAMEPLAY_LLM_API_KEY`, but the two are split so each role can target a different model / provider
+- `TTS_VOICE_ID`, `VOICEVOX_URL` — VOICEVOX speaker / engine
+- `MAIN_VOICE_CHANNEL_ID`, `DISCORD_GUILD_ID` — must match Master
+- `HEARTBEAT_INTERVAL_S`, `LOG_LEVEL`
+
+Each NPC process picks its env file via the `WOLFBOT_NPC_ENV` env var (default: `.env.npc` in CWD, but with the `envs/npc/` layout you should always set this explicitly). Typical multi-persona deployment: `WOLFBOT_NPC_ENV=envs/npc/.env.setsu uv run wolfbot-npc` etc.
+
+Adding a new env var = adding a typed field to the appropriate `*Settings` class — do not parse `os.environ` directly from code paths.
 
 ## Architecture
 
@@ -58,14 +74,23 @@ Outer layers depend on inner; never the reverse.
 ```
 domain/        pure: enums, frozen models, rules, state_machine  — no I/O, no asyncio
   ↑
-services/      orchestration: GameService, GameEngine, RecoveryService, PermissionManager
+services/      orchestration: GameService, GameEngine, RecoveryService, PermissionManager,
+               LLMAdapter, DiscussionService, DiscordBotAdapter, ...
   ↑
 persistence/   SqliteRepo (aiosqlite)
 llm/           personas + prompt builder
 prompts/       system prompt markdown (`llm_system_prompt.md`), read at runtime by prompt_builder
 ui/            discord.ui Views (DM vote/action selects)
-main.py        wiring
+master/        Master-side reactive_voice pipeline (loaded only when MASTER_NPC_PSK is set):
+               ws_server, ingest_service, logic_service, speak_arbiter, npc_registry,
+               voice_ingest_service, voice_ingest_client, audio_sink, stt_service.
+npc/           NPC bot worker (separate process via `uv run wolfbot-npc`):
+               main, config (NpcSettings), client, speech_service,
+               openai_compatible_generator, tts, playback.
+main.py        Master wiring (entrypoint `wolfbot`)
 ```
+
+`master/` and `npc/` are intentionally split because the two processes have disjoint runtime concerns: `master/` runs alongside the core `services/` in the Master Discord bot, while `npc/` is one-process-per-NPC and only talks to Master over WS. Anything imported by both lives in `domain/` (e.g. `domain/ws_messages.py`).
 
 Within `services/`: `discord_service.py` contains both `DiscordBotAdapter` and the `WolfCog` slash-command dispatcher — new slash commands go in the cog, new Discord side-effects in the adapter. `submission_snapshot.py` is the shared pending-submission calculator, reused by `GameService` (early-wake checks) and `RecoveryService` (DM restoration on restart); reuse it rather than re-implement the "who still owes a submission" logic.
 
@@ -147,9 +172,11 @@ During wolf-attack splits, the main channel announces only `未確定: N件` (hi
 When `LLM_DISCUSSION_MODE=reactive_voice` and `MASTER_NPC_PSK` is set, `main.py` wires a realtime voice pipeline:
 
 - **Master side** (`main.py`): `InMemoryNpcRegistry` + `SpeakArbiter` + `MasterIngestService` + `WebsocketsMasterWsServer`. The Master joins VC via `voice_recv.VoiceRecvClient` + `WolfbotAudioSink` for STT ingest, receives human speech via `GeminiAudioAnalyzer`, and dispatches NPC turns via the arbiter. On phase enter, `_on_reactive_phase_enter` assigns online NPCs to LLM seats.
-- **NPC side** (`npc_bot_main.py`, one process per NPC bot): `discord.Client` joins VC → WebSocket to Master (PSK auth) → `NpcClient` handles `SpeakRequest` → `GrokNpcGenerator` (xAI Grok, structured JSON) → `NpcSpeechService` → `VoicevoxTtsService` (local VOICEVOX, 24kHz WAV) → `DiscordVoicePlayback` (`discord.FFmpegPCMAudio`).
+- **NPC side** (`wolfbot.npc.main`, one process per NPC bot, **bound to one persona at startup**): `discord.Client` joins VC → WebSocket to Master (PSK auth, register payload carries `persona_key`) → `NpcClient` handles `SpeakRequest` → `OpenAICompatibleNpcGenerator` (NPC LLM call, structured JSON; default targets xAI Grok) renders speech in the bound persona → `NpcSpeechService` → `VoicevoxTtsService` (local VOICEVOX, 24kHz WAV) → `DiscordVoicePlayback` (`discord.FFmpegPCMAudio`). All NPC-side modules live under `wolfbot.npc.*`; the Master-side counterpart (`InMemoryNpcRegistry`, `SpeakArbiter`, `MasterIngestService`, `WebsocketsMasterWsServer`) lives under `wolfbot.master.*`. The NPC LLM backend is swappable via `NPC_LLM_BASE_URL` + `NPC_LLM_MODEL` in the persona's env file — no code change needed to point at OpenAI / Groq / Together / vLLM / Ollama / etc.
+
+- **Persona binding model**: each NPC bot embodies one persona forever (declared via `NPC_PERSONA_KEY` in its env file, validated against `NPC_PERSONAS_BY_KEY` at startup). On `npc_register` the NPC bot tells Master its `persona_key`; Master stores it on `NpcEntry`. When `/wolf start` runs in `reactive_voice` mode, `WolfCog._select_llm_seat_personas` pulls online NPC bots from the registry (skipping any already assigned to another active game) and uses their personas as the LLM seats — there is no separate "Master rolls personas" step. If fewer NPC bots are online than the LLM-seat shortfall, `/wolf start` fails with a friendly message. In `rounds` mode (no NPC bot processes), the same path falls through to a random `pick_personas(NPC_PERSONAS, ...)` draw because Master drives those LLM seats internally without VC playback.
 - **Seat assignment**: `_on_reactive_phase_enter` in `main.py` pairs online NPC bots with unassigned LLM seats via `npc_registry.assign()`. The arbiter only dispatches to NPCs with an assigned seat.
-- **Entry point**: `uv run wolfbot-npc` (each NPC needs its own Discord bot token, `NPC_ID`, and env vars — see `.env.example`).
+- **Entry point**: `WOLFBOT_NPC_ENV=envs/npc/.env.<persona> uv run wolfbot-npc` (each persona has its own committed `envs/npc/.env.<persona>.example` template; copy it to `envs/npc/.env.<persona>`, fill in the secrets — `NPC_DISCORD_TOKEN`, `MASTER_NPC_PSK`, `NPC_LLM_API_KEY`, `DISCORD_GUILD_ID`, `MAIN_VOICE_CHANNEL_ID` — and start one process per persona). See [envs/npc/README.md](envs/npc/README.md) for the persona / TTS_VOICE_ID table.
 
 The system prompt is **composed per actor** by `src/wolfbot/llm/prompt_builder.py`, not loaded verbatim. Three programmatically-generated blocks are layered onto `src/wolfbot/prompts/llm_system_prompt.md`: `_build_game_rules_block()` (9-player ruleset derived from `ROLE_DISTRIBUTION` + `VILLAGE_SIZE` so the canonical numbers aren't duplicated, plus the shared reasoning heuristics every seat sees — currently CO evaluation: a **never-countered** single role-CO is presumed near-real, but a **sole survivor** of a contested CO history (same role had ≥2 COs, others died) is **not** auto-trusted; topical mention of a CO ("the seer CO 〜について") is distinguished from self-declaration; counter-COs and divination/attack alignment feed the judgment), `_ROLE_STRATEGIES[role]` (role-scoped tactical hints — wolf/madman carry day-phased fake-CO playbooks that deliberately mirror each other, knight carries peaceful-morning guard-CO guidance, seer/medium/villager carry judgment-integrity rules (villager strategy explicitly forbids 「村人CO」/「素村CO」 and equivalents); cross-leak tests assert one role never sees another's strategy), and `_build_speech_profile_block(persona)` (the persona's 話法 section). Routing when editing: shared heuristics every seat should see → `_build_game_rules_block`; role-specific strategy → `_ROLE_STRATEGIES`; base framing / output format / hard invariants → the markdown template. The markdown is a template, not the whole prompt.
 

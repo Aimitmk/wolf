@@ -53,7 +53,7 @@ from wolfbot.domain.ws_messages import (
     VadSpeechEnded,
     VadSpeechStarted,
 )
-from wolfbot.services.npc_registry import NpcRegistry
+from wolfbot.master.npc_registry import NpcRegistry
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +200,7 @@ class MasterHandlers:
         entry = self.registry.register(
             npc_id=msg.npc_id,
             discord_bot_user_id=msg.discord_bot_user_id,
+            persona_key=msg.persona_key,
             supported_voices=msg.supported_voices,
             version=msg.version,
             send=ctx.send,

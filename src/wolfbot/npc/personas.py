@@ -1,47 +1,23 @@
-"""Gnosia-flavored personas for LLM players.
+"""NPC player personas — Gnosia-flavored character pool.
 
-Persona is the LLM player's in-game identity. Names are taken from Gnosia; style
-guidelines describe judgment tendency + speech register so the LLM can stay in
-character. Do NOT quote original dialogue; imitate the persona's temperament only.
+These are the in-game player identities assigned to LLM seats when humans
+don't fill all 9 slots. Master picks from this pool at game start (via
+``pick_personas``) and writes the chosen ``persona_key`` onto each LLM
+``Seat``; both rounds-mode prompt building (``services.llm_service``) and
+reactive_voice NPC speech generation
+(:mod:`wolfbot.npc.openai_compatible_generator`) look up the persona by
+that key.
 
-`SpeechProfile` holds the structured speech-reproduction data (first-person,
-address style, signature phrases, narration mode) that the system prompt's
-`## 話法` block consumes. Keep `style_guide` for personality/judgment and
-`speech_profile` for 喋り方/語彙/文体 — do not mix the two in free-form prose.
-Kukrushka is near-silent in the original, so her `narration_mode` is
-`silent_gesture` and the block renders gesture descriptions instead of a normal
-conversation profile.
+Names are taken from Gnosia; style guidelines describe judgment tendency
++ speech register so the LLM can stay in character. Do NOT quote
+original dialogue; imitate the persona's temperament only.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-from random import Random
-from typing import Literal
+from wolfbot.llm.persona_base import Persona, SpeechProfile, index_by_key
 
-
-@dataclass(frozen=True)
-class SpeechProfile:
-    first_person: str
-    self_reference_aliases: tuple[str, ...] = ()
-    address_style: str = ""
-    sentence_style: str = ""
-    pause_style: str = ""
-    signature_phrases: tuple[str, ...] = ()
-    forbidden_overuse: tuple[str, ...] = ()
-    narration_mode: Literal["standard", "silent_gesture"] = "standard"
-
-
-@dataclass(frozen=True)
-class Persona:
-    key: str
-    display_name: str
-    style_guide: str
-    speech_profile: SpeechProfile
-
-
-PERSONAS: tuple[Persona, ...] = (
+NPC_PERSONAS: tuple[Persona, ...] = (
     Persona(
         key="setsu",
         display_name="🟡セツ",
@@ -275,19 +251,7 @@ PERSONAS: tuple[Persona, ...] = (
     ),
 )
 
-PERSONAS_BY_KEY: dict[str, Persona] = {p.key: p for p in PERSONAS}
+NPC_PERSONAS_BY_KEY: dict[str, Persona] = index_by_key(NPC_PERSONAS)
 
 
-def pick_personas(count: int, rng: Random) -> list[Persona]:
-    """Pick `count` distinct personas at random."""
-    if count < 0 or count > len(PERSONAS):
-        raise ValueError(f"cannot pick {count} personas; pool has {len(PERSONAS)}")
-    return rng.sample(list(PERSONAS), count)
-
-
-def pick_personas_excluding(count: int, exclude_keys: Sequence[str], rng: Random) -> list[Persona]:
-    """Pick from the pool minus `exclude_keys` — useful if you somehow need to extend."""
-    pool = [p for p in PERSONAS if p.key not in set(exclude_keys)]
-    if count > len(pool):
-        raise ValueError(f"cannot pick {count} personas; only {len(pool)} available")
-    return rng.sample(pool, count)
+__all__ = ["NPC_PERSONAS", "NPC_PERSONAS_BY_KEY"]

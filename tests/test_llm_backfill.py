@@ -19,7 +19,8 @@ import random
 
 from wolfbot.domain.enums import Phase
 from wolfbot.domain.models import Game, Seat
-from wolfbot.llm.personas import pick_personas
+from wolfbot.llm.persona_base import pick_personas
+from wolfbot.npc.personas import NPC_PERSONAS
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.game_service import new_game_id
 
@@ -49,7 +50,7 @@ async def _seed_game_with_humans(repo: SqliteRepo, human_count: int) -> str:
 
 
 def _picks_as_specs(count: int, seed: int) -> list[tuple[str, str]]:
-    picks = pick_personas(count, random.Random(seed))
+    picks = pick_personas(NPC_PERSONAS, count, random.Random(seed))
     return [(p.display_name, p.key) for p in picks]
 
 

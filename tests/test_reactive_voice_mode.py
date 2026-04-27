@@ -77,14 +77,14 @@ async def test_phase_advance_under_reactive_voice_skips_round_gate() -> None:
 async def test_settings_loads_default_discussion_mode(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The Settings object exposes LLM_DISCUSSION_MODE with rounds default."""
     monkeypatch.setenv("DISCORD_TOKEN", "dummy")
-    monkeypatch.setenv("XAI_API_KEY", "dummy")
+    monkeypatch.setenv("GAMEPLAY_LLM_API_KEY", "dummy")
     monkeypatch.setenv("DISCORD_GUILD_ID", "1")
     monkeypatch.setenv("MAIN_TEXT_CHANNEL_ID", "1")
     monkeypatch.setenv("MAIN_VOICE_CHANNEL_ID", "1")
     monkeypatch.delenv("LLM_DISCUSSION_MODE", raising=False)
-    from wolfbot.config import Settings
+    from wolfbot.config import MasterSettings
 
-    s = Settings()  # type: ignore[call-arg]
+    s = MasterSettings()  # type: ignore[call-arg]
     assert s.LLM_DISCUSSION_MODE == "rounds"
 
 
@@ -541,13 +541,13 @@ async def test_main_py_wires_reactive_voice_pipeline_services() -> None:
     constructors accept the expected parameters."""
     import inspect
 
-    from wolfbot.services.master_ingest_service import MasterIngestService
-    from wolfbot.services.master_ws_server import (
+    from wolfbot.master.ingest_service import MasterIngestService
+    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.speak_arbiter import SpeakArbiter
+    from wolfbot.master.ws_server import (
         MasterHandlers,
         WebsocketsMasterWsServer,
     )
-    from wolfbot.services.npc_registry import InMemoryNpcRegistry
-    from wolfbot.services.speak_arbiter import SpeakArbiter
 
     sig = inspect.signature(WebsocketsMasterWsServer.__init__)
     assert "host" in sig.parameters
@@ -640,12 +640,12 @@ async def test_arbiter_try_dispatch_next_triggers_on_reactive_voice(repo: Sqlite
     """SpeakArbiter.try_dispatch_next dispatches a SpeakRequest when a
     reactive_voice game has an online NPC in a discussion phase."""
     from wolfbot.domain.models import Seat
+    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.speak_arbiter import SpeakArbiter
     from wolfbot.services.discussion_service import (
         DiscussionService,
         SqliteSpeechEventStore,
     )
-    from wolfbot.services.npc_registry import InMemoryNpcRegistry
-    from wolfbot.services.speak_arbiter import SpeakArbiter
 
     game = Game(
         id=new_game_id(),
@@ -684,8 +684,7 @@ async def test_arbiter_try_dispatch_next_triggers_on_reactive_voice(repo: Sqlite
         supported_voices=(),
         version="1",
         send=_fake_send,
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     registry.assign("npc2", seat=2, game_id=game.id, phase_id="test")
 
     arbiter = SpeakArbiter(
@@ -713,12 +712,12 @@ async def test_arbiter_try_dispatch_next_triggers_on_reactive_voice(repo: Sqlite
 
 async def test_arbiter_try_dispatch_next_noop_for_rounds(repo: SqliteRepo) -> None:
     """try_dispatch_next must no-op for rounds-mode games."""
+    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.speak_arbiter import SpeakArbiter
     from wolfbot.services.discussion_service import (
         DiscussionService,
         SqliteSpeechEventStore,
     )
-    from wolfbot.services.npc_registry import InMemoryNpcRegistry
-    from wolfbot.services.speak_arbiter import SpeakArbiter
 
     game = Game(
         id=new_game_id(),
@@ -746,12 +745,12 @@ async def test_arbiter_try_dispatch_next_noop_for_rounds(repo: SqliteRepo) -> No
 async def test_recovery_sweep_closes_open_speak_requests(repo: SqliteRepo) -> None:
     """reactive_voice_recovery_sweep must close open npc_speak_requests and
     npc_playback_events with failure_reason=master_restart."""
+    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.speak_arbiter import SpeakArbiter
     from wolfbot.services.discussion_service import (
         DiscussionService,
         SqliteSpeechEventStore,
     )
-    from wolfbot.services.npc_registry import InMemoryNpcRegistry
-    from wolfbot.services.speak_arbiter import SpeakArbiter
 
     game = Game(
         id=new_game_id(),
@@ -955,8 +954,8 @@ async def test_game_service_emits_phase_summary_on_discussion_exit(repo: SqliteR
 async def test_ws_authenticate_reads_request_path() -> None:
     """WebsocketsMasterWsServer._authenticate must read ws.request.path
     (websockets 16.0) rather than the legacy ws.path."""
-    from wolfbot.services.master_ws_server import MasterHandlers, WebsocketsMasterWsServer
-    from wolfbot.services.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.ws_server import MasterHandlers, WebsocketsMasterWsServer
 
     registry = InMemoryNpcRegistry()
     handlers = MasterHandlers(registry=registry, now_ms=lambda: 0)
@@ -989,8 +988,8 @@ async def test_ws_authenticate_reads_request_path() -> None:
 
 async def test_ws_authenticate_rejects_bad_psk() -> None:
     """Auth must reject when psk doesn't match."""
-    from wolfbot.services.master_ws_server import MasterHandlers, WebsocketsMasterWsServer
-    from wolfbot.services.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.ws_server import MasterHandlers, WebsocketsMasterWsServer
 
     registry = InMemoryNpcRegistry()
     handlers = MasterHandlers(registry=registry, now_ms=lambda: 0)

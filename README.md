@@ -29,20 +29,36 @@
 uv sync
 ```
 
-### 2. `.env` を用意する
+### 2. `.env.master` を用意する
 
-`.env.example` をコピーして `.env` を作成し、各値を設定します。
+`.env.master.example` をコピーして `.env.master` を作成し、Master bot 用の値を設定します。
 
 ```bash
-cp .env.example .env
+cp .env.master.example .env.master
 ```
 
-最初は次の内容を埋めれば起動に必要な最低限の設定が揃います。
+reactive_voice モードで NPC bot も動かす場合は、**1 ペルソナ = 1 プロセス = 1 Discord bot アカウント** で別途用意します。リポジトリには 14 体ぶんのテンプレが [envs/npc/](envs/npc/) 配下に `.env.<persona>.example` の形で入っているので、必要なペルソナぶんコピーして秘密値を埋めます。
+
+```bash
+cp envs/npc/.env.setsu.example envs/npc/.env.setsu
+# envs/npc/.env.setsu の NPC_DISCORD_TOKEN / MASTER_NPC_PSK /
+# NPC_LLM_API_KEY / DISCORD_GUILD_ID / MAIN_VOICE_CHANNEL_ID を埋める
+
+WOLFBOT_NPC_ENV=envs/npc/.env.setsu uv run wolfbot-npc &
+WOLFBOT_NPC_ENV=envs/npc/.env.gina  uv run wolfbot-npc &
+# 必要なペルソナぶん起動
+```
+
+各 NPC bot のセットアップ詳細・ペルソナ一覧・TTS_VOICE_ID の既定値は [envs/npc/README.md](envs/npc/README.md) を参照してください。
+
+各 NPC bot は固有のペルソナ (`NPC_PERSONA_KEY`) を起動時に確定します。Master の `/wolf start` (reactive_voice モード) は、online な NPC bot の中から不足席数だけ選び、その bot の persona を席に割り当てます。online な bot が足りないときは開始時にエラー表示します (rounds モードに切り替えるか、bot を増やすことで解決)。
+
+最初は `.env.master` に次の内容を埋めれば、Master 単体で起動に必要な最低限の設定が揃います。
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token
-XAI_API_KEY=your_xai_api_key
-XAI_MODEL=grok-4-1-fast
+GAMEPLAY_LLM_API_KEY=your_gameplay_llm_api_key
+GAMEPLAY_LLM_MODEL=grok-4-1-fast
 DISCORD_GUILD_ID=123456789012345678
 MAIN_TEXT_CHANNEL_ID=123456789012345678
 MAIN_VOICE_CHANNEL_ID=123456789012345678
@@ -51,11 +67,11 @@ LOG_LEVEL=INFO
 ```
 
 - `DISCORD_TOKEN`: Discord Developer Portal で作成した bot のトークンを入れます。
-- `XAI_API_KEY`: xAI の API キーを入れます。
+- `GAMEPLAY_LLM_API_KEY`: Gameplay LLM (Master が投票・夜行動・rounds-mode 議論文を判断する LLM) の API キーを入れます。OpenAI Chat Completions 互換のプロバイダなら何でも可。
 - `DISCORD_GUILD_ID`: bot を動かす Discord サーバーの ID を入れます。
 - `MAIN_TEXT_CHANNEL_ID`: 議論用に使うメイン text チャンネルの ID を入れます。
 - `MAIN_VOICE_CHANNEL_ID`: プレイヤーが会話するメイン VC の ID を入れます。
-- `XAI_MODEL`、`WOLFBOT_DB_PATH`、`LOG_LEVEL` は最初は既定値のままで構いません。
+- `GAMEPLAY_LLM_MODEL`、`WOLFBOT_DB_PATH`、`LOG_LEVEL` は最初は既定値のままで構いません。
 
 `DISCORD_GUILD_ID`、`MAIN_TEXT_CHANNEL_ID`、`MAIN_VOICE_CHANNEL_ID` にはチャンネル名や `#channel` のようなメンション文字列ではなく、数値の ID を設定してください。どの guild やチャンネルを使うか未定なら、先に手順 3 を済ませてから `.env` を埋めてください。
 
@@ -102,11 +118,11 @@ uv run wolfbot
 
 ## 環境変数一覧
 
+### Master (`.env.master`, `wolfbot.config.MasterSettings`)
+
 | 変数名 | 必須 / 既定値 | 用途 |
 | --- | --- | --- |
-| `DISCORD_TOKEN` | 必須 | Discord bot のトークン |
-| `XAI_API_KEY` | 必須 | xAI API キー |
-| `XAI_MODEL` | 既定値: `grok-4-1-fast` | 使用する xAI モデル名 |
+| `DISCORD_TOKEN` | 必須 | Master bot のトークン |
 | `DISCORD_GUILD_ID` | 必須 | `/wolf` コマンドを同期する guild の ID |
 | `MAIN_TEXT_CHANNEL_ID` | 必須 | 議論用に使う既存のメイン text チャンネル ID |
 | `MAIN_VOICE_CHANNEL_ID` | 必須 | 参加者が会話する既存のメイン VC の ID |
@@ -115,8 +131,31 @@ uv run wolfbot
 | `LLM_DISCUSSION_MODE` | 既定値: `rounds` | LLM 議論モード (`rounds` / `reactive_voice`) |
 | `MASTER_WS_LISTEN` | 既定値: `127.0.0.1:8800` | Master ↔ NPC/voice-ingest WS の listen アドレス |
 | `MASTER_NPC_PSK` | 任意 | NPC bot / voice-ingest の WS 認証用 Pre-Shared Key |
-| `GEMINI_API_KEY` | 任意 | Gemini API キー (voice-ingest の音声解析用) |
-| `GEMINI_MODEL` | 既定値: `gemini-2.0-flash-lite` | voice-ingest で使用する Gemini モデル名 |
+| `GAMEPLAY_LLM_API_KEY` | 必須 | **Gameplay LLM** — Master が LLM 席の挙動を判断するときに使う LLM。投票判断・夜行動 (襲撃/占い/護衛) は全モードで使用、議論ターン文の生成は rounds モードのみ (reactive_voice モードでは NPC bot が代わりに発話する)。OpenAI Chat Completions 互換のプロバイダなら何でも可 |
+| `GAMEPLAY_LLM_MODEL` | 既定値: `grok-4-1-fast` | Gameplay LLM のモデル名 |
+| `VOICE_LLM_API_KEY` | 任意 | **Voice LLM** — Master が VC で人間音声を聞いて書き起こし+構造化解析する multimodal LLM。reactive_voice モードでのみ使用 |
+| `VOICE_LLM_MODEL` | 既定値: `gemini-2.0-flash-lite` | Voice LLM のモデル名 (multimodal audio input 対応) |
+
+### NPC bot (`envs/npc/.env.<persona>`, `wolfbot.npc.config.NpcSettings`)
+
+各 NPC bot は **固有 persona に紐付いた 1 プロセス**。[envs/npc/](envs/npc/) 配下の `.env.<persona>.example` をコピーして使います。プロセス起動時に `WOLFBOT_NPC_ENV` でファイルパスを指定 (例: `WOLFBOT_NPC_ENV=envs/npc/.env.setsu`)。
+
+| 変数名 | 必須 / 既定値 | 用途 |
+| --- | --- | --- |
+| `NPC_ID` | 必須 (テンプレで `npc_<persona>` 既定) | NPC の一意 ID (Master WS 上の識別子) |
+| `NPC_DISCORD_TOKEN` | 必須 | この persona 専用の Discord bot トークン |
+| `NPC_PERSONA_KEY` | 必須 (テンプレで指定済) | Persona キー (`setsu` / `gina` / `sq` / `raqio` / `stella` / `shigemichi` / `chipie` / `comet` / `jonas` / `kukrushka` / `otome` / `sha_ming` / `remnan` / `yuriko`) |
+| `DISCORD_GUILD_ID` | 必須 | Master と同じ guild ID |
+| `MAIN_VOICE_CHANNEL_ID` | 必須 | Master と同じ VC の ID |
+| `MASTER_WS_URL` | 既定値: `ws://127.0.0.1:8800` | Master WS への接続先 URL |
+| `MASTER_NPC_PSK` | 必須 | Master の `MASTER_NPC_PSK` と同値 |
+| `NPC_LLM_API_KEY` | 必須 | **NPC LLM** — この NPC bot が VC で 1 行発言を生成するときに使う LLM。投票・夜行動の判断はしない (Master の Gameplay LLM が担当)。Master の `GAMEPLAY_LLM_API_KEY` と共用しても、別プロバイダのキーでもよい |
+| `NPC_LLM_MODEL` | 既定値: `grok-4-1-fast` | NPC LLM のモデル名 (プロバイダに合わせて変える) |
+| `NPC_LLM_BASE_URL` | 既定値: `https://api.x.ai/v1` | OpenAI Chat Completions 互換エンドポイント。プロバイダ切り替えはここを変える |
+| `TTS_VOICE_ID` | テンプレで persona 別に既定値設定 | VOICEVOX のスピーカー ID。好みの声に変えたい場合のみ編集 |
+| `VOICEVOX_URL` | 既定値: `http://localhost:50021` | VOICEVOX エンジンの URL |
+| `HEARTBEAT_INTERVAL_S` | 既定値: `5` | ハートビート送信間隔(秒) |
+| `LOG_LEVEL` | 既定値: `INFO` | ログ出力レベル |
 
 ## Discord 側の準備
 

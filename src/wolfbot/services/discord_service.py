@@ -23,7 +23,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from wolfbot.config import Settings
+from wolfbot.config import MasterSettings
 from wolfbot.domain.enums import (
     Phase,
     Role,
@@ -37,7 +37,8 @@ from wolfbot.domain.rules import (
     legal_guard_targets,
     previous_guard_seat_for_night,
 )
-from wolfbot.llm.personas import pick_personas
+from wolfbot.llm.persona_base import pick_personas
+from wolfbot.npc.personas import NPC_PERSONAS, NPC_PERSONAS_BY_KEY
 from wolfbot.persistence.sqlite_repo import (
     JoinLobbyResult,
     LeaveLobbyResult,
@@ -50,6 +51,7 @@ from wolfbot.services.timer_service import EngineRegistry, GameEngine
 from wolfbot.ui.views import NightActionView, VoteView
 
 if TYPE_CHECKING:
+    from wolfbot.master.npc_registry import NpcRegistry
     from wolfbot.services.discussion_service import DiscussionService
 
 log = logging.getLogger(__name__)
@@ -121,7 +123,7 @@ class DiscordBotAdapter:
         self,
         bot: discord.Client,
         repo: SqliteRepo,
-        settings: Settings,
+        settings: MasterSettings,
         game_service_ref: dict[str, GameService] | None = None,
     ) -> None:
         self.bot = bot
@@ -412,10 +414,11 @@ class WolfCog(commands.Cog):
         discord_adapter: DiscordBotAdapter,
         llm_adapter: LLMAdapter,
         registry: EngineRegistry,
-        settings: Settings,
+        settings: MasterSettings,
         rng: Random | None = None,
         discussion_service: DiscussionService | None = None,
         on_speech_recorded: Callable[[str], Awaitable[None]] | None = None,
+        npc_registry: NpcRegistry | None = None,
     ) -> None:
         super().__init__()
         self.bot = bot
@@ -429,6 +432,67 @@ class WolfCog(commands.Cog):
         self._create_locks: dict[str, asyncio.Lock] = {}
         self._discussion_service = discussion_service
         self._on_speech_recorded = on_speech_recorded
+        # Set when reactive_voice pipeline is active.  In that mode `/wolf
+        # start` fills LLM seats from online NPC bots (each carrying a fixed
+        # persona) instead of randomly drawing from NPC_PERSONAS.
+        self._npc_registry = npc_registry
+
+    def _select_llm_seat_personas(
+        self,
+        *,
+        shortfall: int,
+        discussion_mode: str,
+    ) -> tuple[list[tuple[str, str]], str | None]:
+        """Choose ``(display_name, persona_key)`` pairs to back-fill LLM seats.
+
+        Two backfill strategies, switched on the game's discussion mode:
+
+        * ``rounds``: random draw from :data:`NPC_PERSONAS` (Master drives
+          these seats internally via xAI; no NPC bot process required).
+        * ``reactive_voice``: pull online NPC bots from the registry and use
+          *their* personas (each NPC bot is bound to a fixed persona at
+          startup).  Fails with a friendly message if not enough bots are
+          online.
+
+        Returns ``(seats, None)`` on success or ``([], error_message)`` on
+        failure. The caller surfaces the error message via interaction
+        followup.
+        """
+        if discussion_mode == "reactive_voice" and self._npc_registry is not None:
+            online = [e for e in self._npc_registry.all_online() if e.persona_key]
+            # Skip bots already bound to another active game.
+            available = [e for e in online if e.assigned_seat is None]
+            if len(available) < shortfall:
+                return ([], (
+                    f"reactive_voice モードで LLM 席を {shortfall} 席埋める必要がありますが、"
+                    f"利用可能な NPC bot は {len(available)} 体だけです。"
+                    f"NPC bot プロセスを追加で起動するか、人間プレイヤーを集めてください。"
+                ))
+            # Deterministic ordering keeps tests/replay-friendly; pick the
+            # first `shortfall` bots in registration order.
+            chosen = available[:shortfall]
+            seen_keys: set[str] = set()
+            seats: list[tuple[str, str]] = []
+            for entry in chosen:
+                if entry.persona_key in seen_keys:
+                    return ([], (
+                        f"NPC bot {entry.npc_id} の persona_key={entry.persona_key} が"
+                        " 重複しています。bot ごとに別の persona を割り当ててください。"
+                    ))
+                seen_keys.add(entry.persona_key)
+                persona = NPC_PERSONAS_BY_KEY.get(entry.persona_key)
+                if persona is None:
+                    return ([], (
+                        f"NPC bot {entry.npc_id} の persona_key={entry.persona_key} は"
+                        f" 未知の persona です。"
+                    ))
+                seats.append((persona.display_name, persona.key))
+            return (seats, None)
+
+        # rounds mode (or no registry wired): random draw.
+        picks = pick_personas(NPC_PERSONAS, shortfall, self.rng)
+        return ([(p.display_name, p.key) for p in picks], None)
+
 
     def _create_lock_for(self, guild_id: str) -> asyncio.Lock:
         lock = self._create_locks.get(guild_id)
@@ -752,8 +816,16 @@ class WolfCog(commands.Cog):
             return
 
         shortfall = 9 - len(humans)
-        picks = pick_personas(shortfall, self.rng) if shortfall > 0 else []
-        llm_seats = [(p.display_name, p.key) for p in picks]
+        if shortfall > 0:
+            llm_seats, err = self._select_llm_seat_personas(
+                shortfall=shortfall,
+                discussion_mode=game.discussion_mode,
+            )
+            if err is not None:
+                await interaction.followup.send(err)
+                return
+        else:
+            llm_seats = []
 
         ok = await self.repo.claim_start_and_backfill(
             game.id,

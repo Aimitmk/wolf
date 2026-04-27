@@ -39,6 +39,7 @@ class NpcEntry:
 
     npc_id: str
     discord_bot_user_id: str
+    persona_key: str
     supported_voices: tuple[str, ...]
     version: str
     assigned_seat: int | None = None
@@ -61,6 +62,7 @@ class NpcRegistry(Protocol):
         *,
         npc_id: str,
         discord_bot_user_id: str,
+        persona_key: str,
         supported_voices: tuple[str, ...],
         version: str,
         send: Callable[[str], Awaitable[None]] | None,
@@ -100,6 +102,7 @@ class InMemoryNpcRegistry:
         *,
         npc_id: str,
         discord_bot_user_id: str,
+        persona_key: str,
         supported_voices: tuple[str, ...],
         version: str,
         send: Callable[[str], Awaitable[None]] | None,
@@ -111,6 +114,7 @@ class InMemoryNpcRegistry:
         entry = NpcEntry(
             npc_id=npc_id,
             discord_bot_user_id=discord_bot_user_id,
+            persona_key=persona_key,
             supported_voices=supported_voices,
             version=version,
             assigned_seat=previous.assigned_seat if previous is not None else None,

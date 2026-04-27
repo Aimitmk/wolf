@@ -37,6 +37,13 @@ class NpcRegister(BaseEnvelope):
     type: Literal["npc_register"] = "npc_register"
     npc_id: str
     discord_bot_user_id: str
+    persona_key: str = Field(
+        description=(
+            "Persona this NPC bot embodies (key from wolfbot.npc.personas). "
+            "Each NPC bot process is bound to exactly one persona at startup; "
+            "Master uses this when filling reactive_voice LLM seats."
+        )
+    )
     supported_voices: tuple[str, ...] = ()
     version: str = "0.0.0"
 

@@ -37,12 +37,12 @@ from wolfbot.domain.ws_messages import (
     VadSpeechEnded,
     VadSpeechStarted,
 )
-from wolfbot.services.stt_service import (
+from wolfbot.master.stt_service import (
     SttProviderError,
     SttResult,
     SttService,
 )
-from wolfbot.services.voice_ingest_client import (
+from wolfbot.master.voice_ingest_client import (
     MasterIngestionClient,
     NpcRegistryView,
 )

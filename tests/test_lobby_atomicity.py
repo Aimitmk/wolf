@@ -13,7 +13,8 @@ import random
 
 from wolfbot.domain.enums import Phase
 from wolfbot.domain.models import Game, Seat
-from wolfbot.llm.personas import pick_personas
+from wolfbot.llm.persona_base import pick_personas
+from wolfbot.npc.personas import NPC_PERSONAS
 from wolfbot.persistence.sqlite_repo import (
     JoinLobbyResult,
     LeaveLobbyResult,
@@ -98,7 +99,7 @@ async def test_join_lobby_rejects_when_9_humans_present(repo: SqliteRepo) -> Non
 async def test_join_lobby_rejects_stale_phase_after_start(repo: SqliteRepo) -> None:
     """Repro for the Codex v2 High finding: stale /wolf join after /wolf start."""
     game_id = await _seed_lobby_with_humans(repo, 8)
-    specs = [(p.display_name, p.key) for p in pick_personas(1, random.Random(0))]
+    specs = [(p.display_name, p.key) for p in pick_personas(NPC_PERSONAS, 1, random.Random(0))]
     ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
 
@@ -134,7 +135,7 @@ async def test_leave_lobby_rejects_stale_phase_after_start(repo: SqliteRepo) -> 
     would silently drop a seat and break plan_setup's 9-seat invariant.
     """
     game_id = await _seed_lobby_with_humans(repo, 8)
-    specs = [(p.display_name, p.key) for p in pick_personas(1, random.Random(0))]
+    specs = [(p.display_name, p.key) for p in pick_personas(NPC_PERSONAS, 1, random.Random(0))]
     ok = await repo.claim_start_and_backfill(game_id, expected_phase=Phase.LOBBY, llm_seats=specs)
     assert ok is True
     seats_before = await repo.load_seats(game_id)

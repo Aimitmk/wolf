@@ -19,7 +19,7 @@ from wolfbot.domain.enums import (
     SubmissionType,
 )
 from wolfbot.domain.models import Game, Player, Seat
-from wolfbot.llm.personas import Persona
+from wolfbot.llm.persona_base import Persona
 
 SYSTEM_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "prompts" / "llm_system_prompt.md"
 

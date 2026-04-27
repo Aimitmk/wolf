@@ -1,17 +1,18 @@
 """NPC bot worker entrypoint.
 
-Reads ``NPC_*`` env vars, connects to Discord VC, opens a WS connection
-to Master, registers, and runs the heartbeat + message loop.  On
-``speak_request`` the NPC generates text via Grok, synthesizes via
-VOICEVOX, and plays the audio into the voice channel.
+Loads :class:`wolfbot.npc.config.NpcSettings` from the env file pointed
+to by ``WOLFBOT_NPC_ENV`` (default ``.env.npc``), connects to Discord
+VC, opens a WS connection to Master, registers, and runs the heartbeat
++ message loop. On ``speak_request`` the NPC generates text via the
+configured NPC LLM, synthesizes via VOICEVOX, and plays the audio into
+the voice channel.
 
 Run with::
 
-    uv run wolfbot-npc
+    WOLFBOT_NPC_ENV=envs/npc/.env.<persona> uv run wolfbot-npc
 
-(after exporting the env vars below — ``NPC_ID``, ``NPC_DISCORD_TOKEN``,
-``MASTER_WS_URL``, ``MASTER_NPC_PSK``, ``XAI_API_KEY``, ``TTS_VOICE_ID``,
-``VOICEVOX_URL``, ``MAIN_VOICE_CHANNEL_ID``.)
+Per-persona templates are committed under ``envs/npc/.env.<persona>.example``;
+see :file:`envs/npc/README.md` for the setup workflow and persona table.
 """
 
 from __future__ import annotations
@@ -24,15 +25,11 @@ import os
 import time
 
 import discord
+from dotenv import load_dotenv
+
+from wolfbot.npc.config import NpcSettings
 
 log = logging.getLogger(__name__)
-
-
-def _read_env(name: str, *, required: bool = True, default: str | None = None) -> str:
-    val = os.environ.get(name, default)
-    if required and not val:
-        raise SystemExit(f"missing required env var {name}")
-    return val or ""
 
 
 def _now_ms() -> int:
@@ -40,29 +37,38 @@ def _now_ms() -> int:
 
 
 async def _main() -> None:
-    npc_id = _read_env("NPC_ID")
-    discord_token = _read_env("NPC_DISCORD_TOKEN")
-    master_ws_url = _read_env("MASTER_WS_URL")
-    psk = _read_env("MASTER_NPC_PSK")
-    xai_api_key = _read_env("XAI_API_KEY")
-    xai_model = _read_env("XAI_MODEL", required=False, default="grok-4-1-fast")
-    voice_id = _read_env("TTS_VOICE_ID", required=False, default="3")
-    voicevox_url = _read_env(
-        "VOICEVOX_URL", required=False, default="http://localhost:50021")
-    vc_channel_id = int(_read_env("MAIN_VOICE_CHANNEL_ID"))
-    guild_id = int(_read_env("DISCORD_GUILD_ID"))
-    heartbeat_interval = float(
-        _read_env("HEARTBEAT_INTERVAL_S", required=False, default="5"))
-    log_level = _read_env("LOG_LEVEL", required=False, default="INFO")
+    # Per-persona env files live under `envs/npc/.env.<persona>` (templates
+    # are committed at `envs/npc/.env.<persona>.example`; see
+    # `envs/npc/README.md`).  The launcher must point WOLFBOT_NPC_ENV at the
+    # right file per process — e.g. `WOLFBOT_NPC_ENV=envs/npc/.env.setsu`.
+    # `.env.npc` is the legacy fallback when the env var is unset.
+    env_path = os.environ.get("WOLFBOT_NPC_ENV", ".env.npc")
+    load_dotenv(env_path)
+    settings = NpcSettings()  # type: ignore[call-arg]
 
     logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
+        level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # Validate the persona key against the canonical NPC pool — fail loud at
+    # startup rather than silently fall back to a default at speak time.
+    from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+
+    if settings.NPC_PERSONA_KEY not in NPC_PERSONAS_BY_KEY:
+        valid = ", ".join(sorted(NPC_PERSONAS_BY_KEY.keys()))
+        raise SystemExit(
+            f"NPC_PERSONA_KEY={settings.NPC_PERSONA_KEY!r} is not a known persona. "
+            f"Valid keys: {valid}"
+        )
+
     log.info(
-        "npc_bot_starting npc_id=%s ws=%s voice_id=%s voicevox=%s",
-        npc_id, master_ws_url, voice_id, voicevox_url,
+        "npc_bot_starting npc_id=%s persona=%s ws=%s voice_id=%s voicevox=%s",
+        settings.NPC_ID,
+        settings.NPC_PERSONA_KEY,
+        settings.MASTER_WS_URL,
+        settings.TTS_VOICE_ID,
+        settings.VOICEVOX_URL,
     )
 
     # ---- Discord client (voice only, no message_content) ----
@@ -76,23 +82,26 @@ async def _main() -> None:
     @bot.event
     async def on_ready() -> None:
         log.info("npc_discord_ready user=%s", bot.user)
-        guild = bot.get_guild(guild_id)
+        guild = bot.get_guild(settings.DISCORD_GUILD_ID)
         if guild is None:
-            log.error("npc_guild_not_found id=%s", guild_id)
+            log.error("npc_guild_not_found id=%s", settings.DISCORD_GUILD_ID)
             return
-        vc_channel = guild.get_channel(vc_channel_id)
+        vc_channel = guild.get_channel(settings.MAIN_VOICE_CHANNEL_ID)
         if vc_channel is None or not isinstance(vc_channel, discord.VoiceChannel):
-            log.error("npc_vc_channel_not_found id=%s", vc_channel_id)
+            log.error("npc_vc_channel_not_found id=%s",
+                      settings.MAIN_VOICE_CHANNEL_ID)
             return
         try:
             vc_client_ref[0] = await vc_channel.connect()
-            log.info("npc_vc_joined channel=%s", vc_channel_id)
+            log.info("npc_vc_joined channel=%s", settings.MAIN_VOICE_CHANNEL_ID)
         except Exception:
-            log.exception("npc_vc_join_failed channel=%s", vc_channel_id)
+            log.exception("npc_vc_join_failed channel=%s",
+                          settings.MAIN_VOICE_CHANNEL_ID)
         ready_event.set()
 
     # Start Discord in background
-    discord_task = asyncio.create_task(bot.start(discord_token))
+    discord_task = asyncio.create_task(
+        bot.start(settings.NPC_DISCORD_TOKEN.get_secret_value()))
 
     # Wait for VC connection
     try:
@@ -104,25 +113,33 @@ async def _main() -> None:
     discord_user_id = str(bot.user.id) if bot.user else "unknown"
 
     # ---- Build NPC pipeline ----
-    from wolfbot.services.npc_client import NpcClient, NpcClientConfig
-    from wolfbot.services.npc_generator_grok import GrokNpcGenerator, GrokNpcGeneratorConfig
-    from wolfbot.services.npc_speech_service import NpcSpeechService
-    from wolfbot.services.tts_service import VoicevoxTtsService
-    from wolfbot.services.voice_playback_service import DiscordVoicePlayback
-
-    generator = GrokNpcGenerator(
-        api_key=xai_api_key,
-        config=GrokNpcGeneratorConfig(model=xai_model),
+    from wolfbot.npc.client import NpcClient, NpcClientConfig
+    from wolfbot.npc.openai_compatible_generator import (
+        OpenAICompatibleConfig,
+        OpenAICompatibleNpcGenerator,
     )
+    from wolfbot.npc.playback import DiscordVoicePlayback, VoicePlaybackError
+    from wolfbot.npc.speech_service import NpcSpeechService
+    from wolfbot.npc.tts import VoicevoxTtsService
+
+    generator = OpenAICompatibleNpcGenerator(
+        api_key=settings.NPC_LLM_API_KEY.get_secret_value(),
+        config=OpenAICompatibleConfig(
+            model=settings.NPC_LLM_MODEL,
+            base_url=settings.NPC_LLM_BASE_URL,
+        ),
+    )
+    generator.set_persona(settings.NPC_PERSONA_KEY)
     speech_service = NpcSpeechService(generator=generator)
-    tts = VoicevoxTtsService(base_url=voicevox_url,
-                             default_speaker=int(voice_id))
+    tts = VoicevoxTtsService(
+        base_url=settings.VOICEVOX_URL,
+        default_speaker=int(settings.TTS_VOICE_ID),
+    )
 
     # ---- Playback function: WAV → discord.VoiceClient.play ----
     async def _play_audio(audio: bytes, sample_rate: int) -> tuple[int, int]:
         vc = vc_client_ref[0]
         if vc is None or not vc.is_connected():
-            from wolfbot.services.voice_playback_service import VoicePlaybackError
             raise VoicePlaybackError("vc_not_connected")
 
         # Convert raw WAV (possibly 24kHz) to PCM source
@@ -141,7 +158,6 @@ async def _main() -> None:
 
         finished = _now_ms()
         if play_error[0] is not None:
-            from wolfbot.services.voice_playback_service import VoicePlaybackError
             raise VoicePlaybackError(f"playback_error: {play_error[0]}")
         return (started, finished)
 
@@ -150,8 +166,12 @@ async def _main() -> None:
     # ---- WS connection to Master ----
     import websockets
 
-    sep = "?" if "?" not in master_ws_url else "&"
-    ws_url = f"{master_ws_url}{sep}role=npc&psk={psk}"
+    base_url = settings.MASTER_WS_URL
+    sep = "?" if "?" not in base_url else "&"
+    ws_url = (
+        f"{base_url}{sep}role=npc"
+        f"&psk={settings.MASTER_NPC_PSK.get_secret_value()}"
+    )
     ws = await websockets.connect(ws_url)
 
     async def _ws_send(msg: str) -> None:
@@ -159,9 +179,10 @@ async def _main() -> None:
 
     client = NpcClient(
         config=NpcClientConfig(
-            npc_id=npc_id,
+            npc_id=settings.NPC_ID,
             discord_bot_user_id=discord_user_id,
-            voice_id=voice_id,
+            persona_key=settings.NPC_PERSONA_KEY,
+            voice_id=settings.TTS_VOICE_ID,
         ),
         speech=speech_service,
         tts=tts,
@@ -172,7 +193,8 @@ async def _main() -> None:
 
     # Register with Master
     await client.register()
-    log.info("npc_registered npc_id=%s user_id=%s", npc_id, discord_user_id)
+    log.info("npc_registered npc_id=%s user_id=%s",
+             settings.NPC_ID, discord_user_id)
 
     # ---- Background tasks ----
     stop = asyncio.Event()
@@ -183,7 +205,7 @@ async def _main() -> None:
                 await client.heartbeat()
             except Exception:
                 log.exception("npc_heartbeat_failed")
-            await asyncio.sleep(heartbeat_interval)
+            await asyncio.sleep(settings.HEARTBEAT_INTERVAL_S)
 
     async def _message_loop() -> None:
         try:
@@ -201,7 +223,7 @@ async def _main() -> None:
     hb_task = asyncio.create_task(_heartbeat_loop())
     msg_task = asyncio.create_task(_message_loop())
 
-    log.info("npc_bot_running npc_id=%s", npc_id)
+    log.info("npc_bot_running npc_id=%s", settings.NPC_ID)
 
     # Wait until the message loop or discord dies
     _done, _pending = await asyncio.wait(
@@ -220,7 +242,7 @@ async def _main() -> None:
     with contextlib.suppress(Exception):
         await bot.close()
 
-    log.info("npc_bot_stopped npc_id=%s", npc_id)
+    log.info("npc_bot_stopped npc_id=%s", settings.NPC_ID)
 
 
 def main() -> None:

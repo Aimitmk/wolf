@@ -1,12 +1,12 @@
-"""NPC seat assignment + GrokNpcGenerator prompt-building tests.
+"""NPC seat assignment + OpenAICompatibleNpcGenerator prompt-building tests.
 
 Verifies:
 - _on_reactive_phase_enter assigns online NPCs to LLM seats.
 - Duplicate assignments are avoided (idempotent on re-enter).
 - Fewer NPCs than seats → partial assignment.
 - Fewer seats than NPCs → capped to seat count.
-- GrokNpcGenerator prompt construction (system + user messages).
-- GrokNpcGenerator skip intent returns None.
+- OpenAICompatibleNpcGenerator prompt construction (system + user messages).
+- OpenAICompatibleNpcGenerator skip intent returns None.
 """
 
 from __future__ import annotations
@@ -17,14 +17,14 @@ from wolfbot.domain.discussion import make_phase_id
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Game, Seat
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
-from wolfbot.persistence.sqlite_repo import SqliteRepo
-from wolfbot.services.npc_generator_grok import (
-    PERSONAS_BY_KEY,
+from wolfbot.master.npc_registry import InMemoryNpcRegistry
+from wolfbot.npc.openai_compatible_generator import (
     _build_system,
     _build_user,
     _format_candidate,
 )
-from wolfbot.services.npc_registry import InMemoryNpcRegistry
+from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY as PERSONAS_BY_KEY
+from wolfbot.persistence.sqlite_repo import SqliteRepo
 
 
 def _noop_send(buf: list[str]) -> Callable[[str], Awaitable[None]]:
@@ -104,8 +104,7 @@ async def test_assigns_online_npcs_to_llm_seats(repo: SqliteRepo) -> None:
             supported_voices=(),
             version="1",
             send=_noop_send([]),
-            now_ms=1000,
-        )
+            now_ms=1000, persona_key="setsu")
 
     await _run_assignment(repo, registry, game.id, phase_id)
 
@@ -127,8 +126,7 @@ async def test_idempotent_reenter_does_not_reassign(repo: SqliteRepo) -> None:
         supported_voices=(),
         version="1",
         send=_noop_send([]),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
 
     await _run_assignment(repo, registry, game.id, phase_id)
     entry = registry.get("npc_x")
@@ -152,8 +150,7 @@ async def test_fewer_npcs_than_seats_partial_assignment(repo: SqliteRepo) -> Non
         supported_voices=(),
         version="1",
         send=_noop_send([]),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
 
     await _run_assignment(repo, registry, game.id, phase_id)
     entry = registry.get("npc_only")
@@ -178,8 +175,7 @@ async def test_more_npcs_than_seats_capped(repo: SqliteRepo) -> None:
             supported_voices=(),
             version="1",
             send=_noop_send([]),
-            now_ms=1000,
-        )
+            now_ms=1000, persona_key="setsu")
 
     await _run_assignment(repo, registry, game.id, phase_id)
     assigned_count = sum(
@@ -188,7 +184,7 @@ async def test_more_npcs_than_seats_capped(repo: SqliteRepo) -> None:
     assert assigned_count == 3  # capped at LLM seat count
 
 
-# ---- GrokNpcGenerator prompt-building unit tests ----
+# ---- OpenAICompatibleNpcGenerator prompt-building unit tests ----
 
 
 def test_build_system_prompt_contains_persona_fields() -> None:

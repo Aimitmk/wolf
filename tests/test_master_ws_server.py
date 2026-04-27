@@ -35,21 +35,21 @@ from wolfbot.domain.ws_messages import (
     SpeakResult,
     SpeechEventPayload,
 )
+from wolfbot.master.ingest_service import (
+    MasterIngestService,
+    PhaseLookup,
+)
+from wolfbot.master.npc_registry import InMemoryNpcRegistry
+from wolfbot.master.ws_server import (
+    ConnectionContext,
+    HandlerRegistry,
+    MasterHandlers,
+)
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discussion_service import (
     DiscussionService,
     SqliteSpeechEventStore,
 )
-from wolfbot.services.master_ingest_service import (
-    MasterIngestService,
-    PhaseLookup,
-)
-from wolfbot.services.master_ws_server import (
-    ConnectionContext,
-    HandlerRegistry,
-    MasterHandlers,
-)
-from wolfbot.services.npc_registry import InMemoryNpcRegistry
 
 
 def _make_send_capture() -> tuple[list[str], Callable[[str], Awaitable[None]]]:
@@ -90,8 +90,7 @@ async def test_npc_register_responds_with_npc_registered_and_inserts_registry() 
         npc_id="npc_p5",
         discord_bot_user_id="bot-uid-5",
         supported_voices=("ja-JP-A",),
-        version="1.0.0",
-    )
+        version="1.0.0", persona_key="setsu")
     await dispatcher.dispatch(msg.model_dump_json(), ctx)
 
     assert ctx.tag == "npc_p5"
@@ -116,8 +115,7 @@ async def test_heartbeat_refreshes_last_heartbeat_and_revives_offline_npc() -> N
 
     await dispatcher.dispatch(
         NpcRegister(
-            ts=900, trace_id="t", npc_id="npc_p5", discord_bot_user_id="b5"
-        ).model_dump_json(),
+            ts=900, trace_id="t", npc_id="npc_p5", discord_bot_user_id="b5", persona_key="setsu").model_dump_json(),
         ctx,
     )
     # Force offline.
@@ -199,8 +197,7 @@ async def test_registry_listener_emits_added_when_new_npc_registers() -> None:
     ctx, _ = _make_npc_ctx()
     await dispatcher.dispatch(
         NpcRegister(
-            ts=1, trace_id="t", npc_id="npc_a", discord_bot_user_id="botA"
-        ).model_dump_json(),
+            ts=1, trace_id="t", npc_id="npc_a", discord_bot_user_id="botA", persona_key="setsu").model_dump_json(),
         ctx,
     )
     # Allow the scheduled listener task to run.
@@ -223,8 +220,7 @@ async def test_registry_unregister_emits_removed() -> None:
         supported_voices=(),
         version="0.0.1",
         send=None,
-        now_ms=1,
-    )
+        now_ms=1, persona_key="setsu")
     registry.add_listener(listener)
     registry.unregister("npc_b", reason="ws_closed")
     import asyncio
@@ -272,8 +268,7 @@ async def test_master_ingest_discards_npc_speaker(repo: SqliteRepo) -> None:
         supported_voices=(),
         version="1",
         send=None,
-        now_ms=1,
-    )
+        now_ms=1, persona_key="setsu")
     store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     discussion = DiscussionService(store=store)
     lookup = _StubPhaseLookup({"g1": (Phase.DAY_DISCUSSION, 1)})
@@ -529,7 +524,7 @@ def test_websockets_master_ws_server_constructs_without_starting(
     psk_match: bool,
 ) -> None:
     """Constructor wiring smoke — no actual socket bind."""
-    from wolfbot.services.master_ws_server import WebsocketsMasterWsServer
+    from wolfbot.master.ws_server import WebsocketsMasterWsServer
 
     registry = InMemoryNpcRegistry()
     handlers = MasterHandlers(registry=registry, now_ms=lambda: 0)

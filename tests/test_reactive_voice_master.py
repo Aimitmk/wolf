@@ -29,15 +29,15 @@ from wolfbot.domain.ws_messages import (
     PlaybackRejected,
     SpeakResult,
 )
+from wolfbot.master.logic_service import build_logic_packet
+from wolfbot.master.npc_registry import InMemoryNpcRegistry
+from wolfbot.master.speak_arbiter import SpeakArbiter, SpeakArbiterConfig
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discussion_service import (
     DiscussionService,
     SqliteSpeechEventStore,
     make_phase_baseline,
 )
-from wolfbot.services.master_logic_service import build_logic_packet
-from wolfbot.services.npc_registry import InMemoryNpcRegistry
-from wolfbot.services.speak_arbiter import SpeakArbiter, SpeakArbiterConfig
 
 
 def _captured_send(buf: list[str]) -> Callable[[str], Awaitable[None]]:
@@ -99,8 +99,7 @@ async def test_successful_dispatch_emits_logic_packet_and_speak_request(
         supported_voices=(),
         version="1",
         send=_captured_send(npc_buf),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     discussion = DiscussionService(store=store)
     arb = SpeakArbiter(
@@ -134,8 +133,7 @@ async def test_dispatch_records_request_in_audit_table(repo: SqliteRepo) -> None
         supported_voices=(),
         version="1",
         send=_captured_send(npc_buf),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     discussion = DiscussionService(
         store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     )
@@ -173,8 +171,7 @@ async def test_human_speaking_blocks_dispatch(repo: SqliteRepo) -> None:
         supported_voices=(),
         version="1",
         send=_captured_send(npc_buf),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     discussion = DiscussionService(
         store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     )
@@ -203,8 +200,7 @@ async def test_speak_result_accepted_emits_authorized_and_writes_speech_event(
         supported_voices=(),
         version="1",
         send=_captured_send(npc_buf),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     discussion = DiscussionService(store=store)
     arb = SpeakArbiter(repo=repo, registry=registry, discussion=discussion, now_ms=lambda: 1500)
@@ -249,8 +245,7 @@ async def test_speak_result_over_length_rejected(repo: SqliteRepo) -> None:
         supported_voices=(),
         version="1",
         send=_captured_send(npc_buf),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     discussion = DiscussionService(
         store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     )
@@ -296,8 +291,7 @@ async def test_speak_result_stale_phase_rejected(repo: SqliteRepo) -> None:
         supported_voices=(),
         version="1",
         send=_captured_send(npc_buf),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     discussion = DiscussionService(
         store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     )
@@ -338,8 +332,7 @@ async def test_serial_speech_blocks_after_authorize_until_finished(
         supported_voices=(),
         version="1",
         send=_captured_send(npc_buf),
-        now_ms=1000,
-    )
+        now_ms=1000, persona_key="setsu")
     discussion = DiscussionService(
         store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     )

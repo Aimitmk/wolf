@@ -20,7 +20,7 @@ import pytest
 
 from wolfbot.domain.enums import ROLE_JA, Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, Player, Seat
-from wolfbot.llm.personas import PERSONAS_BY_KEY, Persona, SpeechProfile
+from wolfbot.llm.persona_base import Persona, SpeechProfile
 from wolfbot.llm.prompt_builder import (
     _build_game_rules_block,
     _build_speech_profile_block,
@@ -32,6 +32,7 @@ from wolfbot.llm.prompt_builder import (
     task_vote,
     task_wolf_chat,
 )
+from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY as PERSONAS_BY_KEY
 
 
 # --------------------------------------------------------- game rules block

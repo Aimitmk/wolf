@@ -35,16 +35,16 @@ from wolfbot.domain.ws_messages import (
     TtsFailed,
     TtsFinished,
 )
-from wolfbot.services.npc_speech_service import NpcSpeechService
-from wolfbot.services.tts_service import (
+from wolfbot.npc.playback import (
+    VoicePlayback,
+    VoicePlaybackError,
+)
+from wolfbot.npc.speech_service import NpcSpeechService
+from wolfbot.npc.tts import (
     InMemoryTtsCache,
     TtsProviderError,
     TtsRequest,
     TtsService,
-)
-from wolfbot.services.voice_playback_service import (
-    VoicePlayback,
-    VoicePlaybackError,
 )
 
 log = logging.getLogger(__name__)
@@ -54,6 +54,7 @@ log = logging.getLogger(__name__)
 class NpcClientConfig:
     npc_id: str
     discord_bot_user_id: str
+    persona_key: str
     voice_id: str
     supported_voices: tuple[str, ...] = ()
     version: str = "0.0.1"
@@ -96,6 +97,7 @@ class NpcClient:
             trace_id=trace_id,
             npc_id=self.config.npc_id,
             discord_bot_user_id=self.config.discord_bot_user_id,
+            persona_key=self.config.persona_key,
             supported_voices=self.config.supported_voices,
             version=self.config.version,
         )

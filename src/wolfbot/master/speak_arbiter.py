@@ -45,6 +45,8 @@ from wolfbot.domain.ws_messages import (
     TtsFailed,
     TtsFinished,
 )
+from wolfbot.master.logic_service import build_logic_packet
+from wolfbot.master.npc_registry import NpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discussion_service import (
     DiscussionService,
@@ -53,8 +55,6 @@ from wolfbot.services.discussion_service import (
 from wolfbot.services.discussion_service import (
     now_ms as default_now_ms,
 )
-from wolfbot.services.master_logic_service import build_logic_packet
-from wolfbot.services.npc_registry import NpcRegistry
 
 log = logging.getLogger(__name__)
 

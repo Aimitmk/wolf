@@ -12,7 +12,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from wolfbot.config import Settings
+from wolfbot.config import MasterSettings
 from wolfbot.persistence.schema import migrate
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discord_service import DiscordBotAdapter, WolfCog
@@ -26,8 +26,8 @@ log = logging.getLogger("wolfbot")
 
 
 async def _run() -> None:
-    load_dotenv()
-    settings = Settings()  # type: ignore[call-arg]
+    load_dotenv(".env.master")
+    settings = MasterSettings()  # type: ignore[call-arg]
     logging.basicConfig(
         level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -45,6 +45,13 @@ async def _run() -> None:
 
     registry = EngineRegistry()
     discord_adapter = DiscordBotAdapter(bot=bot, repo=repo, settings=settings)
+
+    # NPC registry is always created so /wolf start can consult it for
+    # reactive_voice seat backfill. The WS server (which actually accepts
+    # NPC bot connections) is only started when MASTER_NPC_PSK is set.
+    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+
+    npc_registry = InMemoryNpcRegistry()
 
     speech_store = SqliteSpeechEventStore(repo._db)
 
@@ -68,8 +75,8 @@ async def _run() -> None:
     )
 
     decider = make_xai_decider(
-        api_key=settings.XAI_API_KEY.get_secret_value(),
-        model=settings.XAI_MODEL,
+        api_key=settings.GAMEPLAY_LLM_API_KEY.get_secret_value(),
+        model=settings.GAMEPLAY_LLM_MODEL,
     )
     llm_adapter = LLMAdapter(
         repo=repo,
@@ -151,6 +158,7 @@ async def _run() -> None:
         settings=settings,
         discussion_service=discussion_service,
         on_speech_recorded=_on_speech_recorded,
+        npc_registry=npc_registry,
     )
     await bot.add_cog(cog)
     bot.tree.add_command(cog.wolf, guild=discord.Object(
@@ -171,15 +179,13 @@ async def _run() -> None:
     ws_server: Any = None
     voice_ingest: Any = None
     if settings.MASTER_NPC_PSK is not None:
-        from wolfbot.services.master_ingest_service import MasterIngestService
-        from wolfbot.services.master_ws_server import (
+        from wolfbot.master.ingest_service import MasterIngestService
+        from wolfbot.master.speak_arbiter import SpeakArbiter
+        from wolfbot.master.ws_server import (
             MasterHandlers,
             WebsocketsMasterWsServer,
         )
-        from wolfbot.services.npc_registry import InMemoryNpcRegistry
-        from wolfbot.services.speak_arbiter import SpeakArbiter
 
-        npc_registry = InMemoryNpcRegistry()
         _npc_registry_ref.append(npc_registry)
 
         arbiter = SpeakArbiter(
@@ -314,10 +320,10 @@ async def _run() -> None:
         # Instead of a separate voice-ingest process, Master joins VC itself
         # and pipes audio through VoiceIngestService → DirectMasterIngestionClient
         # → arbiter/ingest_service, all in-process.
-        if settings.GEMINI_API_KEY is not None:
-            from wolfbot.services.stt_service import GeminiAudioAnalyzer
-            from wolfbot.services.voice_ingest_client import DirectMasterIngestionClient
-            from wolfbot.services.voice_ingest_service import VoiceIngestService
+        if settings.VOICE_LLM_API_KEY is not None:
+            from wolfbot.master.stt_service import GeminiAudioAnalyzer
+            from wolfbot.master.voice_ingest_client import DirectMasterIngestionClient
+            from wolfbot.master.voice_ingest_service import VoiceIngestService
 
             # Direct callbacks (no WS ctx needed)
             async def _direct_vad_started(msg: Any) -> None:
@@ -351,9 +357,9 @@ async def _run() -> None:
                 on_stt_failed=_direct_stt_failed,
             )
 
-            gemini_stt = GeminiAudioAnalyzer(
-                api_key=settings.GEMINI_API_KEY.get_secret_value(),
-                model=settings.GEMINI_MODEL,
+            voice_llm = GeminiAudioAnalyzer(
+                api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
+                model=settings.VOICE_LLM_MODEL,
             )
 
             # NpcRegistryView adapter: InMemoryNpcRegistry → NpcRegistryView
@@ -374,12 +380,12 @@ async def _run() -> None:
             voice_ingest = VoiceIngestService(
                 registry_view=_RegistryViewAdapter(),
                 master_client=direct_client,
-                stt=gemini_stt,
+                stt=voice_llm,
                 seat_lookup=_seat_lookup,
                 phase_lookup=_phase_lookup,
             )
-            log.info("integrated voice-ingest wired (Gemini model=%s)",
-                     settings.GEMINI_MODEL)
+            log.info("integrated voice-ingest wired (voice_llm_model=%s)",
+                     settings.VOICE_LLM_MODEL)
 
     @bot.event
     async def on_ready() -> None:
@@ -401,7 +407,7 @@ async def _run() -> None:
         if voice_ingest is not None:
             from discord.ext import voice_recv
 
-            from wolfbot.services.audio_sink import WolfbotAudioSink
+            from wolfbot.master.audio_sink import WolfbotAudioSink
 
             vc_channel = bot.get_channel(settings.MAIN_VOICE_CHANNEL_ID)
             if vc_channel is not None and isinstance(vc_channel, discord.VoiceChannel):
