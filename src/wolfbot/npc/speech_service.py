@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest, SpeakResult
 
@@ -25,6 +25,7 @@ class NpcGeneratedSpeech:
     intent: str
     used_logic_ids: tuple[str, ...]
     estimated_duration_ms: int
+    co_declaration: str | None = None
 
 
 @runtime_checkable
@@ -110,6 +111,9 @@ class NpcSpeechService:
         text = speech.text.strip()
         if len(text) > request.max_chars:
             text = text[: request.max_chars]
+        co_declaration: Literal["seer", "medium", "knight"] | None = None
+        if speech.co_declaration in ("seer", "medium", "knight"):
+            co_declaration = speech.co_declaration  # type: ignore[assignment]
         return SpeakResult(
             ts=now_ms,
             trace_id=request.trace_id,
@@ -121,6 +125,7 @@ class NpcSpeechService:
             used_logic_ids=speech.used_logic_ids,
             intent=speech.intent,
             estimated_duration_ms=speech.estimated_duration_ms,
+            co_declaration=co_declaration,
         )
 
 

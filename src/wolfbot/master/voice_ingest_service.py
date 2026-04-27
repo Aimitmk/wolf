@@ -281,6 +281,9 @@ class VoiceIngestService:
             )
             return
 
+        co_decl = result.co_declaration if result.co_declaration in (
+            "seer", "medium", "knight",
+        ) else None
         await self.master_client.send_speech_event_payload(
             SpeechEventPayload(
                 ts=self._now_ms(),
@@ -296,6 +299,7 @@ class VoiceIngestService:
                 audio_start_ms=seg.audio_start_ms,
                 audio_end_ms=audio_end_ms,
                 summary=result.summary,
+                co_declaration=co_decl,  # type: ignore[arg-type]
             )
         )
 

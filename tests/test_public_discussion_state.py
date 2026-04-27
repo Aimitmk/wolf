@@ -168,3 +168,72 @@ def test_rebuild_is_independent_of_caller_supplied_seed() -> None:
     s2 = rebuild_public_state_from_events(events)
     assert s1 is not None and s2 is not None
     assert s1 == s2
+
+
+def test_co_claim_picks_up_structured_co_declaration_field() -> None:
+    """Natural-language utterances ('実は私、占い師なんだ') don't contain
+    the legacy '占いCO' marker, but the structured `co_declaration` field
+    is authoritative — `_resolve_co_role` prefers it over substring scan
+    so NPC speech with no jargon still produces a CoClaim.
+    """
+    pid = make_phase_id("g1", 1, Phase.DAY_DISCUSSION)
+    sentinel = make_phase_baseline(
+        game_id="g1",
+        phase_id=pid,
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        alive_seat_nos=[1, 2, 3],
+        created_at_ms=0,
+    )
+    natural_co = make_npc_generated_event(
+        game_id="g1",
+        phase_id=pid,
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        speaker_seat=2,
+        text="実は私、占い師なんだ。昨夜は3番を見たけど、白だった。",
+        co_declaration="seer",
+        created_at_ms=1,
+    )
+    state = rebuild_public_state_from_events([sentinel, natural_co])
+    assert state is not None
+    assert [(c.seat, c.role_claim) for c in state.co_claims] == [(2, "seer")]
+
+
+def test_co_claim_topical_mention_without_structured_field_is_ignored() -> None:
+    """A non-CO event that mentions 'CO' textually but has co_declaration=None
+    must NOT produce a CoClaim — that's the whole point of the structured
+    field replacing fuzzy substring matching for NPC text. Substring
+    fallback is reserved for legacy events without the field set."""
+    pid = make_phase_id("g1", 1, Phase.DAY_DISCUSSION)
+    sentinel = make_phase_baseline(
+        game_id="g1",
+        phase_id=pid,
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        alive_seat_nos=[1, 2, 3],
+        created_at_ms=0,
+    )
+    topical = make_npc_generated_event(
+        game_id="g1",
+        phase_id=pid,
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        speaker_seat=2,
+        text="他に占い師として名乗る人はいる?",
+        co_declaration=None,
+        created_at_ms=1,
+    )
+    state = rebuild_public_state_from_events([sentinel, topical])
+    assert state is not None
+    assert state.co_claims == ()
+
+
+def test_co_claim_legacy_substring_fallback_still_works_when_field_absent() -> None:
+    """Backwards compat: old events written before the structured field are
+    still parsed via `_CO_MARKERS` substring scan when co_declaration=None.
+    """
+    events = _seed(alive=[1, 2, 3], events_payload=[(1, "占いCOします")])
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert [(c.seat, c.role_claim) for c in state.co_claims] == [(1, "seer")]

@@ -26,8 +26,9 @@ from tenacity import (
     wait_exponential,
 )
 
+from wolfbot.domain.discussion import CoClaim, make_phase_id
 from wolfbot.domain.enums import Phase, Role, SubmissionType
-from wolfbot.domain.models import Game, LogEntry, Player, Seat
+from wolfbot.domain.models import Game, LogEntry, Player, Seat, Vote
 from wolfbot.domain.rules import (
     legal_attack_targets,
     legal_divine_targets,
@@ -88,6 +89,7 @@ class LLMAction(BaseModel):
     target_name: str | None = None
     reason_summary: str = ""
     confidence: float = 0.5
+    co_declaration: Literal["seer", "medium", "knight"] | None = None
 
 
 RESPONSE_SCHEMA: dict[str, object] = {
@@ -102,6 +104,7 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "target_name",
             "reason_summary",
             "confidence",
+            "co_declaration",
         ],
         "properties": {
             "intent": {
@@ -112,6 +115,10 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "target_name": {"type": ["string", "null"]},
             "reason_summary": {"type": "string", "maxLength": 200},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "co_declaration": {
+                "type": ["string", "null"],
+                "enum": ["seer", "medium", "knight", None],
+            },
         },
     },
 }
@@ -744,7 +751,9 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
-        await self._emit_npc_speech_event(fresh, player.seat_no, message)
+        await self._emit_npc_speech_event(
+            fresh, player.seat_no, message, co_declaration=action.co_declaration
+        )
 
     # --------------------------------------------------- runoff candidate speech
     async def submit_llm_runoff_candidate_speeches(
@@ -894,9 +903,18 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
-        await self._emit_npc_speech_event(fresh, player.seat_no, message)
+        await self._emit_npc_speech_event(
+            fresh, player.seat_no, message, co_declaration=action.co_declaration
+        )
 
-    async def _emit_npc_speech_event(self, game: Game, speaker_seat: int, text: str) -> None:
+    async def _emit_npc_speech_event(
+        self,
+        game: Game,
+        speaker_seat: int,
+        text: str,
+        *,
+        co_declaration: str | None = None,
+    ) -> None:
         """Persist a SpeechEvent(source=npc_generated) for an LLM utterance.
 
         Wrapped in try/except so a SpeechEvent persistence hiccup does not
@@ -921,6 +939,7 @@ class LLMAdapter:
                 phase=game.phase,
                 speaker_seat=speaker_seat,
                 text=text,
+                co_declaration=co_declaration,
             )
             # Persist-only avoids re-posting the message to Discord (the
             # rounds-mode path already posted it via MessagePoster) and
@@ -951,6 +970,7 @@ class LLMAdapter:
         private_logs = await self.repo.load_private_logs_for_audience(
             game.id, audience_seat=player.seat_no, limit=40
         )
+        deduced_block = await self._build_deduced_facts_block(game, players, seats)
         system = build_system_prompt(
             persona=persona,
             role=player.role,
@@ -966,12 +986,58 @@ class LLMAdapter:
             players=players,
             public_logs=public_logs,
             private_logs=private_logs,
+            deduced_facts_block=deduced_block,
         )
         try:
             return await self.decider.decide(system, user)
         except Exception:
             log.exception("LLM decide failed for seat %s game %s", player.seat_no, game.id)
             return LLMAction(intent="skip", reason_summary="decider error")
+
+    async def _build_deduced_facts_block(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+    ) -> str | None:
+        """Assemble Master's HARD/MEDIUM deduced facts for this turn.
+
+        Pulls CO history from the SpeechEvent fold and per-day vote rows
+        from the repo, then runs them through `deduction_service.deduce`.
+        Returns ``None`` (rather than the empty-marker string) on any
+        failure so the user-context template skips the section instead of
+        showing a confusing '(該当なし)' line.
+        """
+        try:
+            from wolfbot.services.deduction_service import deduce, render_facts_block
+            from wolfbot.services.discussion_service import rebuild_public_state_from_events
+
+            co_claims: tuple[CoClaim, ...] = ()
+            if self.discussion_service is not None:
+                phase_id = make_phase_id(game.id, game.day_number, game.phase)
+                events = await self.discussion_service.load_phase(game.id, phase_id)
+                state = rebuild_public_state_from_events(events)
+                if state is not None:
+                    co_claims = state.co_claims
+
+            votes_by_day: dict[int, list[Vote]] = {}
+            for past_day in range(1, game.day_number):
+                votes = await self.repo.load_votes(game.id, past_day, 0)
+                if votes:
+                    votes_by_day[past_day] = votes
+
+            facts = deduce(
+                co_claims=co_claims,
+                players=players,
+                seats=seats,
+                votes_by_day=votes_by_day,
+            )
+            if not facts:
+                return None
+            return render_facts_block(facts)
+        except Exception:
+            log.exception("deduce facts failed for game %s seat", game.id)
+            return None
 
     def _resolve_target(
         self,

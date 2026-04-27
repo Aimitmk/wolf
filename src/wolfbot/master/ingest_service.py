@@ -127,6 +127,7 @@ class MasterIngestService:
             audio_start_ms=payload.audio_start_ms,
             audio_end_ms=payload.audio_end_ms,
             summary=payload.summary,
+            co_declaration=payload.co_declaration,
             created_at_ms=default_now_ms(),
         )
         await self.discussion.record(event)

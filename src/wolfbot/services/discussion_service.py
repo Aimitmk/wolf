@@ -93,8 +93,8 @@ class SqliteSpeechEventStore:
             INSERT INTO speech_events (
                 event_id, game_id, phase_id, day, phase, source, speaker_kind,
                 speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                alive_seat_nos_json, summary, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                alive_seat_nos_json, summary, co_declaration, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.event_id,
@@ -111,6 +111,7 @@ class SqliteSpeechEventStore:
                 event.audio_end_ms,
                 event.alive_seat_nos_json,
                 event.summary,
+                event.co_declaration,
                 event.created_at_ms,
             ),
         )
@@ -121,7 +122,7 @@ class SqliteSpeechEventStore:
             """
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                   alive_seat_nos_json, summary, created_at_ms
+                   alive_seat_nos_json, summary, co_declaration, created_at_ms
               FROM speech_events
              WHERE game_id=? AND phase_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -136,7 +137,7 @@ class SqliteSpeechEventStore:
             """
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                   alive_seat_nos_json, summary, created_at_ms
+                   alive_seat_nos_json, summary, co_declaration, created_at_ms
               FROM speech_events
              WHERE game_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -163,7 +164,8 @@ def _row_to_event(row: Any) -> SpeechEvent:
         audio_end_ms=row[11],
         alive_seat_nos_json=row[12],
         summary=row[13],
-        created_at_ms=row[14],
+        co_declaration=row[14],
+        created_at_ms=row[15],
     )
 
 
@@ -221,6 +223,7 @@ def make_human_text_event(
     phase: Phase,
     speaker_seat: int,
     text: str,
+    co_declaration: str | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -233,6 +236,7 @@ def make_human_text_event(
         speaker_kind=SpeakerKind.HUMAN,
         speaker_seat=speaker_seat,
         text=text,
+        co_declaration=co_declaration,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -245,6 +249,7 @@ def make_npc_generated_event(
     phase: Phase,
     speaker_seat: int,
     text: str,
+    co_declaration: str | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -257,6 +262,7 @@ def make_npc_generated_event(
         speaker_kind=SpeakerKind.NPC,
         speaker_seat=speaker_seat,
         text=text,
+        co_declaration=co_declaration,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -272,6 +278,7 @@ def make_voice_stt_event(
     stt_confidence: float,
     audio_start_ms: int,
     audio_end_ms: int,
+    co_declaration: str | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -287,6 +294,7 @@ def make_voice_stt_event(
         stt_confidence=stt_confidence,
         audio_start_ms=audio_start_ms,
         audio_end_ms=audio_end_ms,
+        co_declaration=co_declaration,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -475,19 +483,18 @@ def apply_speech_event(
     co_claims = list(state.co_claims)
     seen_co = {(c.seat, c.role_claim) for c in co_claims}
     if speaker is not None:
-        for role_key, marker in _CO_MARKERS:
-            if marker in event.text:
-                key = (speaker, role_key)
-                if key not in seen_co:
-                    seen_co.add(key)
-                    co_claims.append(
-                        CoClaim(
-                            seat=speaker,
-                            role_claim=role_key,
-                            declared_at_event_id=event.event_id,
-                        )
+        role_key = _resolve_co_role(event)
+        if role_key is not None:
+            key = (speaker, role_key)
+            if key not in seen_co:
+                seen_co.add(key)
+                co_claims.append(
+                    CoClaim(
+                        seat=speaker,
+                        role_claim=role_key,
+                        declared_at_event_id=event.event_id,
                     )
-                break
+                )
 
     recent = [*state.recent_speech_event_ids, event.event_id][-10:]
 
@@ -555,20 +562,22 @@ def rebuild_public_state_from_events(
         if event.speaker_seat is not None:
             spoken_seats.add(event.speaker_seat)
         recent_ids.append(event.event_id)
-        for role_key, marker in _CO_MARKERS:
-            if marker in event.text and event.speaker_seat is not None:
-                key = (event.speaker_seat, role_key)
-                if key in seen_co:
-                    continue
-                seen_co.add(key)
-                co_claims.append(
-                    CoClaim(
-                        seat=event.speaker_seat,
-                        role_claim=role_key,
-                        declared_at_event_id=event.event_id,
-                    )
-                )
-                break
+        if event.speaker_seat is None:
+            continue
+        role_key = _resolve_co_role(event)
+        if role_key is None:
+            continue
+        key = (event.speaker_seat, role_key)
+        if key in seen_co:
+            continue
+        seen_co.add(key)
+        co_claims.append(
+            CoClaim(
+                seat=event.speaker_seat,
+                role_claim=role_key,
+                declared_at_event_id=event.event_id,
+            )
+        )
 
     state.co_claims = tuple(co_claims)
     state.silent_seats = frozenset(alive_seats - spoken_seats)
@@ -576,8 +585,29 @@ def rebuild_public_state_from_events(
     return state
 
 
+_VALID_CO_ROLES: frozenset[str] = frozenset({"seer", "medium", "knight"})
+
 _CO_MARKERS: tuple[tuple[str, str], ...] = (
     ("seer", "占いCO"),
     ("medium", "霊媒CO"),
     ("knight", "騎士CO"),
 )
+"""Legacy substring fallback. Authoritative CO comes from
+`SpeechEvent.co_declaration` (set at the source: NPC/LLM schema field, or
+Gemini's structured `co_claim`). Substring matching is only used for legacy
+events and human text where natural-language CO has not been pre-tagged.
+"""
+
+
+def _resolve_co_role(event: SpeechEvent) -> str | None:
+    """Pick the CO role for an event, preferring the structured field.
+
+    Returns one of ``"seer" / "medium" / "knight"`` or ``None`` for "no CO".
+    """
+    declared = event.co_declaration
+    if declared is not None and declared in _VALID_CO_ROLES:
+        return declared
+    for role_key, marker in _CO_MARKERS:
+        if marker in event.text:
+            return role_key
+    return None

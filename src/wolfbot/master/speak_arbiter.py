@@ -373,6 +373,7 @@ class SpeakArbiter:
             speaker_kind="npc",  # type: ignore[arg-type]
             speaker_seat=pending.seat_no,
             text=result.text,
+            co_declaration=result.co_declaration,
             created_at_ms=now,
         )
         await self.discussion.record(speech_event)

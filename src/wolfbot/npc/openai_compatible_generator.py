@@ -42,7 +42,7 @@ _RESPONSE_SCHEMA: dict[str, object] = {
     "schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["text", "intent", "used_logic_ids"],
+        "required": ["text", "intent", "used_logic_ids", "co_declaration"],
         "properties": {
             "text": {"type": "string", "maxLength": 300},
             "intent": {
@@ -52,6 +52,10 @@ _RESPONSE_SCHEMA: dict[str, object] = {
             "used_logic_ids": {
                 "type": "array",
                 "items": {"type": "string"},
+            },
+            "co_declaration": {
+                "type": ["string", "null"],
+                "enum": ["seer", "medium", "knight", None],
             },
         },
     },
@@ -77,6 +81,19 @@ def _build_system(persona: Persona, max_chars: int) -> str:
         f"- `text` は {max_chars} 文字以内の短い発言。\n"
         "- 発言しない場合は intent を `skip`、text を空文字にする。\n"
         "- `used_logic_ids` には参考にした logic candidate の id を入れる。\n"
+        "- **`text` 内で人狼用語(メタ語彙)を使わない。** 内部の思考では使ってよいが、"
+        "実際に喋る発話は素朴な日本語にする。\n"
+        "  禁止例: 「CO」「占いCO」「霊媒CO」「騎士CO」「黒判定」「白判定」"
+        "「ライン」「グレー」「グレラン」「縄」「PP」「ローラー」「破綻」「確白」「確黒」"
+        "「鉄板護衛」「噛み筋」「票筋」「視点漏れ」「身内切り」「囲い」「相方」「2 人狼セット」など。\n"
+        "  代わりに状況描写や感情で言う: "
+        "「あの白判定、無理に庇ってる気がする」「昨夜守ったのは◯◯」"
+        "「もう 1 人組んでそうな人」「あと処刑できる回数を考えると…」 のように。\n"
+        "- 役職 CO (占い師・霊媒師・騎士として名乗る) をするときは、"
+        "`co_declaration` を `\"seer\" / \"medium\" / \"knight\"` のいずれかに設定し、"
+        "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
+        "CO しないなら `co_declaration=null`。"
+        "「占いCO」のような語そのものは `text` に書かない。\n"
     )
 
 
@@ -210,6 +227,8 @@ class OpenAICompatibleNpcGenerator:
             return None
 
         used_ids = tuple(data.get("used_logic_ids", []))
+        co_raw = data.get("co_declaration")
+        co_declaration = co_raw if co_raw in ("seer", "medium", "knight") else None
         # Rough estimate: ~150ms per character for TTS
         estimated_ms = max(500, len(text) * 150)
 
@@ -218,6 +237,7 @@ class OpenAICompatibleNpcGenerator:
             intent=intent,
             used_logic_ids=used_ids,
             estimated_duration_ms=estimated_ms,
+            co_declaration=co_declaration,
         )
 
 

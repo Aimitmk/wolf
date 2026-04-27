@@ -78,6 +78,15 @@ class SpeechEvent(BaseModel):
     audio_end_ms: int | None = None
     summary: str | None = None
     alive_seat_nos_json: str | None = None
+    co_declaration: str | None = Field(
+        default=None,
+        description=(
+            "Structured CO self-declaration tag (`seer` / `medium` / `knight`) "
+            "extracted at the source: schema field for NPC/LLM speech, "
+            "Gemini's `co_claim` for human voice. Authoritative when set; "
+            "legacy events fall back to `_CO_MARKERS` substring scan."
+        ),
+    )
     created_at_ms: int
 
     def is_baseline(self) -> bool:

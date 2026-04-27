@@ -106,6 +106,13 @@ class SpeakResult(BaseEnvelope):
     intent: str | None = None
     estimated_duration_ms: int | None = None
     failure_reason: str | None = None
+    co_declaration: Literal["seer", "medium", "knight"] | None = Field(
+        default=None,
+        description=(
+            "Structured CO self-declaration tag set by the NPC's speech "
+            "generator. Authoritative — Master persists it on SpeechEvent."
+        ),
+    )
 
 
 class PlaybackAuthorized(BaseEnvelope):
@@ -191,6 +198,13 @@ class SpeechEventPayload(BaseEnvelope):
     audio_start_ms: int
     audio_end_ms: int
     summary: str | None = None
+    co_declaration: Literal["seer", "medium", "knight"] | None = Field(
+        default=None,
+        description=(
+            "Structured CO self-declaration extracted by Gemini's audio "
+            "analyzer (`co_claim` field). Master persists it on SpeechEvent."
+        ),
+    )
 
 
 class SttFailed(BaseEnvelope):

@@ -206,13 +206,12 @@ class VoicevoxTtsService:
                 )
         except TtsProviderError:
             raise
-        except httpx.TimeoutException:
-            raise TtsProviderError("voicevox_timeout")
-        except httpx.ConnectError:
-            raise TtsProviderError("voicevox_connection_refused")
+        except httpx.TimeoutException as exc:
+            raise TtsProviderError("voicevox_timeout") from exc
+        except httpx.ConnectError as exc:
+            raise TtsProviderError("voicevox_connection_refused") from exc
         except Exception as exc:
-            raise TtsProviderError(
-                f"voicevox_unexpected_{type(exc).__name__}") from exc
+            raise TtsProviderError(f"voicevox_unexpected_{type(exc).__name__}") from exc
 
 
 __all__ = [

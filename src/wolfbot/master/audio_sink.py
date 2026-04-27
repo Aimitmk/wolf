@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class WolfbotAudioSink(voice_recv.AudioSink):  # type: ignore[misc]
+class WolfbotAudioSink(voice_recv.AudioSink):
     """Receives per-user PCM and routes it to VoiceIngestService."""
 
     def __init__(
@@ -59,7 +59,7 @@ class WolfbotAudioSink(voice_recv.AudioSink):  # type: ignore[misc]
 
     # ---- VAD via speaking indicators ----
 
-    @voice_recv.AudioSink.listener()  # type: ignore[misc]
+    @voice_recv.AudioSink.listener()  # type: ignore[untyped-decorator]
     def on_voice_member_speaking_start(self, member: discord.Member) -> None:
         uid = str(member.id)
         asyncio.run_coroutine_threadsafe(
@@ -67,7 +67,7 @@ class WolfbotAudioSink(voice_recv.AudioSink):  # type: ignore[misc]
             self._loop,
         )
 
-    @voice_recv.AudioSink.listener()  # type: ignore[misc]
+    @voice_recv.AudioSink.listener()  # type: ignore[untyped-decorator]
     def on_voice_member_speaking_stop(self, member: discord.Member) -> None:
         uid = str(member.id)
         asyncio.run_coroutine_threadsafe(

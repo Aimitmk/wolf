@@ -41,11 +41,48 @@ class SpeechProfile:
 
 
 @dataclass(frozen=True)
+class JudgmentProfile:
+    """Structured judgment-tendency axes consumed by the prompt builder.
+
+    Each axis is 0.0-1.0. Values are rendered as labeled qualitative bands
+    in the system prompt so the LLM has a concrete tendency to lean toward,
+    independent of the free-form `style_guide` prose.
+
+    Defaults are neutral so personas without explicit values still render
+    cleanly. Overrides per persona shape behaviour:
+
+    - `trust_hard_facts`: how much weight Master's HARD-confidence deductions
+      get. Logical personas (Raqio) ≈ 1.0; defiant/wolf-leaning personas
+      can dip to 0.7 to keep verbal cover for muddling logic.
+    - `trust_medium_facts`: weight for MEDIUM-confidence deductions.
+      Conservative seers and analyzers stay high (0.7-0.9); deceiver-leaning
+      personas drop lower (0.3-0.5) to keep room for contrarian reads.
+    - `contrarian_bias`: tendency to deliberately question majority view.
+      Wolves & disruptors high; loyal villagers low.
+    - `aggression`: speed of moving from suspicion to active accusation.
+    - `bandwagon_tendency`: how readily the persona joins forming consensus.
+
+    The system prompt rendering pairs these axes with explicit guidance —
+    the persona doesn't have to compute them, just lean toward them.
+    """
+
+    trust_hard_facts: float = 1.0
+    trust_medium_facts: float = 0.7
+    contrarian_bias: float = 0.0
+    aggression: float = 0.5
+    bandwagon_tendency: float = 0.5
+
+
+_DEFAULT_JUDGMENT_PROFILE = JudgmentProfile()
+
+
+@dataclass(frozen=True)
 class Persona:
     key: str
     display_name: str
     style_guide: str
     speech_profile: SpeechProfile
+    judgment_profile: JudgmentProfile = _DEFAULT_JUDGMENT_PROFILE
 
 
 def index_by_key(pool: Sequence[Persona]) -> dict[str, Persona]:
@@ -80,6 +117,7 @@ def pick_personas_excluding(
 
 
 __all__ = [
+    "JudgmentProfile",
     "Persona",
     "SpeechProfile",
     "index_by_key",

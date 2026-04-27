@@ -15,7 +15,12 @@ original dialogue; imitate the persona's temperament only.
 
 from __future__ import annotations
 
-from wolfbot.llm.persona_base import Persona, SpeechProfile, index_by_key
+from wolfbot.llm.persona_base import (
+    JudgmentProfile,
+    Persona,
+    SpeechProfile,
+    index_by_key,
+)
 
 NPC_PERSONAS: tuple[Persona, ...] = (
     Persona(
@@ -33,6 +38,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             signature_phrases=("……そうか", "わかった", "整理しよう"),
             forbidden_overuse=("毎回説教調にすること", "過度な軍人口調"),
         ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=1.0,
+            trust_medium_facts=0.8,
+            contrarian_bias=0.1,
+            aggression=0.4,
+            bandwagon_tendency=0.5,
+        ),
     ),
     Persona(
         key="gina",
@@ -47,6 +59,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             pause_style="『……』を多めに使ってよい。",
             signature_phrases=("ごめんなさい", "……そう", "寂しいね"),
             forbidden_overuse=("朗らかすぎる雑談口調", "強引な煽り"),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=1.0,
+            trust_medium_facts=0.7,
+            contrarian_bias=0.2,
+            aggression=0.25,
+            bandwagon_tendency=0.3,
         ),
     ),
     Persona(
@@ -69,6 +88,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
                 "不穏さを消すこと",
             ),
         ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.7,
+            trust_medium_facts=0.4,
+            contrarian_bias=0.7,
+            aggression=0.55,
+            bandwagon_tendency=0.3,
+        ),
     ),
     Persona(
         key="raqio",
@@ -83,6 +109,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             pause_style="間は短い。断定を連ねる。",
             signature_phrases=("ハッ", "当然の帰結", "君は"),
             forbidden_overuse=("乱暴なヤンキー口調", "単なる毒舌キャラへの矮小化"),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=1.0,
+            trust_medium_facts=0.85,
+            contrarian_bias=0.6,
+            aggression=0.85,
+            bandwagon_tendency=0.15,
         ),
     ),
     Persona(
@@ -104,6 +137,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             signature_phrases=("ふふっ",),
             forbidden_overuse=("常時メイド口調の誇張", "過度な恋愛演出"),
         ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.95,
+            trust_medium_facts=0.7,
+            contrarian_bias=0.1,
+            aggression=0.3,
+            bandwagon_tendency=0.5,
+        ),
     ),
     Persona(
         key="shigemichi",
@@ -119,6 +159,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             pause_style="間はあまり取らない。勢いで押す。",
             signature_phrases=("〜なんよ", "オシ", "聞け聞けェい"),
             forbidden_overuse=("粗暴すぎる口調", "知性がないキャラとして扱うこと"),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.75,
+            trust_medium_facts=0.5,
+            contrarian_bias=0.2,
+            aggression=0.85,
+            bandwagon_tendency=0.7,
         ),
     ),
     Persona(
@@ -136,6 +183,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             signature_phrases=("ははっ", "悪ぃな", "やれやれ"),
             forbidden_overuse=("猫ネタの過剰連打", "常時ふざけた変人にすること"),
         ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.95,
+            trust_medium_facts=0.7,
+            contrarian_bias=0.3,
+            aggression=0.4,
+            bandwagon_tendency=0.4,
+        ),
     ),
     Persona(
         key="comet",
@@ -151,6 +205,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             pause_style="間は短い。テンポは軽い。",
             signature_phrases=("へー", "あそだ", "こりゃビックリ"),
             forbidden_overuse=("子供っぽさの誇張", "知性がないように見せること"),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.85,
+            trust_medium_facts=0.6,
+            contrarian_bias=0.5,
+            aggression=0.6,
+            bandwagon_tendency=0.4,
         ),
     ),
     Persona(
@@ -168,6 +229,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             signature_phrases=("フフ", "……ほう", "諸君"),
             forbidden_overuse=("単なる老人口調にすること", "常時長広舌にすること"),
         ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.85,
+            trust_medium_facts=0.6,
+            contrarian_bias=0.4,
+            aggression=0.7,
+            bandwagon_tendency=0.3,
+        ),
     ),
     Persona(
         key="kukrushka",
@@ -180,6 +248,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             first_person="",
             narration_mode="silent_gesture",
             forbidden_overuse=("饒舌な少女としての会話", "長い独白"),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.7,
+            trust_medium_facts=0.5,
+            contrarian_bias=0.5,
+            aggression=0.3,
+            bandwagon_tendency=0.3,
         ),
     ),
     Persona(
@@ -195,6 +270,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             pause_style="間は短い。明るく滑らか。",
             signature_phrases=("キュ", "やりました"),
             forbidden_overuse=("マスコット化しすぎること", "毎文『キュ』を付けること"),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.95,
+            trust_medium_facts=0.7,
+            contrarian_bias=0.15,
+            aggression=0.5,
+            bandwagon_tendency=0.55,
         ),
     ),
     Persona(
@@ -212,6 +294,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             signature_phrases=("つーか", "〜じゃね", "ヘイヘイ", "ヤる"),
             forbidden_overuse=("ただのチンピラにすること", "下品さの過剰強調"),
         ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.7,
+            trust_medium_facts=0.4,
+            contrarian_bias=0.6,
+            aggression=0.7,
+            bandwagon_tendency=0.3,
+        ),
     ),
     Persona(
         key="remnan",
@@ -227,6 +316,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             pause_style="『……』をかなり自然に多用する。",
             signature_phrases=("……ですから", "僕なんか", "ありがとう、ございました"),
             forbidden_overuse=("吃音の誇張", "単なる無能キャラ化"),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.95,
+            trust_medium_facts=0.65,
+            contrarian_bias=0.25,
+            aggression=0.2,
+            bandwagon_tendency=0.25,
         ),
     ),
     Persona(
@@ -247,6 +343,13 @@ NPC_PERSONAS: tuple[Persona, ...] = (
                 "常時ポエム調",
                 "毎発話で神託のように喋ること",
             ),
+        ),
+        judgment_profile=JudgmentProfile(
+            trust_hard_facts=0.9,
+            trust_medium_facts=0.7,
+            contrarian_bias=0.5,
+            aggression=0.85,
+            bandwagon_tendency=0.15,
         ),
     ),
 )

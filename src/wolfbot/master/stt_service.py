@@ -35,12 +35,18 @@ class SttResult:
     `summary` is an optional structured analysis of the utterance content,
     populated by providers that combine STT + inference in one call (e.g.
     GeminiAudioAnalyzer). Providers that only do transcription leave it None.
+
+    `co_declaration` is a structured CO tag (`seer` / `medium` / `knight`)
+    extracted from the utterance by providers that infer it (Gemini's
+    `co_claim`). Authoritative when set; otherwise the discussion service
+    falls back to substring matching on `text` for legacy compatibility.
     """
 
     text: str
     confidence: float
     duration_ms: int
     summary: str | None = None
+    co_declaration: str | None = None
 
 
 class SttProviderError(RuntimeError):
@@ -267,6 +273,11 @@ class GeminiAudioAnalyzer:
                 summary_str = json.dumps(
                     summary_dict, ensure_ascii=False) if summary_dict else None
 
+                co_raw = parsed.get("co_claim")
+                co_declaration = (
+                    co_raw if co_raw in ("seer", "medium", "knight") else None
+                )
+
                 # Estimate duration from audio size (assume 16kHz 16-bit mono WAV)
                 data_bytes = max(0, len(audio) - 44)
                 duration_ms = int(data_bytes / (16_000 * 2) * 1000)
@@ -276,6 +287,7 @@ class GeminiAudioAnalyzer:
                     confidence=confidence,
                     duration_ms=duration_ms,
                     summary=summary_str,
+                    co_declaration=co_declaration,
                 )
 
         except SttProviderError:

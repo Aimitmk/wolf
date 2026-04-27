@@ -167,6 +167,7 @@ DDL: list[str] = [
         audio_end_ms INTEGER,
         alive_seat_nos_json TEXT,
         summary TEXT,
+        co_declaration TEXT,
         created_at_ms INTEGER NOT NULL
     )
     """,
@@ -290,4 +291,8 @@ async def migrate(db_path: str | Path) -> None:
             cols = {row[1] async for row in cur}
         if "summary" not in cols:
             await db.execute("ALTER TABLE speech_events ADD COLUMN summary TEXT")
+        if "co_declaration" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events ADD COLUMN co_declaration TEXT"
+            )
         await db.commit()

@@ -20,9 +20,10 @@ import pytest
 
 from wolfbot.domain.enums import ROLE_JA, Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, Player, Seat
-from wolfbot.llm.persona_base import Persona, SpeechProfile
+from wolfbot.llm.persona_base import JudgmentProfile, Persona, SpeechProfile
 from wolfbot.llm.prompt_builder import (
     _build_game_rules_block,
+    _build_judgment_profile_block,
     _build_speech_profile_block,
     _build_strategy_block,
     build_system_prompt,
@@ -1985,3 +1986,159 @@ def test_task_vote_madman_inference_present_but_no_actor_partner() -> None:
     assert "相方を切" not in text
     # Bare `相方` (actor mode) must be absent in the madman vote text.
     assert not re.search(r"相方(?!候補)", text)
+
+
+# =========================================================================
+# JudgmentProfile rendering and integration
+# =========================================================================
+
+
+def _persona_with_judgment(profile: JudgmentProfile) -> Persona:
+    return Persona(
+        key="_judgment_test_",
+        display_name="J_TEST",
+        style_guide="x",
+        speech_profile=_TEST_SPEECH_PROFILE,
+        judgment_profile=profile,
+    )
+
+
+def test_judgment_profile_block_renders_extreme_logical_persona() -> None:
+    """Max trust_hard + low contrarian + low aggression → strong-logic / passive
+    bands appear in the rendered block."""
+    profile = JudgmentProfile(
+        trust_hard_facts=1.0,
+        trust_medium_facts=0.85,
+        contrarian_bias=0.1,
+        aggression=0.2,
+        bandwagon_tendency=0.15,
+    )
+    block = _build_judgment_profile_block(_persona_with_judgment(profile))
+    assert "絶対視" in block
+    assert "基本受け入れる" in block
+    assert "多数派にあえて逆らわない" in block
+    assert "慎重で疑い先を出すのが遅い" in block
+    assert "単独行動を好み流れに乗らない" in block
+
+
+def test_judgment_profile_block_renders_chaos_persona() -> None:
+    """Low trust_hard + low trust_medium + high contrarian + high aggression →
+    distrustful / disruptive bands."""
+    profile = JudgmentProfile(
+        trust_hard_facts=0.4,
+        trust_medium_facts=0.3,
+        contrarian_bias=0.85,
+        aggression=0.9,
+        bandwagon_tendency=0.3,
+    )
+    block = _build_judgment_profile_block(_persona_with_judgment(profile))
+    assert "やや軽視" in block
+    assert "懐疑的に扱う" in block
+    assert "あえて逆張り" in block
+    assert "即座に処刑候補を名指しする" in block
+    assert "独自路線を好む" in block
+
+
+def test_judgment_profile_block_default_neutral_persona_renders_mid_bands() -> None:
+    """A persona constructed without an explicit judgment_profile gets the
+    neutral defaults; the block renders all axes around 'mid' bands."""
+    persona = Persona(
+        key="_default_judgment_",
+        display_name="D",
+        style_guide="x",
+        speech_profile=_TEST_SPEECH_PROFILE,
+    )
+    block = _build_judgment_profile_block(persona)
+    # Defaults: trust_hard=1.0, trust_medium=0.7, contrarian=0.0, aggression=0.5, bandwagon=0.5
+    assert "絶対視" in block            # trust_hard 1.0 → high
+    assert "やや信用する" in block        # trust_medium 0.7 → mid_high
+    assert "多数派にあえて逆らわない" in block  # contrarian 0.0 → low
+    assert "標準的に疑い先を出す" in block  # aggression 0.5 → mid
+    assert "状況次第" in block            # bandwagon 0.5 → mid
+
+
+def test_build_system_prompt_includes_judgment_profile_block() -> None:
+    """The integration path renders the judgment profile within the system
+    prompt under the `## 判断傾向` heading."""
+    persona = _persona_with_judgment(
+        JudgmentProfile(
+            trust_hard_facts=1.0,
+            trust_medium_facts=0.85,
+            contrarian_bias=0.85,
+            aggression=0.85,
+            bandwagon_tendency=0.15,
+        )
+    )
+    prompt = build_system_prompt(
+        persona=persona,
+        role=Role.VILLAGER,
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        task_text="t",
+    )
+    assert "## 判断傾向" in prompt
+    # Sentinel band labels reach the final prompt.
+    assert "絶対視" in prompt
+    assert "あえて逆張り" in prompt
+    assert "即座に処刑候補を名指しする" in prompt
+
+
+def test_npc_personas_all_carry_explicit_judgment_profile() -> None:
+    """Every shipped NPC persona must declare an explicit judgment_profile —
+    not the neutral default — so the structured judgment axes actually
+    differentiate seat behaviour. A new persona without explicit values
+    fails this check."""
+    from wolfbot.llm.persona_base import _DEFAULT_JUDGMENT_PROFILE
+    from wolfbot.npc.personas import NPC_PERSONAS
+
+    for persona in NPC_PERSONAS:
+        assert persona.judgment_profile is not _DEFAULT_JUDGMENT_PROFILE, (
+            f"persona {persona.key!r} is missing an explicit judgment_profile"
+        )
+
+
+# =========================================================================
+# build_user_context — deduced facts injection
+# =========================================================================
+
+
+def test_build_user_context_includes_deduced_facts_block_when_supplied() -> None:
+    """When the caller passes `deduced_facts_block`, it appears under the
+    `## 公開情報からの確定/推測事実 (Master 整理)` header so LLMs can
+    distinguish Master's structured analysis from raw public log."""
+    seats = [_ctx_seat(1, "Alice"), _ctx_seat(2, "Bob")]
+    players = [_ctx_player(1), _ctx_player(2)]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[],
+        private_logs=[],
+        deduced_facts_block=(
+            "### HARD (公開情報から論理的に確定)\n"
+            "- 占い師 の名乗り履歴: 生存=席3 P3 / 死亡済み=(なし)"
+        ),
+    )
+    assert "公開情報からの確定/推測事実 (Master 整理)" in out
+    assert "占い師 の名乗り履歴" in out
+    assert "席3 P3" in out
+
+
+def test_build_user_context_omits_deduced_facts_section_when_none() -> None:
+    """`deduced_facts_block=None` → the entire section is suppressed; no
+    confusing empty heading slips into the prompt."""
+    seats = [_ctx_seat(1, "Alice")]
+    players = [_ctx_player(1)]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[],
+        private_logs=[],
+        deduced_facts_block=None,
+    )
+    assert "公開情報からの確定/推測事実" not in out

@@ -567,6 +567,86 @@ def _build_strategy_block(role: Role) -> str:
     return _ROLE_STRATEGIES[role]
 
 
+def _band(value: float, *, low: str, mid_low: str, mid: str, mid_high: str, high: str) -> str:
+    """Map a 0.0-1.0 axis to one of five qualitative bands.
+
+    Five-step granularity gives the LLM enough nuance without exposing the
+    raw float (which would invite spurious precision). Boundaries are
+    chosen so the neutral 0.5 default sits squarely on `mid`.
+    """
+    if value <= 0.2:
+        return low
+    if value <= 0.4:
+        return mid_low
+    if value <= 0.6:
+        return mid
+    if value <= 0.8:
+        return mid_high
+    return high
+
+
+def _build_judgment_profile_block(persona: Persona) -> str:
+    """Render `JudgmentProfile` axes as labeled tendency bands.
+
+    Each axis is mapped to a qualitative band so the LLM has a concrete
+    behavioural lean without seeing the raw float. The block is paired
+    with a usage hint that names HARD/MEDIUM facts so the trust axes
+    have something concrete to attach to.
+    """
+    j = persona.judgment_profile
+    trust_hard = _band(
+        j.trust_hard_facts,
+        low="ほぼ無視 (理屈より直感)",
+        mid_low="やや軽視",
+        mid="標準",
+        mid_high="重視",
+        high="絶対視 (論理確定は揺るがない)",
+    )
+    trust_medium = _band(
+        j.trust_medium_facts,
+        low="ほぼ参考にしない",
+        mid_low="懐疑的に扱う",
+        mid="参考程度",
+        mid_high="やや信用する",
+        high="基本受け入れる",
+    )
+    contrarian = _band(
+        j.contrarian_bias,
+        low="多数派にあえて逆らわない",
+        mid_low="やや迎合的",
+        mid="是々非々",
+        mid_high="多数派に懐疑的",
+        high="あえて逆張りする傾向",
+    )
+    aggression = _band(
+        j.aggression,
+        low="慎重で疑い先を出すのが遅い",
+        mid_low="控えめに疑う",
+        mid="標準的に疑い先を出す",
+        mid_high="積極的に疑い先を指す",
+        high="即座に処刑候補を名指しする",
+    )
+    bandwagon = _band(
+        j.bandwagon_tendency,
+        low="単独行動を好み流れに乗らない",
+        mid_low="独自路線を好む",
+        mid="状況次第",
+        mid_high="形成された流れに乗りやすい",
+        high="多数派・流れに強く乗る",
+    )
+    return (
+        f"- 論理確定 (HARD ファクト) への態度: {trust_hard}\n"
+        f"- 推測根拠 (MEDIUM ファクト) への態度: {trust_medium}\n"
+        f"- 多数派への姿勢: {contrarian}\n"
+        f"- 攻撃性 (疑い→処刑候補名指しまでの速さ): {aggression}\n"
+        f"- 流れへの追従度: {bandwagon}\n"
+        "- 上記は判断のクセであり、ルールや論理確定情報を上書きしない。"
+        "HARD ファクトは原則として受け入れた上で、態度に応じた言い回しに調整する。"
+        "MEDIUM ファクトは「態度」に応じて採用度合いを変える。"
+        "この性格を口調と判断の傾きとして表現してください。"
+    )
+
+
 def _build_speech_profile_block(persona: Persona) -> str:
     """Render the persona's structured speech profile as a bullet block.
 
@@ -622,6 +702,7 @@ def build_system_prompt(
     return (
         template.replace("{game_rules_block}", _build_game_rules_block())
         .replace("{persona_block}", persona_block)
+        .replace("{judgment_profile_block}", _build_judgment_profile_block(persona))
         .replace("{speech_profile_block}", _build_speech_profile_block(persona))
         .replace("{role_block}", role_block)
         .replace("{strategy_block}", _build_strategy_block(role))
@@ -662,6 +743,7 @@ def build_user_context(
     public_logs: Sequence[dict[str, object]],
     private_logs: Sequence[dict[str, object]],
     last_own_public: str | None = None,
+    deduced_facts_block: str | None = None,
 ) -> str:
     seats_by_no = {s.seat_no: s for s in seats}
     alive_players = [p for p in players if p.alive]
@@ -700,6 +782,15 @@ def build_user_context(
 
     rope_block = _format_rope_block(players)
 
+    facts_section = ""
+    if deduced_facts_block:
+        facts_section = (
+            "\n## 公開情報からの確定/推測事実 (Master 整理)\n"
+            f"{deduced_facts_block}\n"
+            "HARD は論理的に確定。MEDIUM は強めの推測。"
+            "判断傾向に応じて態度を変えてよいが、HARD を覆す論拠は公開ログにある具体物だけにする。\n"
+        )
+
     return (
         f"あなたは座席 {my_seat.seat_no}『{my_seat.display_name}』です。\n"
         f"生存者: {alive_names}\n"
@@ -708,6 +799,7 @@ def build_user_context(
         f"{wolf_partner_block}"
         "\n"
         f"{rope_block}\n"
+        f"{facts_section}"
         "\n"
         "## あなたの私的メモ (他者には非公開)\n"
         f"{priv_block}\n"
@@ -726,21 +818,39 @@ def task_daytime_speech(day_number: int, discussion_round: int | None = None) ->
         f"現在は day {day_number} の議論フェイズです。"
         " 必要と感じた場合のみ `intent=speak` を返し、`public_message` に 80〜300 字で短い発言を書いてください。"
         " 発言したくない場合は `intent=skip` と明示してください。"
-        " 疑い先を出すときは、単体黒要素だけでなく、その人物が人狼なら相方候補は誰か、"
+        " 疑い先を出すときは、単体の怪しさだけでなく、その人物が人狼なら相方候補は誰か、"
         "2 人狼セットとして票筋・噛み筋が自然かも必要に応じて短く触れてください。"
         "全候補のペアを長く列挙せず、今の結論に効く 1〜2 点だけを出してください。"
+        "\n発話 (`public_message`) のルール:"
+        " 自然な日本語で喋ること。"
+        "「CO」「占いCO」「霊媒CO」「騎士CO」「黒判定」「白判定」「ライン」「グレー」「グレラン」"
+        "「縄」「PP」「RPP」「ローラー」「ロラ」「破綻」「確白」「確黒」「パンダ」「鉄板護衛」「捨て護衛」"
+        "「噛み筋」「票筋」「視点漏れ」「身内切り」「囲い」など、"
+        "プレイヤー間で使われがちなメタ用語は `public_message` 内で使わない"
+        "(これらは内部の `reason_summary` や思考メモには使ってよい)。"
+        "口に出すときは状況や感情として描写する"
+        "(例: 「あの白判定、無理に庇ってる気がして信用できない」「昨夜守ったのは◯◯です」"
+        "「あと処刑できる回数を考えると…」)。"
+        "役職 CO したい場合は `co_declaration` を `\"seer\" / \"medium\" / \"knight\"` のいずれかに設定し、"
+        "`public_message` 側は「実は私、占い師なんだ」のように自然に名乗ってから能力結果を続ける。"
+        "`co_declaration` を設定しないなら `null`。"
     )
     if day_number >= 2 and discussion_round == 1:
         base += (
             " これは day 2 以降の 1 巡目発言です。"
-            " 占い師・霊媒師・騎士として CO 済み、または今 CO する場合は、"
+            " 占い師・霊媒師・騎士として既に名乗っている、または今初めて名乗る場合は、"
             "前夜の能力結果をこの発言で添えてください。"
             " 占い師なら対象 + 白/黒 + 占い理由、"
             "霊媒師なら前日処刑者 + 人狼/人狼ではない/結果なし、"
-            "騎士なら CO する局面で合法な護衛履歴 (護衛日 + 護衛先) を日付順に出し、"
-            "平和な朝なら護衛成功も合わせて主張します。"
-            " 結果を持つ、または結果を主張する役職 CO が 1 巡目で結果を出さないと、"
+            "騎士なら名乗る局面で合法な護衛履歴 (護衛日 + 護衛先) を日付順に出し、"
+            "平和な朝なら護衛成功も合わせて伝えます。"
+            " 結果を持つはずの役職を名乗っているのに 1 巡目で結果を出さないと、"
             "信用低下や破綻疑いにつながります。"
+            " ただし `public_message` 内ではこの「白/黒」「結果なし」のような内部メモ語彙を"
+            "そのまま読み上げず、「結果は人狼でした」「占ったけど人狼じゃなかった」"
+            "「占ってみた感触は白かな」のように自然な発話に書き直す。"
+            " 名乗り直すならこのターンで `co_declaration` を立て、"
+            "`public_message` でも自然な日本語で名乗りと結果を述べてください。"
         )
     return base
 

@@ -66,6 +66,7 @@ def test_response_schema_has_required_fields() -> None:
         "target_name",
         "reason_summary",
         "confidence",
+        "co_declaration",
     }
     assert schema["additionalProperties"] is False
 
