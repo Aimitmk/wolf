@@ -1945,6 +1945,118 @@ async def test_ask_system_prompt_seer_divine_task_includes_targeting_checklist(
     assert "騎士探し" not in task_text
 
 
+# ----------------------------- 2026-04-28: 占い無駄削減 / 過剰騙り抑止 / 騎士 day 別 CO
+# End-to-end mirrors of the unit-level prompt-builder tests for the same three
+# additions: seer + SEER_DIVINE no-waste, wolf/madman 3-seer-CO no-extra-fake,
+# and knight day-1/2/3 conditional CO. These exercise build_system_prompt via
+# `_capture_ask_system_prompt` so the production path is asserted, not just the
+# pure helpers.
+
+
+async def test_ask_system_prompt_seer_avoids_wasting_on_confirmed_white(
+    repo: SqliteRepo,
+) -> None:
+    """The seer's system prompt must carry the no-waste-divination guidance:
+    skip 確定白 / 非 CO 確白級 / progression-role-eligible positions, while
+    keeping the 白判定 vs 確定白 distinction (狂人 reads white too)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
+    assert "確定白" in system_prompt
+    assert "非 CO 確白級" in system_prompt
+    assert "無駄占い" in system_prompt
+    assert "信用が未確定" in system_prompt
+    assert "単発白" in system_prompt
+    assert "狂人も白に出る" in system_prompt
+
+
+async def test_ask_system_prompt_seer_divine_task_avoids_wasted_divination(
+    repo: SqliteRepo,
+) -> None:
+    """When the seer's task_text is the actual SEER_DIVINE prompt, the no-waste
+    tokens (確定白 / 非 CO 確白級 / 無駄占い / グレー / 対抗 CO 群) must reach
+    the LLM via the `{task_block}` slot. Existing targeting-axes tokens stay."""
+    task_text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER, task_text=task_text)
+    # New no-waste tokens reached the LLM.
+    assert "確定白" in system_prompt
+    assert "非 CO 確白級" in system_prompt
+    assert "無駄占い" in system_prompt
+    assert "グレー" in system_prompt
+    assert "対抗 CO 群" in system_prompt
+    # Existing axes preserved (no regression).
+    assert "占い価値" in system_prompt
+    assert "囲い候補" in system_prompt
+    assert "白でも黒でも情報が落ちる" in system_prompt
+
+
+async def test_ask_system_prompt_wolf_avoids_extra_fakes_under_three_seer_co(
+    repo: SqliteRepo,
+) -> None:
+    """The werewolf's system prompt must carry the no-extra-fake rule for
+    3-seer-CO boards: do not add medium/knight fakes — pushing CO overflow to
+    ≥3 hardens non-CO seats into 村陣営の確白級 and concentrates the village's
+    hangs onto the CO group."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "占い師 CO が 3 人" in system_prompt
+    assert "霊媒師騙りや騎士騙りを追加しない" in system_prompt
+    assert "非 CO 位置" in system_prompt
+    assert "村陣営の確白級" in system_prompt
+    assert "処刑候補が CO 群に集中" in system_prompt
+    # Wolf-actor partner vocabulary remains usable in the wolf seat.
+    assert "相方" in system_prompt
+
+
+async def test_ask_system_prompt_madman_avoids_extra_fakes_under_three_seer_co(
+    repo: SqliteRepo,
+) -> None:
+    """The madman's system prompt must carry the same no-extra-fake rule with
+    public-information-only framing (本物の狼位置を知らない) and must not leak
+    wolf-coordination vocabulary. Existing prohibition phrase remains."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "占い師 CO が 3 人" in system_prompt
+    assert "霊媒師騙りや騎士騙りを追加しない" in system_prompt
+    assert "本物の狼位置を知らない" in system_prompt
+    assert "非 CO 確白" in system_prompt
+    assert "処刑候補を狭める" in system_prompt
+    # Existing leak guard preserved. Bare 相方 (actor mode) absent;
+    # 相方候補 (public-log inference) allowed.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+    # Existing prohibition phrase remains.
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt
+
+
+async def test_ask_system_prompt_knight_includes_day_conditional_co(
+    repo: SqliteRepo,
+) -> None:
+    """The knight's system prompt must carry the day-1 round-2 2-1 grey-4 CO
+    rule, the day-2 not-confirmed-white + guard-success CO rule, and the
+    day-3 not-confirmed-white CO rule. Existing knight peaceful-morning and
+    endgame CO guidance must remain alongside (no regression)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
+    # day 1 round 2 2-1 grey-4 CO.
+    assert "day 1" in system_prompt
+    assert "2 巡目" in system_prompt
+    assert "2-1" in system_prompt
+    assert "グレーが 4 人" in system_prompt
+    assert "自分がそのグレー位置なら" in system_prompt
+    assert "投票位置を 4 人から 3 人" in system_prompt
+    assert "捏造しない" in system_prompt
+    # day 2 not-confirmed-white + guard-success CO.
+    assert "day 2" in system_prompt
+    assert "自分が確定白ではなく" in system_prompt
+    assert "護衛成功した場合" in system_prompt
+    assert "機械的に CO しない" in system_prompt
+    # day 3 not-confirmed-white CO.
+    assert "day 3" in system_prompt
+    assert "自分が確定白でないなら" in system_prompt
+    assert "対抗騎士" in system_prompt
+    # Existing knight unique anchor remains.
+    assert "前夜と違う相手を選ぶ" in system_prompt
+    # Wolf-coordination leak guard preserved.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+
+
 async def test_ask_system_prompt_wolf_seat_includes_day2_round1_fake_publication(
     repo: SqliteRepo,
 ) -> None:

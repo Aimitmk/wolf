@@ -1760,6 +1760,145 @@ def test_seer_strategy_includes_night_divination_targeting_axes() -> None:
     assert "判定履歴を時系列で一貫" in block
 
 
+# ----------------------------- 2026-04-28: 占い無駄削減 / 過剰騙り抑止 / 騎士 day 別 CO
+# Three sets of strategy/task additions for stronger LLM play in 9-player village:
+# (1) seer + SEER_DIVINE task — avoid 確定白 / 非 CO 確白級 wasted divinations,
+# (2) wolf + madman — do not add medium/knight fakes when 3 seer COs already exist,
+# (3) knight — day-1 round-2 2-1 grey-4, day-2 guard-success, day-3 non-confirmed-white.
+
+
+def test_seer_strategy_avoids_wasting_on_confirmed_white() -> None:
+    """The seer strategy must instruct the LLM to skip 確定白 / 非 CO 確白級 /
+    進行役にできる positions to avoid wasting a divination, while keeping the
+    白判定 vs 確定白 distinction (狂人 reads white too) so a single low-trust
+    white judgment is not auto-promoted to confirmed-white. Composes with the
+    existing CO-overflow guidance at the tail of the SEER strategy block."""
+    block = _build_strategy_block(Role.SEER)
+    assert "確定白" in block
+    assert "非 CO 確白級" in block
+    assert "無駄占い" in block
+    assert "信用が未確定" in block
+    assert "単発白" in block
+    assert "狂人も白に出る" in block
+
+
+def test_task_night_action_seer_divine_avoids_wasted_divination() -> None:
+    """The SEER_DIVINE task block surfaces the no-waste-divination guidance
+    inline so even an LLM that ignored the strategy block sees it on the action
+    turn. New no-waste tokens (確定白 / 非 CO 確白級 / 無駄占い / グレー /
+    対抗 CO 群) must coexist with the existing targeting-axes tokens (占い価値 /
+    囲い候補 / 白でも黒でも情報が落ちる)."""
+    text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
+    # New no-waste tokens.
+    assert "確定白" in text
+    assert "非 CO 確白級" in text
+    assert "無駄占い" in text
+    assert "グレー" in text
+    assert "対抗 CO 群" in text
+    # Existing targeting-axes tokens preserved (no regression).
+    assert "占い価値" in text
+    assert "囲い候補" in text
+    assert "白でも黒でも情報が落ちる" in text
+
+
+def test_wolf_strategy_avoids_extra_fakes_under_three_seer_co() -> None:
+    """When 3 seer COs are already out, the wolf must not add medium- or
+    knight-fake CO on top — doing so pushes CO overflow to ≥3, hardens the
+    non-CO seats into 村陣営の確白級, and concentrates village hangs onto the
+    CO group. Wolf phrasing keeps `相方` (actor mode, partner-known)."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "占い師 CO が 3 人" in block
+    assert "霊媒師騙りや騎士騙りを追加しない" in block
+    assert "非 CO 位置" in block
+    assert "村陣営の確白級" in block
+    assert "処刑候補が CO 群に集中" in block
+    # Wolf-actor partner vocabulary remains usable in the wolf bullet.
+    assert "相方" in block
+
+
+def test_madman_strategy_avoids_extra_fakes_under_three_seer_co() -> None:
+    """The madman gets the same no-extra-fake rule, framed for the
+    public-information-only seat: real wolf positions are unknown, so adding a
+    medium/knight fake risks creating 非 CO 確白 that narrows the village's
+    hang candidates rather than helping the wolf side. Wolf-coordination
+    vocabulary (bare `相方`, `襲撃先を揃える`) must stay absent; existing
+    prohibition phrase remains."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "占い師 CO が 3 人" in block
+    assert "霊媒師騙りや騎士騙りを追加しない" in block
+    assert "本物の狼位置を知らない" in block
+    assert "非 CO 確白" in block
+    assert "処刑候補を狭める" in block
+    # Existing leak guard preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+    # Existing prohibition phrase still present.
+    assert "人狼位置を知っている前提で話してはならない" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_three_seer_co_extra_fake_directive_only_in_wolf_madman_strategy(
+    role: Role,
+) -> None:
+    """The directive `霊媒師騙りや騎士騙りを追加しない` is wolf-side
+    avoidance guidance for 3-seer-CO boards and must appear only in WEREWOLF
+    and MADMAN strategies. Mirrors `test_layout_creation_directives_only_in_wolf_madman_strategy`."""
+    block = _build_strategy_block(role)
+    if role in (Role.WEREWOLF, Role.MADMAN):
+        assert "霊媒師騙りや騎士騙りを追加しない" in block
+    else:
+        assert "霊媒師騙りや騎士騙りを追加しない" not in block, (
+            f"wolf-side no-extra-fake directive leaked into {role.name}"
+        )
+
+
+def test_knight_strategy_includes_day1_round2_2_1_grey4_co() -> None:
+    """At day 1 round 2, in a confirmed 2-1 board with 4 grey seats remaining
+    after excluding the 2 seer COs, the NIGHT_0 random-white target, and the
+    sole medium CO, a true knight in one of those 4 grey seats must CO to
+    narrow the vote pool from 4 to 3. day-1 CO has no guard history yet, so
+    the knight must not fabricate one."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "day 1" in block
+    assert "2 巡目" in block
+    assert "2-1" in block
+    assert "グレーが 4 人" in block
+    assert "自分がそのグレー位置なら" in block
+    assert "騎士 CO" in block
+    assert "投票位置を 4 人から 3 人" in block
+    # day-1 CO must not fabricate guard history / guard-success.
+    assert "捏造しない" in block
+
+
+def test_knight_strategy_includes_day2_guard_success_co() -> None:
+    """On day 2, the knight CO trigger is `not already confirmed-white AND
+    successful guard last night`. The CO must include 護衛日 / 護衛先 / 平和
+    so the village can read the kami-success story; if the knight is already
+    confirmed-white, do not auto-CO on guard success alone."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "day 2" in block
+    assert "自分が確定白ではなく" in block
+    assert "護衛成功した場合" in block
+    assert "騎士 CO" in block
+    assert "護衛日" in block
+    assert "護衛先" in block
+    assert "平和" in block
+    assert "機械的に CO しない" in block
+
+
+def test_knight_strategy_includes_day3_non_kakushiro_co() -> None:
+    """On day 3, the knight must CO unless already confirmed-white. Guard
+    history is published in date order and must be legal (no self-guard, no
+    consecutive guard, no dead-target guard). When a counter-knight appears,
+    judge truth via guard history / guard-success claim / votes / 噛み筋."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "day 3" in block
+    assert "自分が確定白でないなら" in block
+    assert "護衛履歴を日付順" in block
+    assert "合法" in block
+    assert "対抗騎士" in block
+
+
 # --------------------------------------------------- build_system_prompt
 # Sentinels (not real pronouns) so the test persona can't false-positive in
 # other tests that grep for `私` / `君` / etc. in the rendered prompt.
