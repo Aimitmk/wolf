@@ -1323,6 +1323,59 @@ def test_co_overflow_role_framings_do_not_cross_leak(role: Role) -> None:
         )
 
 
+# ------------------------------------------ 自己犠牲価値 (刺し違え / 自吊り)
+# 人狼陣営の 2 役職が自分の死と引き換えに村側のリソース (縄・真役職・確白級・
+# 進行役) を削れる場面を、熟練者の交換判断として明文化したテスト群。
+# wolf には「重要 1 人と刺し違える」、madman には「自分が吊られても仕事を
+# 果たす」という強い趣旨を入れた一方、無意味な自爆や根拠なき自吊り誘導は
+# 推奨しない文面になっていることを確認する。
+def test_wolf_strategy_includes_sacrifice_value() -> None:
+    """The wolf strategy must teach 1-for-1 trade-off (刺し違え) of a key
+    village seat as a win-path-preserving move, while rejecting impulsive
+    self-destruction and self-confession."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "1 人刺し違えるだけでも人狼陣営の仕事を果たしたことになる" in block
+    # Reject impulsive collapse / self-confession.
+    assert "無計画な破綻" in block
+    assert "自白" in block
+    # Trade-value comparison axes the operator wants the LLM to weigh.
+    assert "残り縄" in block
+    assert "PP/RPP" in block
+    # Public-log discipline preserved when sacrificing — wolf must not leak
+    # partner-knowledge through the trade-off bullet.
+    assert "視点漏れ" in block
+
+
+def test_madman_strategy_includes_hanging_value() -> None:
+    """The madman strategy must teach that being voted out can itself complete
+    the wolf-side job (rope burn, dragging a true info role, disruption),
+    while rejecting impulsive self-hanging — and the wolf-positions-unknown
+    boundary must remain attached to the new content."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "自分が吊られるだけでも人狼陣営の仕事を果たしたことになる" in block
+    # Reject impulsive self-hanging / unilateral collapse.
+    assert "無意味な自吊り" in block
+    assert "単独破綻" in block
+    # Trade-value comparison axes the operator wants the LLM to weigh.
+    assert "残り縄" in block
+    assert "PP/RPP" in block
+    # Madman knowledge boundary must stay co-present with the new content
+    # so the LLM does not treat the trade-off as licence to assume wolf seats.
+    assert "本物の人狼位置を知らない" in block
+
+
+@pytest.mark.parametrize("role", [Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
+def test_sacrifice_value_phrasing_does_not_leak_to_village_roles(role: Role) -> None:
+    """Both `1 人刺し違える` (wolf) and `自分が吊られるだけでも` (madman) frame
+    sacrifice as a wolf-side tactic. Neither — nor the shared
+    `人狼陣営の仕事を果たしたことになる` framing — may leak to a village role:
+    village seats throwing the game would be a strategy regression."""
+    block = _build_strategy_block(role)
+    assert "1 人刺し違える" not in block
+    assert "自分が吊られるだけでも" not in block
+    assert "人狼陣営の仕事を果たしたことになる" not in block
+
+
 # --------------------------------- wolf night-attack guard-aware vocabulary
 # Wolf-only tactical phrases for night-attack reasoning. They must appear in
 # the werewolf strategy and never leak into another role's strategy or into

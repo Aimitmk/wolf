@@ -1407,6 +1407,31 @@ async def test_ask_system_prompt_madman_excludes_wolf_positions_assumption(
     assert "襲撃先を揃える" not in system_prompt
 
 
+async def test_ask_system_prompt_wolf_seat_includes_sacrifice_value(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: a werewolf LLM's system prompt must carry the new 1-for-1
+    trade-off (刺し違え) tactical principle and the impulsive-collapse
+    rejection via `_build_strategy_block(Role.WEREWOLF)`."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "1 人刺し違えるだけでも人狼陣営の仕事を果たしたことになる" in system_prompt
+    assert "無計画な破綻" in system_prompt
+
+
+async def test_ask_system_prompt_madman_includes_hanging_value(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: a madman LLM's system prompt must carry the hanging-as-job
+    principle and the impulsive-self-hanging rejection. The pre-existing
+    wolf-positions-unknown prohibition must remain co-present so the new
+    tactic stays inside the madman knowledge boundary."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "自分が吊られるだけでも人狼陣営の仕事を果たしたことになる" in system_prompt
+    assert "無意味な自吊り" in system_prompt
+    # Boundary preserved alongside the new content.
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt
+
+
 async def test_ask_system_prompt_wolf_seat_includes_attack_evaluation_axes(
     repo: SqliteRepo,
 ) -> None:
