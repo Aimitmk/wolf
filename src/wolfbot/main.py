@@ -106,8 +106,91 @@ async def _run() -> None:
             if s.discord_user_id and any(p.seat_no == s.seat_no and p.alive for p in players):
                 _vc_seat_map[s.discord_user_id] = s.seat_no
 
+    # ---- Master VC join lifecycle ---------------------------------------
+    # Single VC connection; one Master = one guild = at most one active
+    # reactive_voice game at a time. Held in a list so closures can rebind.
+    master_vc_ref: list[Any] = [None]
+    master_vc_lock = asyncio.Lock()
+
+    async def _master_join_vc_for_game(game: Any) -> None:
+        """Join the game's VC if reactive_voice + voice_ingest is active.
+
+        Idempotent: returns immediately when the existing connection is
+        still healthy. Called from `_on_reactive_phase_enter` and from
+        recovery so a Master restart mid-game re-joins. In rounds mode
+        Master never joins VC at all.
+        """
+        if voice_ingest is None:
+            return
+        if getattr(game, "discussion_mode", None) != "reactive_voice":
+            return
+        async with master_vc_lock:
+            existing = master_vc_ref[0]
+            if existing is not None:
+                try:
+                    if existing.is_connected():
+                        return
+                except Exception:
+                    pass
+                master_vc_ref[0] = None
+            from discord.ext import voice_recv
+
+            from wolfbot.master.audio_sink import WolfbotAudioSink
+
+            try:
+                channel_id = int(game.main_vc_channel_id)
+            except (TypeError, ValueError):
+                log.warning(
+                    "master_vc_channel_id_invalid game=%s value=%r",
+                    game.id,
+                    game.main_vc_channel_id,
+                )
+                return
+            vc_channel = bot.get_channel(channel_id)
+            if vc_channel is None or not isinstance(vc_channel, discord.VoiceChannel):
+                log.warning(
+                    "master_vc_channel_not_found id=%s", channel_id
+                )
+                return
+            try:
+                vc_client = await vc_channel.connect(cls=voice_recv.VoiceRecvClient)
+                sink = WolfbotAudioSink(
+                    voice_ingest, loop=asyncio.get_running_loop()
+                )
+                vc_client.listen(sink)
+                master_vc_ref[0] = vc_client
+                log.info(
+                    "master_vc_joined channel=%s game=%s", channel_id, game.id
+                )
+            except Exception:
+                log.warning(
+                    "master_vc_join_failed channel=%s",
+                    channel_id,
+                    exc_info=True,
+                )
+
+    async def _master_leave_vc() -> None:
+        """Disconnect Master from VC. Idempotent."""
+        async with master_vc_lock:
+            vc = master_vc_ref[0]
+            if vc is None:
+                return
+            try:
+                if vc.is_connected():
+                    await vc.disconnect()
+                    log.info("master_vc_left")
+            except Exception:
+                log.exception("master_vc_leave_failed")
+            finally:
+                master_vc_ref[0] = None
+
     async def _on_reactive_phase_enter(game_id: str) -> None:
         await _refresh_voice_ingest_cache(game_id)
+        # Master joins the game's VC the first time the game enters a
+        # public-speech phase. Idempotent so re-entries are no-ops.
+        g_for_vc = await repo.load_game(game_id)
+        if g_for_vc is not None:
+            await _master_join_vc_for_game(g_for_vc)
         # Assign online NPC bots to their game seats so the arbiter can pick them.
         if _npc_registry_ref and _vc_phase_cache[0] is not None:
             from wolfbot.domain.ws_messages import SeatAssigned
@@ -184,6 +267,9 @@ async def _run() -> None:
                     )
             npc_reg.unassign(entry.npc_id)
             log.info("npc_seat_unassigned npc=%s game=%s", entry.npc_id, game_id)
+        # Drop Master's own VC connection too — keeps the bot out of the
+        # voice channel between games. Reattaches at the next /wolf start.
+        await _master_leave_vc()
 
     game_service = GameService(
         repo=repo,
@@ -268,7 +354,18 @@ async def _run() -> None:
         )
         _reactive_phase_cb.append(arbiter)
         recovery._reactive_voice_sweep = arbiter.reactive_voice_recovery_sweep
-        recovery._reactive_voice_reenter = arbiter.try_dispatch_next
+
+        async def _reactive_voice_reenter(game_id: str) -> None:
+            # On Master restart, reactive_voice games still in
+            # DAY_DISCUSSION need their VC joined again before the
+            # arbiter starts dispatching. `_master_join_vc_for_game` is
+            # idempotent so non-reactive_voice games are a no-op.
+            g = await repo.load_game(game_id)
+            if g is not None:
+                await _master_join_vc_for_game(g)
+            await arbiter.try_dispatch_next(game_id)
+
+        recovery._reactive_voice_reenter = _reactive_voice_reenter
 
         class _RepoPhase:
             """Adapts SqliteRepo to MasterIngestService.PhaseLookup."""
@@ -486,27 +583,11 @@ async def _run() -> None:
             await ws_server.start()
             log.info("master WS server started on %s",
                      settings.MASTER_WS_LISTEN)
-        # Join VC and start listening via discord-ext-voice-recv AudioSink.
-        if voice_ingest is not None:
-            from discord.ext import voice_recv
-
-            from wolfbot.master.audio_sink import WolfbotAudioSink
-
-            vc_channel = bot.get_channel(settings.MAIN_VOICE_CHANNEL_ID)
-            if vc_channel is not None and isinstance(vc_channel, discord.VoiceChannel):
-                try:
-                    vc_client = await vc_channel.connect(cls=voice_recv.VoiceRecvClient)
-                    sink = WolfbotAudioSink(
-                        voice_ingest, loop=asyncio.get_running_loop())
-                    vc_client.listen(sink)
-                    log.info("master_vc_joined channel=%s, audio_sink active",
-                             settings.MAIN_VOICE_CHANNEL_ID)
-                except Exception:
-                    log.warning("master_vc_join_failed channel=%s",
-                                settings.MAIN_VOICE_CHANNEL_ID, exc_info=True)
-            else:
-                log.warning("voice_channel_not_found id=%s",
-                            settings.MAIN_VOICE_CHANNEL_ID)
+        # Master no longer auto-joins VC at startup. Joining is deferred
+        # to `_on_reactive_phase_enter` (the first public-speech phase of
+        # a reactive_voice game) and to recovery for in-flight games.
+        # Hosts who want Master in a non-active VC still rely on starting
+        # a game; rounds-mode games never need VC.
 
         recovered = await recovery.recover_all()
         log.info("recovered %d game(s)", len(recovered))
