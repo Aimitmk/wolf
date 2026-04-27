@@ -160,7 +160,16 @@ class MasterTtsPlayback:
         public dispatch_request API because Master narration is not a
         SpeakResult — there's no NPC bot to authorize, and we don't
         want a DB row in `npc_playback_events` for a Master utterance.
+
+        Before adding the sentinel we wait for any in-flight NPC
+        playback to drain. Otherwise an already-authorized NPC
+        utterance would play simultaneously with Master narration in
+        the same VC. The wait is bounded so a stuck NPC playback
+        (timed-out tts_finished/playback_finished) eventually unblocks
+        narration via the arbiter's normal expiry sweep.
         """
+        if arbiter is not None:
+            await self._wait_for_npc_playback_drain(arbiter)
         sentinel: str | None = None
         if arbiter is not None:
             sentinel = f"{self._SENTINEL_PREFIX}{uuid.uuid4().hex[:8]}"
@@ -177,6 +186,38 @@ class MasterTtsPlayback:
             if sentinel is not None and arbiter is not None:
                 with contextlib.suppress(AttributeError):
                     arbiter._active_playback.discard(sentinel)
+
+    async def _wait_for_npc_playback_drain(
+        self,
+        arbiter: Any,
+        *,
+        max_wait_s: float = 15.0,
+        poll_interval_s: float = 0.1,
+    ) -> None:
+        """Block until the arbiter's `_active_playback` carries no
+        non-master entries, or `max_wait_s` elapses.
+
+        Master sentinels (prefixed with ``master-narration-``) are
+        ignored so concurrent narrations don't deadlock — they're
+        already serialized by `self._lock`."""
+        active: set[str] | None = None
+        try:
+            active = arbiter._active_playback
+        except AttributeError:
+            return
+        if active is None:
+            return
+        deadline_loops = max(1, int(max_wait_s / poll_interval_s))
+        for _ in range(deadline_loops):
+            others = [
+                rid for rid in active if not rid.startswith(self._SENTINEL_PREFIX)
+            ]
+            if not others:
+                return
+            await asyncio.sleep(poll_interval_s)
+        log.info(
+            "master_tts_drain_timeout pending=%d", len(others)
+        )
 
 
 __all__ = ["MasterTtsPlayback"]

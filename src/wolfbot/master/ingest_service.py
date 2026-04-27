@@ -209,6 +209,22 @@ class MasterIngestService:
 
         # Seed the phase baseline so PublicDiscussionState rebuild works.
         alive_seat_nos = await self.phase_lookup.get_alive_seat_nos(payload.game_id)
+
+        # Defensive alive check. The voice-ingest VAD entry already
+        # filters dead-player audio (their seat is dropped from the
+        # seat lookup map), and Discord-level VC mute is applied on
+        # death — but a delayed STT result could still arrive after a
+        # player died mid-segment. Drop it here so a dead player can
+        # never inject SpeechEvents into the public log.
+        if payload.seat_no not in set(alive_seat_nos):
+            log.info(
+                "dead_speaker_stt_discarded game=%s seat=%d segment=%s",
+                payload.game_id,
+                payload.seat_no,
+                payload.segment_id,
+            )
+            return (None, "dead_speaker_discarded")
+
         await self.discussion.begin_phase_if_absent(
             game_id=payload.game_id,
             day=day,

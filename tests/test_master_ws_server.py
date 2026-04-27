@@ -355,6 +355,60 @@ async def test_master_ingest_accepts_human_speaker(repo: SqliteRepo) -> None:
     assert len(baselines) == 1
 
 
+async def test_master_ingest_drops_dead_speaker_stt(repo: SqliteRepo) -> None:
+    """Defensive alive check: a delayed STT result for a player who
+    died mid-segment must not produce a SpeechEvent. The voice-ingest
+    VAD entry already filters dead audio, but a slow Gemini response
+    could land after death — Master is the last line of defense."""
+    g = Game(
+        id="g_dead",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+    )
+    await repo.create_game(g)
+    await repo.insert_seat(
+        "g_dead",
+        Seat(seat_no=4, display_name="Dead", discord_user_id="u4", is_llm=False, persona_key=None),
+    )
+    await repo.set_player_role("g_dead", 4, Role.VILLAGER)
+    registry = InMemoryNpcRegistry()
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    # alive_seats does NOT include seat 4 — i.e. they're already dead.
+    lookup = _StubPhaseLookup(
+        {"g_dead": (Phase.DAY_DISCUSSION, 1)},
+        alive_seats={"g_dead": []},
+    )
+    svc = MasterIngestService(
+        registry=registry, discussion=discussion, phase_lookup=lookup
+    )
+    payload = SpeechEventPayload(
+        ts=1,
+        trace_id="t",
+        game_id="g_dead",
+        phase_id=make_phase_id("g_dead", 1, Phase.DAY_DISCUSSION),
+        seat_no=4,
+        speaker_discord_user_id="u4",
+        segment_id="s_late",
+        text="まだ生きてる…",
+        confidence=0.9,
+        duration_ms=500,
+        audio_start_ms=0,
+        audio_end_ms=500,
+    )
+    event, reason = await svc.ingest_voice(payload)
+    assert event is None
+    assert reason == "dead_speaker_discarded"
+    # Critically: NO SpeechEvent row got persisted (not even baseline).
+    rows = await store.load_for_game("g_dead")
+    assert rows == []
+
+
 async def test_master_ingest_ignores_caller_phase_id(repo: SqliteRepo) -> None:
     """MasterIngestService must compute the canonical phase_id on Master,
     not trust the caller-supplied value from the voice-ingest worker."""

@@ -63,6 +63,17 @@ class PermissionManager:
         if main is not None:
             await self._apply_main_text(main, seats, player_by_seat, guild)
 
+        # Reconcile VC speak permission so a Master restart restores
+        # dead-player mute. Only runs when player state is known
+        # (post-SETUP); LOBBY/SETUP have no per-seat alive flag yet.
+        if players is not None and game.main_vc_channel_id:
+            try:
+                vc_channel = guild.get_channel(int(game.main_vc_channel_id))
+            except (TypeError, ValueError):
+                vc_channel = None
+            if vc_channel is not None:
+                await self._apply_vc_mute(vc_channel, seats, player_by_seat, guild)
+
         if game.heaven_channel_id:
             heaven = guild.get_channel(int(game.heaven_channel_id))
             if heaven is not None:
@@ -94,6 +105,26 @@ class PermissionManager:
         main = guild.get_channel(int(game.main_text_channel_id))
         if main is not None:
             await self._set_perms(main, member, send_messages=False, read_messages=True)
+
+        # VC mute: dead players must not be able to speak in VC. We
+        # remove `speak` (and `use_voice_activation`) on the VC channel
+        # rather than server-mute (`member.edit(mute=True)`) because the
+        # channel-overwrite approach is scoped to this game's VC and
+        # can be cleared on game end alongside the rest of the
+        # overwrites — server-mute would leak across guilds / games and
+        # require admin permission.
+        if game.main_vc_channel_id:
+            try:
+                vc_channel = guild.get_channel(int(game.main_vc_channel_id))
+            except (TypeError, ValueError):
+                vc_channel = None
+            if vc_channel is not None:
+                await self._set_perms(
+                    vc_channel,
+                    member,
+                    speak=False,
+                    use_voice_activation=False,
+                )
 
         if game.heaven_channel_id:
             heaven = guild.get_channel(int(game.heaven_channel_id))
@@ -143,6 +174,23 @@ class PermissionManager:
                     continue
                 await self._clear_perms(main, member)
 
+        # VC is also a persistent channel — clear the per-member
+        # speak/use_voice_activation overwrites we may have applied on
+        # death so the next game starts from a clean baseline.
+        if game.main_vc_channel_id:
+            try:
+                vc_channel = guild.get_channel(int(game.main_vc_channel_id))
+            except (TypeError, ValueError):
+                vc_channel = None
+            if vc_channel is not None:
+                for s in seats:
+                    if s.discord_user_id is None:
+                        continue
+                    member = guild.get_member(int(s.discord_user_id))
+                    if member is None:
+                        continue
+                    await self._clear_perms(vc_channel, member)
+
         for channel_id in filter(None, [game.heaven_channel_id, game.wolves_channel_id]):
             channel = guild.get_channel(int(channel_id))
             if channel is None:
@@ -179,6 +227,46 @@ class PermissionManager:
                 read_messages=True,
                 view_channel=True,
             )
+
+    async def _apply_vc_mute(
+        self,
+        channel: Any,
+        seats: Sequence[Seat],
+        player_by_seat: dict[int, Player],
+        guild: Any,
+    ) -> None:
+        """Reconcile VC speak permission per seat: alive → speak, dead → muted.
+
+        We use channel-level `set_permissions(speak=False, use_voice_activation=False)`
+        rather than `member.edit(mute=True)` so the override is scoped to
+        this game's VC and gets cleared in `on_game_end`.
+        """
+        for s in seats:
+            if s.discord_user_id is None:
+                continue
+            member = guild.get_member(int(s.discord_user_id))
+            if member is None:
+                continue
+            p = player_by_seat.get(s.seat_no)
+            alive = True if p is None else bool(p.alive)
+            if alive:
+                # Defensive: if a previous death set speak=False and a
+                # later refresh sees them alive again (shouldn't happen
+                # in this game's lifecycle, but possible during dev /
+                # tests), restore speak.
+                await self._set_perms(
+                    channel,
+                    member,
+                    speak=True,
+                    use_voice_activation=True,
+                )
+            else:
+                await self._set_perms(
+                    channel,
+                    member,
+                    speak=False,
+                    use_voice_activation=False,
+                )
 
     async def _apply_heaven(
         self,
