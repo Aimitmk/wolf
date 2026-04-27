@@ -1014,6 +1014,37 @@ class WolfCog(commands.Cog):
                 ephemeral=True,
             )
 
+    @wolf.command(
+        name="settings",
+        description="フェイズ時間などの設定をホスト用 UI で調整",
+    )
+    async def settings_command(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "ギルド内で実行してください。", ephemeral=True
+            )
+            return
+        game = await self.repo.load_active_game_for_guild(
+            str(interaction.guild_id)
+        )
+        if game is None:
+            await interaction.response.send_message(
+                "進行中のゲームがありません。`/wolf create` で作成してから設定してください。",
+                ephemeral=True,
+            )
+            return
+        if str(interaction.user.id) != game.host_user_id:
+            await interaction.response.send_message(
+                "設定はホストのみが変更できます。", ephemeral=True
+            )
+            return
+        from wolfbot.ui.settings_view import render_initial_message
+
+        embed, view = render_initial_message(host_user_id=game.host_user_id)
+        await interaction.response.send_message(
+            embed=embed, view=view, ephemeral=True
+        )
+
     # ----------------------------------------------------------- internals
     async def _host_check(self, interaction: discord.Interaction) -> Game | None:
         if interaction.guild is None:
