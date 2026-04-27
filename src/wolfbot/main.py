@@ -18,7 +18,7 @@ from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discord_service import DiscordBotAdapter, WolfCog
 from wolfbot.services.discussion_service import DiscussionService, SqliteSpeechEventStore
 from wolfbot.services.game_service import GameService
-from wolfbot.services.llm_service import LLMAdapter, make_xai_decider
+from wolfbot.services.llm_service import LLMAdapter, make_llm_decider
 from wolfbot.services.recovery_service import RecoveryService
 from wolfbot.services.timer_service import EngineRegistry
 
@@ -74,10 +74,7 @@ async def _run() -> None:
         message_poster=_DiscussionPoster(),
     )
 
-    decider = make_xai_decider(
-        api_key=settings.GAMEPLAY_LLM_API_KEY.get_secret_value(),
-        model=settings.GAMEPLAY_LLM_MODEL,
-    )
+    decider = make_llm_decider(settings.gameplay_decider_config())
     llm_adapter = LLMAdapter(
         repo=repo,
         decider=decider,

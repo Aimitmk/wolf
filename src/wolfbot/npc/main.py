@@ -114,22 +114,15 @@ async def _main() -> None:
 
     # ---- Build NPC pipeline ----
     from wolfbot.npc.client import NpcClient, NpcClientConfig
-    from wolfbot.npc.openai_compatible_generator import (
-        OpenAICompatibleConfig,
-        OpenAICompatibleNpcGenerator,
-    )
+    from wolfbot.npc.generator_factory import make_npc_generator
     from wolfbot.npc.playback import DiscordVoicePlayback, VoicePlaybackError
     from wolfbot.npc.speech_service import NpcSpeechService
     from wolfbot.npc.tts import VoicevoxTtsService
 
-    generator = OpenAICompatibleNpcGenerator(
-        api_key=settings.NPC_LLM_API_KEY.get_secret_value(),
-        config=OpenAICompatibleConfig(
-            model=settings.NPC_LLM_MODEL,
-            base_url=settings.NPC_LLM_BASE_URL,
-        ),
+    generator = make_npc_generator(
+        settings.npc_decider_config(),
+        persona_key=settings.NPC_PERSONA_KEY,
     )
-    generator.set_persona(settings.NPC_PERSONA_KEY)
     speech_service = NpcSpeechService(generator=generator)
     tts = VoicevoxTtsService(
         base_url=settings.VOICEVOX_URL,

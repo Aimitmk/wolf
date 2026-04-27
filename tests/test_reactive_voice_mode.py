@@ -74,17 +74,25 @@ async def test_phase_advance_under_reactive_voice_skips_round_gate() -> None:
     assert transition.next_phase is PhaseEnum.DAY_VOTE
 
 
-async def test_settings_loads_default_discussion_mode(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The Settings object exposes LLM_DISCUSSION_MODE with rounds default."""
-    monkeypatch.setenv("DISCORD_TOKEN", "dummy")
-    monkeypatch.setenv("GAMEPLAY_LLM_API_KEY", "dummy")
-    monkeypatch.setenv("DISCORD_GUILD_ID", "1")
-    monkeypatch.setenv("MAIN_TEXT_CHANNEL_ID", "1")
-    monkeypatch.setenv("MAIN_VOICE_CHANNEL_ID", "1")
-    monkeypatch.delenv("LLM_DISCUSSION_MODE", raising=False)
+async def test_settings_loads_default_discussion_mode() -> None:
+    """The Settings object exposes LLM_DISCUSSION_MODE with rounds default.
+
+    `_env_file=None` keeps the developer's local ``.env.master`` (which may
+    override LLM_DISCUSSION_MODE for actual runs) from leaking into the
+    test and masking the default.
+    """
+    from pydantic import SecretStr
+
     from wolfbot.config import MasterSettings
 
-    s = MasterSettings()  # type: ignore[call-arg]
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        DISCORD_TOKEN=SecretStr("dummy"),
+        DISCORD_GUILD_ID=1,
+        MAIN_TEXT_CHANNEL_ID=1,
+        MAIN_VOICE_CHANNEL_ID=1,
+        GAMEPLAY_LLM_API_KEY=SecretStr("dummy"),
+    )
     assert s.LLM_DISCUSSION_MODE == "rounds"
 
 

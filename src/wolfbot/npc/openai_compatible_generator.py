@@ -14,13 +14,21 @@ changing :class:`OpenAICompatibleConfig.base_url` and ``model``:
 * Groq — ``base_url="https://api.groq.com/openai/v1"``
 * Together AI — ``base_url="https://api.together.xyz/v1"``
 * vLLM / Ollama (OpenAI-compatible mode) — local ``base_url``
+* DeepSeek — ``mode="json_object"`` plus the JSON contract suffix appended
+  to the system prompt; ``thinking`` / ``reasoning_effort`` forwarded via
+  ``extra_body`` (DeepSeek does not support strict ``json_schema``).
 
-The default is xAI for back-compat with existing deployments. The prompt is
-deliberately simpler than the full ``llm_service`` prompt pipeline —
-reactive utterances are short (80-char cap) situational remarks, not
-multi-paragraph analytical speeches. The persona's ``style_guide`` and
-``speech_profile`` are included for voice consistency but the strategic
-rules sections are omitted.
+The default is xAI Grok for back-compat with existing deployments. The
+prompt is deliberately simpler than the full ``llm_service`` prompt
+pipeline — reactive utterances are short (80-char cap) situational
+remarks, not multi-paragraph analytical speeches. The persona's
+``style_guide`` and ``speech_profile`` are included for voice consistency
+but the strategic rules sections are omitted.
+
+For Vertex AI Gemini, see :mod:`wolfbot.npc.gemini_generator` — that
+provider is not OpenAI-compatible and uses the ``google-genai`` SDK.
+The right generator for a given ``LLMDeciderConfig`` is picked by
+:func:`wolfbot.npc.generator_factory.make_npc_generator`.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
 from wolfbot.llm.persona_base import Persona
@@ -129,18 +138,51 @@ def _format_candidate(c: LogicCandidate) -> str:
     return "\n".join(parts)
 
 
+# DeepSeek does not support strict json_schema; it only supports
+# json_object.  To make the model emit the right field names without
+# walking the full schema in the system prompt, we append this per-call
+# contract that mirrors the keys in ``_RESPONSE_SCHEMA``.  Module-level
+# so tests can assert on substrings without instantiating AsyncOpenAI.
+_DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
+
+---
+出力形式 (json):
+必ず次のキーを持つ JSON オブジェクトのみを返してください。前後にテキストや markdown コードフェンスを付けないでください。
+- "text": string (発話本体、最大 300 文字)
+- "intent": "speak" | "agree" | "disagree" | "question" | "accuse" | "defend" | "skip"
+- "used_logic_ids": string の配列 (空配列でもよい)
+- "co_declaration": "seer" | "medium" | "knight" | null
+
+例:
+{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null}
+"""
+
+
 @dataclass
 class OpenAICompatibleConfig:
     """Backend-agnostic config for any OpenAI Chat Completions endpoint.
 
     Defaults target xAI Grok for back-compat; override ``base_url`` and
     ``model`` to point at OpenAI, Groq, Together, vLLM, Ollama, etc.
+
+    For DeepSeek, set ``mode="json_object"`` and (optionally) the
+    DeepSeek-specific knobs ``thinking`` / ``reasoning_effort``.  Those
+    values are no-ops in xAI / OpenAI / Groq / Together / Ollama mode.
     """
 
     model: str = "grok-4-1-fast"
     base_url: str = "https://api.x.ai/v1"
     timeout: float = 15.0
     temperature: float = 0.8
+    # ``json_schema`` (default) sends ``response_format={"type":"json_schema",
+    # "json_schema": _RESPONSE_SCHEMA}`` for strict structured output (xAI,
+    # OpenAI). ``json_object`` falls back to ``{"type":"json_object"}`` and
+    # appends ``_DEEPSEEK_JSON_CONTRACT_SUFFIX`` to the system prompt.
+    mode: Literal["json_schema", "json_object"] = "json_schema"
+    # DeepSeek-only knobs.  Forwarded via ``extra_body`` only when
+    # ``mode == "json_object"``.
+    thinking: Literal["enabled", "disabled"] = "enabled"
+    reasoning_effort: Literal["high", "max"] = "max"
 
 
 class OpenAICompatibleNpcGenerator:
@@ -148,7 +190,9 @@ class OpenAICompatibleNpcGenerator:
 
     Implements :class:`wolfbot.npc.speech_service.NpcGenerator` via the
     ``openai`` SDK's ``chat.completions`` API. The choice of provider is
-    a config decision (``base_url`` + ``model``), not a code decision.
+    a config decision (``base_url`` + ``model`` + ``mode``), not a code
+    decision.  Strict ``json_schema`` mode is the default; DeepSeek
+    requires ``mode="json_object"`` plus the appended JSON contract.
     """
 
     def __init__(
@@ -187,26 +231,35 @@ class OpenAICompatibleNpcGenerator:
             )
         persona = NPC_PERSONAS_BY_KEY[self._persona_key]
         system = _build_system(persona, max_chars=request.max_chars)
+        if self.config.mode == "json_object":
+            system += _DEEPSEEK_JSON_CONTRACT_SUFFIX
         user = _build_user(logic, request)
 
         client = AsyncOpenAI(
             api_key=self._api_key,
             base_url=self.config.base_url,
         )
+        kwargs: dict[str, object] = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": self.config.temperature,
+            "timeout": self.config.timeout,
+        }
+        if self.config.mode == "json_schema":
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": _RESPONSE_SCHEMA,
+            }
+        else:
+            kwargs["response_format"] = {"type": "json_object"}
+            kwargs["extra_body"] = {"thinking": {"type": self.config.thinking}}
+            if self.config.thinking == "enabled":
+                kwargs["reasoning_effort"] = self.config.reasoning_effort
         try:
-            resp = await client.chat.completions.create(  # type: ignore[call-overload]
-                model=self.config.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": _RESPONSE_SCHEMA,
-                },
-                temperature=self.config.temperature,
-                timeout=self.config.timeout,
-            )
+            resp = await client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
         except Exception:
             log.exception(
                 "npc_generate_failed model=%s base_url=%s",
@@ -221,24 +274,45 @@ class OpenAICompatibleNpcGenerator:
             log.warning("npc_generate_invalid_json response=%s", content[:200])
             return None
 
-        text = data.get("text", "").strip()
-        intent = data.get("intent", "speak")
-        if intent == "skip" or not text:
-            return None
-
-        used_ids = tuple(data.get("used_logic_ids", []))
-        co_raw = data.get("co_declaration")
-        co_declaration = co_raw if co_raw in ("seer", "medium", "knight") else None
-        # Rough estimate: ~150ms per character for TTS
-        estimated_ms = max(500, len(text) * 150)
-
-        return NpcGeneratedSpeech(
-            text=text,
-            intent=intent,
-            used_logic_ids=used_ids,
-            estimated_duration_ms=estimated_ms,
-            co_declaration=co_declaration,
-        )
+        return _build_speech_from_json(data)
 
 
-__all__ = ["OpenAICompatibleConfig", "OpenAICompatibleNpcGenerator"]
+def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | None:
+    """Map a parsed structured-output dict to ``NpcGeneratedSpeech``.
+
+    Shared by every NPC generator (OpenAI-compat / DeepSeek / Vertex
+    Gemini) so the schema-to-domain projection is validated in one
+    place.  Returns ``None`` when the speech should be declined (empty
+    text or ``intent="skip"``).
+    """
+    text = str(data.get("text", "") or "").strip()
+    intent = str(data.get("intent", "speak"))
+    if intent == "skip" or not text:
+        return None
+
+    raw_ids = data.get("used_logic_ids") or []
+    used_ids = (
+        tuple(str(x) for x in raw_ids) if isinstance(raw_ids, list) else ()
+    )
+    co_raw = data.get("co_declaration")
+    co_declaration = co_raw if co_raw in ("seer", "medium", "knight") else None
+    # Rough estimate: ~150ms per character for TTS
+    estimated_ms = max(500, len(text) * 150)
+
+    return NpcGeneratedSpeech(
+        text=text,
+        intent=intent,
+        used_logic_ids=used_ids,
+        estimated_duration_ms=estimated_ms,
+        co_declaration=co_declaration,
+    )
+
+
+__all__ = [
+    "_RESPONSE_SCHEMA",
+    "OpenAICompatibleConfig",
+    "OpenAICompatibleNpcGenerator",
+    "_build_speech_from_json",
+    "_build_system",
+    "_build_user",
+]

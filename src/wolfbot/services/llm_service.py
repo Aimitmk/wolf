@@ -1,10 +1,23 @@
-"""xAI (Grok) LLM service + LLMAdapter that drives LLM players.
+"""LLM service + LLMAdapter that drives LLM players (xAI Grok, DeepSeek, or Gemini).
 
 - `LLMAction`: the Pydantic shape returned by the model (same schema sent via
-  response_format).
+  response_format on the xAI path; via response_json_schema on the Gemini path;
+  checked post-hoc on the DeepSeek path).
 - `LLMActionDecider` Protocol: low-level "given a persona+context, return an LLMAction".
-- `XAILLMActionDecider`: calls xAI's OpenAI-compat endpoint with structured output.
+- `XAILLMActionDecider`: calls xAI's OpenAI-compat endpoint with json_schema strict mode.
+- `DeepSeekLLMActionDecider`: calls DeepSeek's OpenAI-compat endpoint with json_object
+  + appended JSON contract; thinking mode and reasoning_effort are configurable.
+- `GeminiLLMActionDecider`: calls Vertex AI's Gemini API via the official
+  google-genai SDK with response_json_schema structured output and configurable
+  thinking_level. Authenticates via ADC/IAM (no API key); Vertex AI Express mode
+  is deliberately unsupported.
 - `FakeLLMActionDecider`: deterministic stub for tests/offline dry runs.
+- `make_llm_decider(cfg)`: provider-aware factory; branches on
+  `LLMDeciderConfig.provider`.  ``cfg`` is built by
+  ``MasterSettings.gameplay_decider_config()`` from ``GAMEPLAY_LLM_*``
+  env vars (the symmetrical NPC factory in
+  :mod:`wolfbot.npc.generator_factory` consumes the same config dataclass
+  built from ``NPC_LLM_*`` instead).
 - `LLMAdapter`: implements the LLMAdapter Protocol consumed by game_service; iterates
   LLM seats and submits their actions via GameService.submit_*.
 """
@@ -35,6 +48,7 @@ from wolfbot.domain.rules import (
     legal_guard_targets,
     previous_guard_seat_for_night,
 )
+from wolfbot.llm.decider_config import LLMDeciderConfig
 from wolfbot.llm.prompt_builder import (
     build_system_prompt,
     build_user_context,
@@ -124,6 +138,33 @@ RESPONSE_SCHEMA: dict[str, object] = {
 }
 
 
+# DeepSeek's `json_object` mode requires the system prompt to literally mention
+# "json" and works best with a concrete example. We append this contract to the
+# system prompt for every DeepSeek decision; the contract complements (does not
+# replace) the markdown template loaded by prompt_builder. xAI uses json_schema
+# strict mode and does not need this. Module-level so tests can assert on
+# substrings without instantiating AsyncOpenAI.
+_DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
+
+---
+出力形式 (json):
+必ず次のキーを持つ JSON オブジェクトのみを返してください。前後にテキストや markdown コードフェンスを付けないでください。
+- "intent": "speak" | "vote" | "night_action" | "skip"
+- "public_message": string (最大 400 文字)
+- "target_name": string または null
+- "reason_summary": string (最大 200 文字)
+- "confidence": number (0 から 1)
+
+例:
+{"intent": "speak", "public_message": "私は占い師です。", "target_name": null, "reason_summary": "CO 表明", "confidence": 0.7}
+"""
+
+
+def _deepseek_json_contract(system_prompt: str) -> str:
+    """Append DeepSeek's JSON-mode contract to a system prompt."""
+    return system_prompt + _DEEPSEEK_JSON_CONTRACT_SUFFIX
+
+
 # ---------------------------------------------------------- low-level deciders
 class LLMActionDecider(Protocol):
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction: ...
@@ -159,6 +200,109 @@ class XAILLMActionDecider:
         )
         message = resp.choices[0].message
         content = message.content or "{}"
+        return LLMAction.model_validate_json(content)
+
+
+class DeepSeekLLMActionDecider:
+    """Calls DeepSeek's OpenAI-compatible chat completions endpoint.
+
+    DeepSeek does not support `response_format=json_schema` strict mode, so we
+    use `json_object` and rely on `LLMAction.model_validate_json` for the same
+    Pydantic check the xAI path uses. The system prompt has the JSON contract
+    appended at call time so the model knows the field names without us
+    re-walking the schema.
+
+    `reasoning_content` is intentionally never read or logged — only
+    `message.content` (the public answer) is consumed.
+    """
+
+    def __init__(
+        self,
+        client: AsyncOpenAI,
+        model: str,
+        thinking: Literal["enabled", "disabled"] = "enabled",
+        reasoning_effort: Literal["high", "max"] = "max",
+        timeout: float = 30.0,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
+        self.timeout = timeout
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        full_system = _deepseek_json_contract(system_prompt)
+        kwargs: dict[str, object] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": full_system},
+                {"role": "user", "content": user_context},
+            ],
+            "response_format": {"type": "json_object"},
+            "timeout": self.timeout,
+            "extra_body": {"thinking": {"type": self.thinking}},
+        }
+        if self.thinking == "enabled":
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        # DeepSeek model IDs aren't in the openai SDK's Literal, hence the ignore.
+        resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
+        message = resp.choices[0].message
+        content = message.content or "{}"
+        return LLMAction.model_validate_json(content)
+
+
+class GeminiLLMActionDecider:
+    """Calls Vertex AI's Gemini API through the official google-genai SDK.
+
+    Gemini 3 supports structured outputs via `response_json_schema` plus a
+    configurable `thinking_level` (`minimal` / `low` / `medium` / `high`).
+    Internal thinking and thought signatures are deliberately ignored — only
+    `resp.text` is consumed, mirroring how the DeepSeek path treats
+    `reasoning_content`.
+    """
+
+    def __init__(
+        self,
+        client: object,
+        model: str,
+        thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
+        timeout: float = 30.0,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.thinking_level = thinking_level
+        self.timeout = timeout
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        from google.genai import types
+
+        resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
+            model=self.model,
+            contents=user_context,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_json_schema=RESPONSE_SCHEMA["schema"],
+                thinking_config=types.ThinkingConfig(
+                    # SDK normalizes the string into ThinkingLevel at runtime;
+                    # the type annotation is enum-only, so silence the check.
+                    thinking_level=self.thinking_level,  # type: ignore[arg-type]
+                ),
+            ),
+        )
+        content = resp.text or "{}"
         return LLMAction.model_validate_json(content)
 
 
@@ -712,7 +856,11 @@ class LLMAdapter:
             seat,
             players,
             seats,
-            task_text=task_daytime_speech(game.day_number, discussion_round=discussion_round),
+            task_text=task_daytime_speech(
+                game.day_number,
+                discussion_round=discussion_round,
+                role=player.role,
+            ),
         )
         if action.intent != "speak":
             return
@@ -864,7 +1012,7 @@ class LLMAdapter:
             seat,
             players,
             seats,
-            task_text=task_daytime_speech(game.day_number),
+            task_text=task_daytime_speech(game.day_number, role=player.role),
         )
         if action.intent != "speak":
             return
@@ -1099,21 +1247,138 @@ class LLMAdapter:
 
 
 # ------------------------------------------------------------- factory
-def make_xai_decider(api_key: str, model: str, timeout: float = 30.0) -> XAILLMActionDecider:
-    """Build an xAI-backed decider. Imports openai lazily so tests can skip it."""
+_XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1"
+_DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+
+
+def make_xai_decider(
+    api_key: str,
+    model: str,
+    *,
+    base_url: str | None = None,
+    timeout: float = 30.0,
+) -> XAILLMActionDecider:
+    """Build an OpenAI-Chat-Completions-compatible decider (xAI default).
+
+    ``base_url`` defaults to xAI Grok; override to point at OpenAI, Groq,
+    Together, vLLM, Ollama, or any other strict-json_schema-supporting
+    OpenAI-compat endpoint.  Imports ``openai`` lazily so tests skipping
+    LLM paths don't need the dep installed.
+    """
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url or _XAI_DEFAULT_BASE_URL)
     return XAILLMActionDecider(client=client, model=model, timeout=timeout)
+
+
+def make_deepseek_decider(
+    api_key: str,
+    model: str,
+    *,
+    base_url: str | None = None,
+    thinking: Literal["enabled", "disabled"] = "enabled",
+    reasoning_effort: Literal["high", "max"] = "max",
+    timeout: float = 30.0,
+) -> DeepSeekLLMActionDecider:
+    """Build a DeepSeek-backed decider. Imports openai lazily."""
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url or _DEEPSEEK_DEFAULT_BASE_URL)
+    return DeepSeekLLMActionDecider(
+        client=client,
+        model=model,
+        thinking=thinking,
+        reasoning_effort=reasoning_effort,
+        timeout=timeout,
+    )
+
+
+def make_gemini_decider(
+    project: str,
+    location: str,
+    model: str,
+    *,
+    thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
+    timeout: float = 30.0,
+) -> GeminiLLMActionDecider:
+    """Build a Vertex AI Gemini-backed decider. Imports google-genai lazily.
+
+    Authenticates via Application Default Credentials (gcloud locally,
+    attached service account in production). `timeout` is forwarded as
+    `HttpOptions(timeout=...)` (milliseconds) — the SDK does not accept
+    a per-call `timeout=` like the openai client does.
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(
+        vertexai=True,
+        project=project,
+        location=location,
+        http_options=types.HttpOptions(timeout=int(timeout * 1000)),
+    )
+    return GeminiLLMActionDecider(
+        client=client,
+        model=model,
+        thinking_level=thinking_level,
+        timeout=timeout,
+    )
+
+
+def make_llm_decider(cfg: LLMDeciderConfig) -> LLMActionDecider:
+    """Provider-aware decider factory. Branches on ``cfg.provider``.
+
+    The Settings model_validator that built ``cfg`` guarantees the
+    relevant credential is non-None / non-empty by the time we get here;
+    the asserts are a documentation aid for mypy.
+
+    The same factory is used for both Master's Gameplay LLM (built from
+    ``MasterSettings.gameplay_decider_config()``) and any ad-hoc gameplay
+    decider tests need.  NPC speech generation has its own factory in
+    :mod:`wolfbot.npc.generator_factory` because the NPC schema differs.
+    """
+    if cfg.provider == "xai":
+        assert cfg.api_key is not None  # validated in Settings
+        return make_xai_decider(
+            api_key=cfg.api_key.get_secret_value(),
+            model=cfg.model,
+            base_url=cfg.base_url,
+            timeout=cfg.timeout,
+        )
+    if cfg.provider == "deepseek":
+        assert cfg.api_key is not None  # validated in Settings
+        return make_deepseek_decider(
+            api_key=cfg.api_key.get_secret_value(),
+            model=cfg.model,
+            base_url=cfg.base_url,
+            thinking=cfg.thinking,
+            reasoning_effort=cfg.reasoning_effort,
+            timeout=cfg.timeout,
+        )
+    if cfg.provider == "gemini":
+        assert cfg.vertex_project is not None  # validated in Settings
+        return make_gemini_decider(
+            project=cfg.vertex_project,
+            location=cfg.vertex_location,
+            model=cfg.model,
+            thinking_level=cfg.thinking_level,
+            timeout=cfg.timeout,
+        )
+    raise ValueError(f"unknown provider: {cfg.provider!r}")
 
 
 __all__ = [
     "RESPONSE_SCHEMA",
+    "DeepSeekLLMActionDecider",
     "FakeLLMActionDecider",
+    "GeminiLLMActionDecider",
     "LLMAction",
     "LLMActionDecider",
     "LLMAdapter",
     "XAILLMActionDecider",
+    "make_deepseek_decider",
+    "make_gemini_decider",
+    "make_llm_decider",
     "make_xai_decider",
 ]
 

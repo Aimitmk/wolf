@@ -1,6 +1,6 @@
 # wolfbot
 
-`wolfbot` は、Discord 上で 9 人村の人狼を進行する Python 製 bot です。`/wolf` コマンドでロビー作成から開始、進行確認、延長、強制終了まで操作できます。人間プレイヤーが 9 人に満たない場合は、xAI Grok API を使う LLM プレイヤーが不足人数を補完します。9 人村専用で、人間は主に VC で会話し、LLM を含む村ではメイン text チャンネルの投稿も議論材料として扱います。
+`wolfbot` は、Discord 上で 9 人村の人狼を進行する Python 製 bot です。`/wolf` コマンドでロビー作成から開始、進行確認、延長、強制終了まで操作できます。人間プレイヤーが 9 人に満たない場合は、xAI Grok / DeepSeek / Vertex AI 経由の Google Gemini いずれかを使う LLM プレイヤーが不足人数を補完します。LLM backend は環境変数 `LLM_PROVIDER` で切り替えます (既定は `xai`)。9 人村専用で、人間は主に VC で会話し、LLM を含む村ではメイン text チャンネルの投稿も議論材料として扱います。
 
 ## 主な機能
 
@@ -17,7 +17,7 @@
 - `Python 3.11`
 - `uv`
 - Discord Bot アプリケーション
-- xAI API キー
+- xAI / DeepSeek の API キー、または Vertex AI Gemini を呼べる Google Cloud project と ADC (`LLM_PROVIDER` で選んだもの)
 - 既存のメイン text チャンネル
 - 既存のメイン VC
 - (任意) `tmux` — `scripts/run-bots.sh` で複数 bot をまとめて起動する場合のみ。macOS は `brew install tmux`。
@@ -59,10 +59,13 @@ scripts/run-bots.sh
 
 各 NPC bot は固有のペルソナ (`NPC_PERSONA_KEY`) を起動時に確定します。Master の `/wolf start` (reactive_voice モード) は、online な NPC bot の中から不足席数だけ選び、その bot の persona を席に割り当てます。online な bot が足りないときは開始時にエラー表示します (rounds モードに切り替えるか、bot を増やすことで解決)。
 
-最初は `.env.master` に次の内容を埋めれば、Master 単体で起動に必要な最低限の設定が揃います。
+Master の Gameplay LLM と NPC bot の NPC LLM はそれぞれ独立に provider を切り替えできます (`xai` / `deepseek` / `gemini`)。Master 側は `GAMEPLAY_LLM_*` 系、NPC 側は `NPC_LLM_*` 系の env で制御し、片方を Vertex Gemini にして片方を xAI Grok にする、といった片寄せも可能。Vertex Gemini を選ぶ場合は手順 4 で ADC を構成します。
+
+最初は `.env.master` に次の内容を埋めれば、Master 単体で起動に必要な最低限の設定が揃います (xAI を使う場合)。DeepSeek を使う場合は `GAMEPLAY_LLM_PROVIDER=deepseek` にして `GAMEPLAY_LLM_API_KEY` に DeepSeek のキーを入れてください。Vertex Gemini を使う場合は `GAMEPLAY_LLM_PROVIDER=gemini` にして `GAMEPLAY_LLM_VERTEX_PROJECT` を設定し、`gcloud auth application-default login` などで ADC を構成してください。
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token
+GAMEPLAY_LLM_PROVIDER=xai
 GAMEPLAY_LLM_API_KEY=your_gameplay_llm_api_key
 GAMEPLAY_LLM_MODEL=grok-4-1-fast
 DISCORD_GUILD_ID=123456789012345678
@@ -73,13 +76,20 @@ LOG_LEVEL=INFO
 ```
 
 - `DISCORD_TOKEN`: Discord Developer Portal で作成した bot のトークンを入れます。
-- `GAMEPLAY_LLM_API_KEY`: Gameplay LLM (Master が投票・夜行動・rounds-mode 議論文を判断する LLM) の API キーを入れます。OpenAI Chat Completions 互換のプロバイダなら何でも可。
+- `GAMEPLAY_LLM_PROVIDER`: `xai` / `deepseek` / `gemini` のいずれか。既定は `xai`。
+- `GAMEPLAY_LLM_API_KEY`: `xai` または `deepseek` のとき必須。OpenAI Chat Completions 互換のプロバイダなら何でも可 (xAI Grok / OpenAI / Groq / Together / vLLM / Ollama / DeepSeek)。
+- `GAMEPLAY_LLM_MODEL`: 利用するモデル名。プロバイダのドキュメントに従って指定します。
+- `GAMEPLAY_LLM_BASE_URL`: 自前ホストや別エンドポイントを使う場合のみ上書きします。空で provider 既定を使用。
+- DeepSeek 使用時のみ: `GAMEPLAY_LLM_THINKING` (`enabled` 既定 / `disabled`)、`GAMEPLAY_LLM_REASONING_EFFORT` (`max` 既定 / `high`)。
+- Vertex Gemini 使用時のみ: `GAMEPLAY_LLM_VERTEX_PROJECT` (必須)、`GAMEPLAY_LLM_VERTEX_LOCATION` (`global` 既定)、`GAMEPLAY_LLM_THINKING_LEVEL` (`minimal` / `low` / `medium` / `high` 既定)。認証は ADC/IAM のみ。
 - `DISCORD_GUILD_ID`: bot を動かす Discord サーバーの ID を入れます。
 - `MAIN_TEXT_CHANNEL_ID`: 議論用に使うメイン text チャンネルの ID を入れます。
 - `MAIN_VOICE_CHANNEL_ID`: プレイヤーが会話するメイン VC の ID を入れます。
-- `GAMEPLAY_LLM_MODEL`、`WOLFBOT_DB_PATH`、`LOG_LEVEL` は最初は既定値のままで構いません。
+- `WOLFBOT_DB_PATH`、`LOG_LEVEL` は最初は既定値のままで構いません。
 
-`DISCORD_GUILD_ID`、`MAIN_TEXT_CHANNEL_ID`、`MAIN_VOICE_CHANNEL_ID` にはチャンネル名や `#channel` のようなメンション文字列ではなく、数値の ID を設定してください。どの guild やチャンネルを使うか未定なら、先に手順 3 を済ませてから `.env` を埋めてください。
+NPC bot 側もまったく同じ仕組みで切り替えできます (`NPC_LLM_PROVIDER` / `NPC_LLM_API_KEY` / `NPC_LLM_VERTEX_PROJECT` ...)。詳細は [envs/npc/README.md](envs/npc/README.md) と `envs/npc/.env.npc.example` を参照してください。
+
+`DISCORD_GUILD_ID`、`MAIN_TEXT_CHANNEL_ID`、`MAIN_VOICE_CHANNEL_ID` にはチャンネル名や `#channel` のようなメンション文字列ではなく、数値の ID を設定してください。どの guild やチャンネルを使うか未定なら、先に手順 3 を済ませてから `.env.master` を埋めてください。`GAMEPLAY_LLM_PROVIDER=gemini` で `GAMEPLAY_LLM_VERTEX_PROJECT` の値がまだ決まっていない場合は、先に手順 4 を済ませてから埋めてください。
 
 ### 3. Discord 側の設定を済ませる
 
@@ -114,7 +124,81 @@ LOG_LEVEL=INFO
 17. プレイヤーが bot から DM を受け取れる状態か確認します。`/wolf start` 実行時に DM を開けない参加者がいると開始できません。
 18. `wolf-heaven` と `wolf-wolves` はゲーム作成時に bot が自動で作成し、ゲーム終了時に削除するため、管理者が事前に作る必要はありません。
 
-### 4. bot を起動する
+### 4. (Gemini を使う場合) Vertex AI ADC を構成する
+
+`GAMEPLAY_LLM_PROVIDER=gemini` または `NPC_LLM_PROVIDER=gemini` で起動する場合のみ実施します。`xai` / `deepseek` を使う場合は読み飛ばして手順 5 へ進んでください。`wolfbot` は Vertex AI Express mode と API key 認証には対応せず、ADC/IAM のみをサポートします。
+
+1. Google Cloud project を用意します。既存 project を使うか、Cloud Console (`https://console.cloud.google.com/`) または `gcloud projects create PROJECT_ID` で新規作成します。
+2. その project に billing account を紐付けます。Vertex AI は無料 tier がないため、billing が有効でないと API 呼び出しが reject されます。
+3. gcloud CLI をインストールします (`https://cloud.google.com/sdk/docs/install`)。インストール済みなら `gcloud version` で確認できます。
+4. gcloud をログインして既定 project を設定します。
+
+   ```bash
+   gcloud init
+   gcloud config set project PROJECT_ID
+   ```
+
+5. Vertex AI API を有効化します。`serviceusage.services.enable` 権限が必要で、project の owner/editor なら持っています。
+
+   ```bash
+   gcloud services enable aiplatform.googleapis.com
+   ```
+
+6. bot を実行する Google アカウントに `roles/aiplatform.user` (Vertex AI User) を付与します。owner/editor を持っているなら不要です。
+
+   ```bash
+   gcloud projects add-iam-policy-binding PROJECT_ID \
+     --member="user:YOUR_ACCOUNT@example.com" \
+     --role="roles/aiplatform.user"
+   ```
+
+7. ADC (Application Default Credentials) を構成します。
+
+   ```bash
+   gcloud auth application-default login
+   gcloud auth application-default set-quota-project PROJECT_ID
+   ```
+
+   1 行目はブラウザを開いて Google ログインを行い、credentials を `~/.config/gcloud/application_default_credentials.json` に保存します。2 行目は ADC が請求先として参照する project を書き込みます (未設定だと `Your application has authenticated using end user credentials` の quota project warning が呼び出しごとに出ます)。
+
+8. `.env.master` の値を埋めます (NPC 側で Gemini を使う場合は `envs/npc/.env.<persona>` でも同じことを `NPC_LLM_*` プレフィックスで書きます)。
+
+   ```env
+   GAMEPLAY_LLM_PROVIDER=gemini
+   GAMEPLAY_LLM_VERTEX_PROJECT=PROJECT_ID
+   GAMEPLAY_LLM_VERTEX_LOCATION=global
+   GAMEPLAY_LLM_MODEL=gemini-3-flash-preview
+   ```
+
+   `gemini-3-flash-preview` は location `global` で利用可能です。他 region を指定する場合は Vertex AI の Gemini モデル提供 region 一覧で対応 region を確認してください。
+
+9. (任意) ADC が正しく構成されたか確認します。
+
+   ```bash
+   gcloud auth application-default print-access-token
+   ```
+
+   token が表示されれば ADC は機能しています。`bot を起動する` (手順 5) で実際に LLM 席が動けば end-to-end で動作確認できます。
+
+#### production / 常駐サーバーで動かす場合
+
+VM / container などで常駐させる場合は、user 個人の ADC ではなく service account を使ってください。
+
+1. service account を作成して `roles/aiplatform.user` を付与します。
+
+   ```bash
+   gcloud iam service-accounts create wolfbot-vertex \
+     --display-name="wolfbot Vertex AI runner"
+   gcloud projects add-iam-policy-binding PROJECT_ID \
+     --member="serviceAccount:wolfbot-vertex@PROJECT_ID.iam.gserviceaccount.com" \
+     --role="roles/aiplatform.user"
+   ```
+
+2. 実行環境に応じて service account を attach します。
+   - **GCE / Cloud Run / GKE**: instance attach か workload identity を使えば、bot 側で `GOOGLE_APPLICATION_CREDENTIALS` を設定する必要はありません。ADC が自動で拾います。
+   - **その他 (オンプレ / 別クラウド)**: service account key (JSON) を発行して `GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json` を bot プロセスの環境変数に設定。key file は漏洩リスクが高いので、可能なら attached service account / workload identity を優先してください。
+
+### 5. bot を起動する
 
 ```bash
 uv run wolfbot
@@ -165,8 +249,15 @@ scripts/stop-bots.sh
 | `LLM_DISCUSSION_MODE` | 既定値: `rounds` | LLM 議論モード (`rounds` / `reactive_voice`) |
 | `MASTER_WS_LISTEN` | 既定値: `127.0.0.1:8800` | Master ↔ NPC/voice-ingest WS の listen アドレス |
 | `MASTER_NPC_PSK` | 任意 | NPC bot / voice-ingest の WS 認証用 Pre-Shared Key |
-| `GAMEPLAY_LLM_API_KEY` | 必須 | **Gameplay LLM** — Master が LLM 席の挙動を判断するときに使う LLM。投票判断・夜行動 (襲撃/占い/護衛) は全モードで使用、議論ターン文の生成は rounds モードのみ (reactive_voice モードでは NPC bot が代わりに発話する)。OpenAI Chat Completions 互換のプロバイダなら何でも可 |
-| `GAMEPLAY_LLM_MODEL` | 既定値: `grok-4-1-fast` | Gameplay LLM のモデル名 |
+| `GAMEPLAY_LLM_PROVIDER` | 既定値: `xai` | **Gameplay LLM** の backend: `xai` / `deepseek` / `gemini`。Master が投票・夜行動・rounds-mode 議論文を判断する LLM の切り替え |
+| `GAMEPLAY_LLM_API_KEY` | `xai` / `deepseek` のとき必須 | Gameplay LLM の API キー (OpenAI Chat Completions 互換) |
+| `GAMEPLAY_LLM_MODEL` | 既定値: `grok-4-1-fast` | Gameplay LLM のモデル名 (provider に合わせて変える) |
+| `GAMEPLAY_LLM_BASE_URL` | 任意 | OpenAI 互換エンドポイントの上書き。空のままなら provider 既定 |
+| `GAMEPLAY_LLM_THINKING` | 既定値: `enabled` | DeepSeek thinking mode (`enabled` / `disabled`)。DeepSeek 以外では無視 |
+| `GAMEPLAY_LLM_REASONING_EFFORT` | 既定値: `max` | thinking enabled 時の reasoning effort (`high` / `max`)。DeepSeek 以外では無視 |
+| `GAMEPLAY_LLM_VERTEX_PROJECT` | `gemini` のとき必須 | Vertex AI を使う Google Cloud project ID。認証は ADC/IAM のみ (`gcloud auth application-default login` か attached service account)。Vertex AI Express mode と API key 認証は非対応 |
+| `GAMEPLAY_LLM_VERTEX_LOCATION` | 既定値: `global` | Vertex AI Gemini API の location |
+| `GAMEPLAY_LLM_THINKING_LEVEL` | 既定値: `high` | Gemini 3 Flash thinking level (`minimal` / `low` / `medium` / `high`) |
 | `VOICE_LLM_API_KEY` | 任意 | **Voice LLM** — Master が VC で人間音声を聞いて書き起こし+構造化解析する multimodal LLM。reactive_voice モードでのみ使用 |
 | `VOICE_LLM_MODEL` | 既定値: `gemini-2.0-flash-lite` | Voice LLM のモデル名 (multimodal audio input 対応) |
 
@@ -183,13 +274,21 @@ scripts/stop-bots.sh
 | `MAIN_VOICE_CHANNEL_ID` | 必須 | Master と同じ VC の ID |
 | `MASTER_WS_URL` | 既定値: `ws://127.0.0.1:8800` | Master WS への接続先 URL |
 | `MASTER_NPC_PSK` | 必須 | Master の `MASTER_NPC_PSK` と同値 |
-| `NPC_LLM_API_KEY` | 必須 | **NPC LLM** — この NPC bot が VC で 1 行発言を生成するときに使う LLM。投票・夜行動の判断はしない (Master の Gameplay LLM が担当)。Master の `GAMEPLAY_LLM_API_KEY` と共用しても、別プロバイダのキーでもよい |
-| `NPC_LLM_MODEL` | 既定値: `grok-4-1-fast` | NPC LLM のモデル名 (プロバイダに合わせて変える) |
-| `NPC_LLM_BASE_URL` | 既定値: `https://api.x.ai/v1` | OpenAI Chat Completions 互換エンドポイント。プロバイダ切り替えはここを変える |
+| `NPC_LLM_PROVIDER` | 既定値: `xai` | **NPC LLM** の backend: `xai` / `deepseek` / `gemini`。Master の `GAMEPLAY_LLM_PROVIDER` と独立に切り替えできる |
+| `NPC_LLM_API_KEY` | `xai` / `deepseek` のとき必須 | NPC LLM の API キー。投票・夜行動の判断はしない (Master の Gameplay LLM が担当)。Master のキーと共用しても、別プロバイダのキーでもよい |
+| `NPC_LLM_MODEL` | 既定値: `grok-4-1-fast` | NPC LLM のモデル名 |
+| `NPC_LLM_BASE_URL` | 任意 | OpenAI 互換エンドポイントの上書き。空のままなら provider 既定 |
+| `NPC_LLM_THINKING` | 既定値: `enabled` | DeepSeek thinking mode。DeepSeek 以外では無視 |
+| `NPC_LLM_REASONING_EFFORT` | 既定値: `max` | DeepSeek thinking enabled 時の reasoning effort。DeepSeek 以外では無視 |
+| `NPC_LLM_VERTEX_PROJECT` | `gemini` のとき必須 | Vertex AI を使う Google Cloud project ID。ADC/IAM のみ |
+| `NPC_LLM_VERTEX_LOCATION` | 既定値: `global` | Vertex AI Gemini API の location |
+| `NPC_LLM_THINKING_LEVEL` | 既定値: `high` | Gemini thinking level |
 | `TTS_VOICE_ID` | テンプレで persona 別に既定値設定 | VOICEVOX のスピーカー ID。好みの声に変えたい場合のみ編集 |
 | `VOICEVOX_URL` | 既定値: `http://localhost:50021` | VOICEVOX エンジンの URL |
 | `HEARTBEAT_INTERVAL_S` | 既定値: `5` | ハートビート送信間隔(秒) |
 | `LOG_LEVEL` | 既定値: `INFO` | ログ出力レベル |
+
+`GAMEPLAY_LLM_PROVIDER=gemini` / `NPC_LLM_PROVIDER=gemini` は Vertex AI ADC/IAM 専用です。Vertex AI Express mode と API key 認証は非対応です。
 
 ## Discord 側の準備
 

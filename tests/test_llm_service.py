@@ -1098,6 +1098,171 @@ async def test_ask_system_prompt_contains_2_1_and_1_2_formations_for_any_role(
         assert "1-2" in system_prompt, f"{role.name} missed 1-2"
 
 
+async def test_ask_system_prompt_contains_three_seer_co_elimination_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """3占いCO・2非狼確定で残る 1 人を確定黒級とする消去法は共通ルール経由で
+    全 role の system prompt に届く。非狼確定の厳格さと前提崩壊時の解除も同様。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "残る 1 人の占い師 CO を固定配役上の消去法" in system_prompt, (
+            f"{role.name} missed the elimination rule"
+        )
+        assert "『白判定』と『非狼確定』を混同しない" in system_prompt, (
+            f"{role.name} missed the white-vs-confirmation caveat"
+        )
+        assert "前提が崩れた場合は確定黒扱いを解除" in system_prompt, (
+            f"{role.name} missed the breakdown / re-organize clause"
+        )
+
+
+async def test_ask_system_prompt_villager_seat_includes_three_seer_co_elimination_framing(
+    repo: SqliteRepo,
+) -> None:
+    """村人席は共通ルールに加え、村人視点の framing
+    (投票・発言・進行提案で残る占い師 CO 位置を狼として扱う) も system prompt
+    に届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "残る占い師 CO 位置を投票・発言・進行提案" in system_prompt
+    assert "前提が崩れた瞬間" in system_prompt
+
+
+async def test_ask_system_prompt_contains_co_overflow_rule_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """3 役職横断 CO 数・対抗 CO 超過分推理は共通ルール経由で全 role の
+    system prompt に届く。`CO 数 - 1` の式、超過分合計 3 で非 CO が確白級、
+    超過分合計 0〜2 で非 CO 断定しない、超過分合計 4 以上で再整理という
+    境界条件のすべてを LLM が読める状態にする。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "対抗 CO 超過分" in system_prompt, f"{role.name} missed 対抗 CO 超過分"
+        assert "CO 数 - 1" in system_prompt, f"{role.name} missed CO 数 - 1"
+        assert "超過分合計が 3 に達した場合" in system_prompt, (
+            f"{role.name} missed sum-3 trigger"
+        )
+        assert "村陣営の確白級" in system_prompt, (
+            f"{role.name} missed non-CO 確白級 consequence"
+        )
+        assert "0〜2" in system_prompt, f"{role.name} missed sum 0〜2 caveat"
+        assert "4 以上" in system_prompt, f"{role.name} missed sum 4+ contradiction"
+        assert "配役上の消去法" in system_prompt, (
+            f"{role.name} missed 配役上の消去法 framing"
+        )
+
+
+async def test_ask_system_prompt_contains_co_overflow_examples_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """3-2-1 / 2-2-2 / 3-1-1 / 4-1-1 の短い例も共通ルール経由で全 role に届く。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "3-2-1" in system_prompt, f"{role.name} missed 3-2-1 example"
+        assert "2-2-2" in system_prompt, f"{role.name} missed 2-2-2 example"
+        assert "3-1-1" in system_prompt, f"{role.name} missed 3-1-1 example"
+        assert "4-1-1" in system_prompt, f"{role.name} missed 4-1-1 example"
+
+
+async def test_ask_system_prompt_villager_strategy_includes_co_overflow_action(
+    repo: SqliteRepo,
+) -> None:
+    """村人席の system prompt には、共通ルールに加え、村人視点の運用
+    (CO 群と非 CO 確白を整理し投票先を CO 群に絞る) が届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "対抗 CO 超過分を毎日整理する" in system_prompt
+    assert "投票先を CO 群に絞る" in system_prompt
+
+
+async def test_ask_system_prompt_seer_strategy_avoids_wasting_divination(
+    repo: SqliteRepo,
+) -> None:
+    """占い師席の system prompt には、超過分合計 3 で非 CO 位置が確白級に
+    なった場合に無駄占いせず対抗 CO 群やまだ確定しない位置を優先する旨が届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
+    assert "非 CO 確白級" in system_prompt
+    assert "無駄占い" in system_prompt
+    assert "対抗 CO 群やまだ確定しない位置を優先して占う" in system_prompt
+
+
+async def test_ask_system_prompt_medium_strategy_updates_co_inference(
+    repo: SqliteRepo,
+) -> None:
+    """霊媒師席の system prompt には、霊媒結果で CO 数推理を更新する運用が
+    届く。霊媒白は非狼だけを示す既存ルールと整合する形 (真役職 / 狂人)。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
+    assert "霊媒結果は対抗 CO 超過分の CO 数推理を更新する材料" in system_prompt
+    assert "対抗 CO 群内の狼数を絞り" in system_prompt
+    assert "白なら真役職または狂人の可能性を分け" in system_prompt
+    assert "非 CO 確白の前提が保たれるか" in system_prompt
+
+
+async def test_ask_system_prompt_knight_strategy_protects_non_co_certified_white(
+    repo: SqliteRepo,
+) -> None:
+    """騎士席の system prompt には、超過分合計 3 で生まれた非 CO 確白級と
+    単独で対抗のない真寄り情報役を護衛価値が高いと扱う運用が届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
+    assert "対抗 CO 超過分合計 3 で生まれた非 CO 確白級" in system_prompt
+    assert "単独で対抗のない真寄り情報役は護衛価値が高い" in system_prompt
+
+
+async def test_ask_system_prompt_werewolf_strategy_acknowledges_overcounter_risk(
+    repo: SqliteRepo,
+) -> None:
+    """人狼席の system prompt には、騙りすぎで非 CO が確白級になるリスクを
+    超過分集計の枠組みで認識する運用が届く。相方語彙は wolf 専用として
+    ここに含まれてよい。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "対抗 CO 超過分" in system_prompt
+    assert "超過分合計が 3 に達した時点で" in system_prompt
+    assert "処刑候補が CO 群に集中する" in system_prompt
+    assert "相方と整合する形で選ぶ" in system_prompt
+
+
+async def test_ask_system_prompt_madman_co_overflow_addition_keeps_partner_isolation(
+    repo: SqliteRepo,
+) -> None:
+    """狂人席の system prompt には、同じリスクを公開情報視点で認識する運用が
+    届く一方、wolf-coordination 語彙 (bare `相方` / `襲撃先を揃える`) は
+    引き続き混入してはならず、本物の人狼位置を知っている前提の禁止文言も
+    保持される (既存 leak guard との整合)。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    # 新規 CO-overflow 文言は届く。
+    assert "対抗 CO 超過分" in system_prompt
+    assert "超過分合計が 3 に達した時点で" in system_prompt
+    assert "処刑候補が CO 群に集中するリスクを認識する" in system_prompt
+    assert "公開情報の各 CO 数と残り縄から判断する" in system_prompt
+    # Wolf-coordination 語彙が漏れていないこと。
+    assert not re.search(r"相方(?!候補)", system_prompt), (
+        "bare '相方' (actor mode) leaked into madman system prompt via "
+        "CO-overflow addition"
+    )
+    assert "襲撃先を揃える" not in system_prompt
+    # 既存 prohibition 文言が残っていること。
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt
+
+
 async def test_ask_system_prompt_contains_advanced_guard_vocab_for_any_role(
     repo: SqliteRepo,
 ) -> None:
@@ -2166,3 +2331,282 @@ async def test_ask_system_prompt_wolf_vote_task_extends_with_two_wolf_set(
     assert "相方" in system_prompt
     assert "身内票" in system_prompt
     assert "ライン切り" in system_prompt
+
+
+# ---------------------------------------------------------- provider deciders
+#
+# These tests exercise XAILLMActionDecider / DeepSeekLLMActionDecider /
+# GeminiLLMActionDecider directly against fake clients to verify the exact
+# kwargs sent at the SDK boundary that distinguishes each provider. The rest
+# of this file uses Protocol-level fake deciders, but kwargs assertions need
+# a fake of each SDK's call surface.
+
+
+class _FakeChatCompletions:
+    """Records create() kwargs and returns a canned chat-completion response."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self._content))]
+        )
+
+
+class _FakeChat:
+    def __init__(self, content: str) -> None:
+        self.completions = _FakeChatCompletions(content)
+
+
+class _FakeAsyncOpenAI:
+    """Minimal stand-in for `openai.AsyncOpenAI` — exposes `.chat.completions.create`."""
+
+    def __init__(self, content: str) -> None:
+        self.chat = _FakeChat(content)
+
+
+class _FakeGenAIModels:
+    """Records generate_content() kwargs and returns a canned `.text` payload."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self.calls: list[dict[str, object]] = []
+
+    async def generate_content(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        return SimpleNamespace(text=self._content)
+
+
+class _FakeGenAIAio:
+    def __init__(self, content: str) -> None:
+        self.models = _FakeGenAIModels(content)
+
+
+class _FakeGenAIClient:
+    """Minimal stand-in for `google.genai.Client` — exposes `.aio.models.generate_content`."""
+
+    def __init__(self, content: str) -> None:
+        self.aio = _FakeGenAIAio(content)
+
+
+def _canned_action_json() -> str:
+    return (
+        '{"intent": "speak", "public_message": "test",'
+        ' "target_name": null, "reason_summary": "ok", "confidence": 0.5}'
+    )
+
+
+async def test_xai_decider_sends_json_schema_response_format_no_reasoning_effort() -> None:
+    """The xAI path uses json_schema strict mode and must NOT send DeepSeek-only
+    knobs (`reasoning_effort`, `extra_body`) — Grok rejects them."""
+    from wolfbot.services.llm_service import RESPONSE_SCHEMA, XAILLMActionDecider
+
+    fake = _FakeAsyncOpenAI(_canned_action_json())
+    decider = XAILLMActionDecider(client=fake, model="grok-x", timeout=12.0)  # type: ignore[arg-type]
+    action = await decider.decide("sys", "ctx")
+
+    assert action.intent == "speak"
+    call = fake.chat.completions.calls[0]
+    assert call["model"] == "grok-x"
+    assert call["timeout"] == 12.0
+    assert call["response_format"] == {"type": "json_schema", "json_schema": RESPONSE_SCHEMA}
+    assert "reasoning_effort" not in call
+    assert "extra_body" not in call
+    assert call["messages"] == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "ctx"},
+    ]
+
+
+async def test_deepseek_decider_sends_json_object_thinking_and_reasoning_effort() -> None:
+    """DeepSeek path: json_object response_format, thinking enabled in extra_body,
+    reasoning_effort forwarded, JSON contract appended to system prompt, and
+    sampling controls deliberately omitted."""
+    from wolfbot.services.llm_service import DeepSeekLLMActionDecider
+
+    fake = _FakeAsyncOpenAI(_canned_action_json())
+    decider = DeepSeekLLMActionDecider(
+        client=fake,  # type: ignore[arg-type]
+        model="deepseek-v4-flash",
+        thinking="enabled",
+        reasoning_effort="max",
+        timeout=20.0,
+    )
+    action = await decider.decide("sys", "ctx")
+
+    assert action.intent == "speak"
+    call = fake.chat.completions.calls[0]
+    assert call["model"] == "deepseek-v4-flash"
+    assert call["timeout"] == 20.0
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert call["reasoning_effort"] == "max"
+    for forbidden in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+        assert forbidden not in call
+    messages = call["messages"]
+    assert isinstance(messages, list)
+    sys_msg = messages[0]["content"]
+    assert isinstance(sys_msg, str)
+    assert "sys" in sys_msg
+    assert "json" in sys_msg.lower()
+    assert messages[1] == {"role": "user", "content": "ctx"}
+
+
+async def test_deepseek_decider_omits_reasoning_effort_when_thinking_disabled() -> None:
+    """`thinking=disabled` should still send extra_body for symmetry but must
+    NOT send reasoning_effort (semantically meaningless without thinking)."""
+    from wolfbot.services.llm_service import DeepSeekLLMActionDecider
+
+    fake = _FakeAsyncOpenAI(_canned_action_json())
+    decider = DeepSeekLLMActionDecider(
+        client=fake,  # type: ignore[arg-type]
+        model="deepseek-v4-flash",
+        thinking="disabled",
+        reasoning_effort="high",
+    )
+    await decider.decide("sys", "ctx")
+
+    call = fake.chat.completions.calls[0]
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in call
+
+
+async def test_gemini_decider_sends_response_json_schema_and_thinking_level() -> None:
+    """Gemini path: `response_mime_type=application/json` + `response_json_schema`,
+    `thinking_level` forwarded via `ThinkingConfig`, system prompt as
+    `system_instruction`, user context as `contents`. Sampling controls and
+    DeepSeek-only knobs (`extra_body`, `reasoning_effort`) must NOT be sent."""
+    from wolfbot.services.llm_service import RESPONSE_SCHEMA, GeminiLLMActionDecider
+
+    fake = _FakeGenAIClient(_canned_action_json())
+    decider = GeminiLLMActionDecider(
+        client=fake,
+        model="gemini-3-flash-preview",
+        thinking_level="low",
+        timeout=15.0,
+    )
+    action = await decider.decide("sys", "ctx")
+
+    assert action.intent == "speak"
+    call = fake.aio.models.calls[0]
+    assert call["model"] == "gemini-3-flash-preview"
+    assert call["contents"] == "ctx"
+    config = call["config"]
+    assert config.system_instruction == "sys"
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == RESPONSE_SCHEMA["schema"]
+    # SDK normalizes the string "low" into `ThinkingLevel.LOW` (value="LOW"),
+    # so compare on the case-insensitive value.
+    assert config.thinking_config.thinking_level.value.lower() == "low"
+    for forbidden in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+        assert forbidden not in call
+    assert "extra_body" not in call
+    assert "reasoning_effort" not in call
+
+
+def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provider-aware factory must wire the right decider class for each
+    GAMEPLAY_LLM_PROVIDER value. Construction goes through MasterSettings so
+    the validator runs end-to-end and the projection through
+    ``gameplay_decider_config()`` is exercised. The Gemini branch stubs
+    ``google.genai.Client`` so the test never depends on a live ADC
+    environment."""
+    from pydantic import SecretStr
+
+    from wolfbot.config import MasterSettings
+    from wolfbot.services.llm_service import (
+        DeepSeekLLMActionDecider,
+        GeminiLLMActionDecider,
+        XAILLMActionDecider,
+        make_llm_decider,
+    )
+
+    class _StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", _StubClient)
+
+    base_kwargs: dict[str, object] = {
+        "DISCORD_TOKEN": SecretStr("t"),
+        "DISCORD_GUILD_ID": 1,
+        "MAIN_TEXT_CHANNEL_ID": 2,
+        "MAIN_VOICE_CHANNEL_ID": 3,
+    }
+    s_xai = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **base_kwargs,
+        GAMEPLAY_LLM_PROVIDER="xai",
+        GAMEPLAY_LLM_API_KEY=SecretStr("x"),
+    )
+    assert isinstance(
+        make_llm_decider(s_xai.gameplay_decider_config()), XAILLMActionDecider
+    )
+
+    s_ds = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **base_kwargs,
+        GAMEPLAY_LLM_PROVIDER="deepseek",
+        GAMEPLAY_LLM_API_KEY=SecretStr("d"),
+    )
+    assert isinstance(
+        make_llm_decider(s_ds.gameplay_decider_config()), DeepSeekLLMActionDecider
+    )
+
+    s_gem = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **base_kwargs,
+        GAMEPLAY_LLM_PROVIDER="gemini",
+        GAMEPLAY_LLM_VERTEX_PROJECT="my-project",
+    )
+    assert isinstance(
+        make_llm_decider(s_gem.gameplay_decider_config()), GeminiLLMActionDecider
+    )
+
+
+def test_make_gemini_decider_constructs_vertex_ai_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex AI client construction must pass `vertexai=True`, project,
+    location, and `http_options`, and must NOT pass `api_key` (the SDK
+    rejects api_key + vertexai together). Also verifies the decider
+    captures model/thinking_level/timeout for downstream use."""
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", _StubClient)
+
+    from wolfbot.services.llm_service import make_gemini_decider
+
+    decider = make_gemini_decider(
+        project="my-project",
+        location="global",
+        model="gemini-3-flash-preview",
+        thinking_level="high",
+        timeout=15.0,
+    )
+
+    assert captured["vertexai"] is True
+    assert captured["project"] == "my-project"
+    assert captured["location"] == "global"
+    assert "api_key" not in captured
+    http_options = captured["http_options"]
+    # types.HttpOptions stores timeout in milliseconds.
+    assert getattr(http_options, "timeout", None) == 15000
+    assert decider.model == "gemini-3-flash-preview"
+    assert decider.thinking_level == "high"
+    assert decider.timeout == 15.0

@@ -284,3 +284,17 @@ async def test_llm_adapter_skip_intent_abstains_even_with_non_null_target(repo) 
     await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
     await _drain(adapter)
     assert all(v[2] is None for v in gs.votes)
+
+
+def test_deepseek_json_contract_mentions_json_and_required_fields() -> None:
+    """DeepSeek's `json_object` mode requires the prompt to mention "json" and
+    works best with a literal example. The contract helper is responsible for
+    both, on top of preserving the original system prompt."""
+    from wolfbot.services.llm_service import _deepseek_json_contract
+
+    out = _deepseek_json_contract("base prompt")
+    assert "base prompt" in out
+    assert "json" in out.lower()
+    for field in ("intent", "public_message", "target_name", "reason_summary", "confidence"):
+        assert field in out
+    assert "{" in out and "}" in out

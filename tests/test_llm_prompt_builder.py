@@ -305,6 +305,164 @@ def test_game_rules_block_requires_completing_medium_roller_by_default() -> None
     assert "原則として完走" in block
 
 
+# -------------------------- 3 占い CO + 2 非狼確定 で残る 1 人を確定黒級とする消去法
+def test_game_rules_block_describes_three_seer_co_elimination_inference() -> None:
+    """3-1 で占い CO 3 人のうち 2 人が公開情報上『本物の人狼ではない』と確定したら、
+    残る 1 人を固定配役上の消去法で確定黒級の人狼位置として扱う。"""
+    block = _build_game_rules_block()
+    assert "2 人が公開情報上『本物の人狼ではない』と確定" in block
+    assert "残る 1 人の占い師 CO を固定配役上の消去法" in block
+    assert "確定黒級" in block
+    assert "人狼 2 人固定の配役" in block
+
+
+def test_game_rules_block_distinguishes_white_judgement_from_non_wolf_confirmation() -> None:
+    """『白判定』と『非狼確定』を混同しない。信用未確定の占い CO の白、
+    偽が混じり得る霊媒結果、印象だけの白寄り評価は非狼確定として数えない。"""
+    block = _build_game_rules_block()
+    assert "『白判定』と『非狼確定』を混同しない" in block
+    assert "信用が未確定な占い師 CO が出した白" in block
+    assert "偽が混じり得る霊媒結果" in block
+    assert "印象だけの白寄り評価は非狼確定として数えない" in block
+    assert "単発の白だけで非狼扱いを固定しない" in block
+
+
+def test_game_rules_block_lists_acceptable_non_wolf_confirmation_grounds() -> None:
+    """非狼確定として数えてよい根拠は公開ログ・霊媒結果・襲撃死・
+    真寄り情報役の判定・CO 破綻整理に限る。"""
+    block = _build_game_rules_block()
+    assert "公開ログ・霊媒結果・襲撃死・真寄り情報役の判定" in block
+    assert "CO 破綻整理" in block
+    assert "本物の人狼ではないと示す襲撃死" in block
+
+
+def test_game_rules_block_treats_remaining_seer_co_as_fixed_wolf_position() -> None:
+    """2 人非狼確定が成立したら、残る占い師 CO は『まだ灰の 1 人』ではなく
+    固定配役上の狼位置として投票・発言・進行提案へ反映させる。"""
+    block = _build_game_rules_block()
+    assert "『まだ灰の 1 人』ではなく" in block
+    assert "固定配役上の狼位置として投票・発言・進行提案へ反映" in block
+    assert "残る占い師 CO の処刑提案" in block
+
+
+def test_game_rules_block_releases_fixed_black_when_premise_collapses() -> None:
+    """村陣営騙り・CO 撤回・霊媒師 CO 偽の浮上・非狼確定根拠の破綻など
+    前提が崩れたら、確定黒扱いを解除して時系列から再整理する。"""
+    block = _build_game_rules_block()
+    assert "前提が崩れた場合は確定黒扱いを解除して時系列から再整理" in block
+    assert "村陣営の騙り" in block
+    assert "CO 撤回" in block
+    # 既存の line 108 文言と区別するため『の浮上』『後から』語尾の anchor を使う
+    assert "霊媒師 CO 側が偽だった可能性が後から浮上した状況" in block
+    assert "非狼確定の根拠が後から破綻した場合" in block
+    assert "CO 履歴と判定履歴を時系列で再整理" in block
+
+
+# ----------- 3 役職横断: CO 数・対抗 CO 超過分から非 CO 確白を読む消去法
+# 占い師・霊媒師・騎士の各 CO 数を時系列で整理し、各役職について `CO 数 - 1`
+# を「対抗 CO 超過分」(騙り最低数) として数える。3 役職分の超過分を合計して 3 に
+# 達した場合、人狼 2 + 狂人 1 の狼陣営 3 名が能力役職 CO 群に出切っているため、
+# 能力役職 CO していない位置は配役上の消去法で村陣営の確白級として扱える。
+def test_game_rules_block_defines_co_overflow_term() -> None:
+    """占い師・霊媒師・騎士の各 CO 数を時系列で整理し、CO 数 - 1 を対抗 CO 超過分
+    (騙り最低数) として数える、という用語と式が共通ルールに入っていること。"""
+    block = _build_game_rules_block()
+    assert "対抗 CO 超過分" in block
+    assert "CO 数 - 1" in block
+    assert "騙り最低数" in block
+    assert "真役職は各 1 人だけ" in block
+
+
+def test_game_rules_block_overflow_sum_three_marks_non_co_as_village_white() -> None:
+    """超過分合計が 3 に達した場合、能力役職 CO していない位置を村陣営の確白級
+    として扱う。配役上の消去法で狼陣営 3 名が CO 群に出切ったと数える。"""
+    block = _build_game_rules_block()
+    assert "超過分合計が 3 に達した場合" in block
+    assert "人狼 2 + 狂人 1" in block
+    assert "能力役職 CO していない位置" in block
+    assert "村陣営の確白級" in block
+    assert "配役上の消去法" in block
+
+
+def test_game_rules_block_overflow_sum_three_promotes_independent_single_co() -> None:
+    """超過分合計 3 のとき、対抗のない単独 CO 役職が別にあれば、
+    その単独 CO 者も狼陣営ではないため真役職としてかなり強く扱える。"""
+    block = _build_game_rules_block()
+    assert "対抗のない単独 CO 役職" in block
+    assert "狼陣営ではないため真役職としてかなり強く扱える" in block
+
+
+def test_game_rules_block_distinguishes_overflow_inference_from_madman_white() -> None:
+    """超過分合計 3 による非 CO 確白は、単発の白判定 (狂人白) とは別根拠で、
+    固定配役上の消去法で狼陣営 3 名が出切ったと数える点で村陣営まで強く推せる。"""
+    block = _build_game_rules_block()
+    assert "単発の白判定" in block
+    # 既存の確白語彙ルール (狂人白との整合) と矛盾しない言い回し。
+    assert "固定配役上の消去法で狼陣営 3 名が CO 群に出切った" in block
+    assert "村陣営まで強く推せる" in block
+
+
+def test_game_rules_block_overflow_sum_three_within_group_truth_still_needs_signals() -> None:
+    """対抗 CO 群の中で誰が真役職かまでは、超過分合計 3 だけでは決まらない。
+    判定結果・霊媒結果・投票・襲撃・死亡タイミング・破綻で詰める。"""
+    block = _build_game_rules_block()
+    assert "対抗 CO 群の中で誰が真役職かまでは超過分合計だけでは特定できない" in block
+    # 詰めに使う材料: 4 軸以上の言及。
+    assert "判定結果・霊媒結果・投票・襲撃" in block
+    assert "死亡タイミング" in block
+    assert "破綻" in block
+
+
+def test_game_rules_block_overflow_sum_low_does_not_confirm_non_co() -> None:
+    """超過分合計が 0〜2 の段階では、狼陣営が非 CO や単独 CO に残っている
+    可能性があるため、非 CO 位置を CO 数だけで確白とは断定しない。"""
+    block = _build_game_rules_block()
+    assert "0〜2" in block
+    assert "断定しない" in block
+    assert "狼陣営が非 CO や単独 CO に残っている可能性" in block
+
+
+def test_game_rules_block_overflow_sum_high_triggers_recheck() -> None:
+    """超過分合計が 4 以上に見える場合は固定配役と矛盾する。CO 撤回・
+    同一人物の複数 CO・話題としての CO 語彙の誤読・村騙り・死亡済み CO
+    見落とし・ログ見落としを疑い、確白扱いを保留して時系列を再整理する。"""
+    block = _build_game_rules_block()
+    assert "4 以上" in block
+    assert "固定配役と矛盾" in block
+    assert "CO 撤回" in block
+    assert "同一人物の複数 CO" in block
+    assert "村騙り" in block
+    assert "死亡済み CO 見落とし" in block
+    assert "確白扱いを保留して時系列を再整理する" in block
+
+
+def test_game_rules_block_includes_co_overflow_examples() -> None:
+    """LLM が数え方を誤らないよう、3-2-1 / 2-2-2 / 3-1-1 / 4-1-1 の
+    短い例が共通ルールに入っていること。"""
+    block = _build_game_rules_block()
+    # 数え方の型: 超過分合計 3 / 2 の境界、4-1-1 のような偏ったケース。
+    assert "3-2-1" in block
+    assert "2-2-2" in block
+    assert "3-1-1" in block
+    assert "4-1-1" in block
+    # 計算式が例の中に明示されているか (LLM が暗算を間違えない補助)。
+    assert "2 + 1 + 0 = 3" in block
+    assert "1 + 1 + 1 = 3" in block
+    assert "2 + 0 + 0 = 2" in block
+    assert "3 + 0 + 0 = 3" in block
+
+
+def test_game_rules_block_co_overflow_no_wolf_coordination_leak() -> None:
+    """新規追加した CO 超過分推理ブロックが、wolf-coordination 語彙
+    (bare `相方`, `襲撃先を揃える`) を共通ルールに漏らさないこと。
+    `相方候補` (公開ログからの推理用語) は許容。"""
+    block = _build_game_rules_block()
+    assert not re.search(r"相方(?!候補)", block), (
+        "bare '相方' (actor mode) leaked into shared rules block"
+    )
+    assert "襲撃先を揃える" not in block
+
+
 # ------------------------------------- terminology (推理語彙) in rules block
 # Advanced jinro vocabulary is shared across every LLM seat via the game-rules
 # block (not per-role strategy). These assertions pin the substrings that the
@@ -682,6 +840,17 @@ def test_medium_strategy_routes_seer_co_suspicion_through_corroboration() -> Non
     assert "死亡タイミング" in block
 
 
+def test_medium_strategy_includes_three_seer_co_elimination_inference() -> None:
+    """霊媒師は 3占いCO 盤面で 2 人非狼確定にできるかを毎日整理する。
+    霊媒白を非狼確定として数えてよいのは、自分の霊媒 CO 側が真寄りと
+    十分読める段階で、霊媒結果以外の整合も併せて説明できる場合に限る。"""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "占い師 CO が 3 人" in block
+    assert "自分の霊媒 CO 側が真寄りと十分読める段階" in block
+    assert "霊媒結果以外の整合" in block
+    assert "残る占い師 CO を確定黒級として処刑提案・投票誘導" in block
+
+
 def test_knight_strategy_advises_protection_success_co() -> None:
     """On a peaceful morning (no casualty), the knight should consider CO-ing
     with the guard target attached — and must always attach the guard target
@@ -814,6 +983,17 @@ def test_seer_strategy_covers_proactive_and_counter_co() -> None:
     assert "単独真として扱わせてしまう" in block
 
 
+def test_seer_strategy_includes_three_seer_co_elimination_for_targeting() -> None:
+    """占い師は 3占いCO・自分以外の 2 人が非狼確定の盤面で、夜の占い対象選びで
+    残る占い師 CO 位置の確認や相方候補ペア仮説を崩す方向を優先する。
+    非狼確定として数える根拠は説明可能なものに限る。"""
+    block = _build_strategy_block(Role.SEER)
+    assert "占い師 CO が 3 人" in block
+    assert "自分以外の 2 人が公開情報上で非狼確定" in block
+    assert "相方候補ペア仮説を崩す方向" in block
+    assert "霊媒結果・襲撃死・CO 破綻など説明可能な根拠に限る" in block
+
+
 def test_medium_strategy_covers_post_execution_publication_and_counter_co() -> None:
     """Medium must publish results the day after an execution and must run
     counter-CO against a fake medium with time-ordered history framing while
@@ -877,6 +1057,16 @@ def test_knight_strategy_warns_against_sutekogo_overuse() -> None:
     assert "毎夜の既定行動にしない" in block
 
 
+def test_knight_strategy_includes_three_seer_co_elimination_for_guard_choice() -> None:
+    """騎士は 3占いCO・2 人非狼確定が成立したら、残る 1 人からの黒判定で
+    守るべき真情報役・確白寄りと、次夜の本命護衛余地を比較する。
+    前提が崩れたら護衛方針も再整理する。"""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "占い師 CO が 3 人" in block
+    assert "次夜の本命護衛余地" in block
+    assert "前提が崩れたら護衛方針も再整理" in block
+
+
 def test_villager_strategy_anchors_in_checklist() -> None:
     """Villager must still forbid CO fakes AND must anchor speech in the
     shared enthusiast checklist (CO / divination / vote histories)."""
@@ -915,6 +1105,166 @@ def test_villager_co_prohibition_does_not_leak_to_other_roles(role: Role) -> Non
     block = _build_strategy_block(role)
     assert "村人CO" not in block
     assert "素村CO" not in block
+
+
+def test_villager_strategy_includes_three_seer_co_elimination_inference() -> None:
+    """村人は 3占いCO・2非狼確定の盤面で、残る占い師 CO 位置を投票・発言・
+    進行提案で固定配役上の狼位置として扱う方針を持つ。非狼確定の数え方の
+    厳格さと前提崩壊時の再整理も明示。"""
+    block = _build_strategy_block(Role.VILLAGER)
+    assert "占い師 CO が 3 人" in block
+    assert "残る占い師 CO 位置を投票・発言・進行提案" in block
+    assert "印象白や信用未確定 CO の白判定では数えず" in block
+    assert "前提が崩れた瞬間" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_three_seer_co_elimination_role_framings_do_not_cross_leak(role: Role) -> None:
+    """役職別 framing 文言が他 role の strategy block へ流れ込まないこと。
+    共通ルール本体は `_build_game_rules_block` 側にあるため、strategy 側の
+    役職別フレーズが横滑りしてはいけない。"""
+    block = _build_strategy_block(role)
+    villager_phrase = "残る占い師 CO 位置を投票・発言・進行提案"
+    seer_phrase = "相方候補ペア仮説を崩す方向"
+    medium_phrase = "残る占い師 CO を確定黒級として処刑提案・投票誘導"
+    knight_phrase = "次夜の本命護衛余地"
+    if role is not Role.VILLAGER:
+        assert villager_phrase not in block, (
+            f"villager-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+    if role is not Role.SEER:
+        assert seer_phrase not in block, (
+            f"seer-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+    if role is not Role.MEDIUM:
+        assert medium_phrase not in block, (
+            f"medium-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+    if role is not Role.KNIGHT:
+        assert knight_phrase not in block, (
+            f"knight-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+
+
+# ----------- 3 役職横断 CO 数・対抗 CO 超過分 推理: role 別運用面の追加
+# 共通ルール側の数学的整理 (CO 数 - 1 を超過分として 3 役職分集計、合計 3 で
+# 非 CO 位置が確白級) は `_build_game_rules_block` で全 seat に届く。
+# 各 role strategy には「その役職ならどう使うか」だけを短く追加する。
+def test_villager_strategy_uses_co_overflow_inference() -> None:
+    """村人は公開ログから占い師・霊媒師・騎士の CO 数と対抗 CO 超過分を
+    毎日整理し、超過分合計 3 なら能力役職 CO していない位置を村陣営の
+    確白級として扱い、投票先を CO 群に絞る。"""
+    block = _build_strategy_block(Role.VILLAGER)
+    assert "対抗 CO 超過分を毎日整理する" in block
+    assert "超過分合計が 3 に達したら能力役職 CO していない位置を村陣営の確白級" in block
+    assert "投票先を CO 群に絞る" in block
+    # 0〜2 と 4 以上の境界条件も村人 framing に含まれていること。
+    assert "超過分合計が 0〜2 のうちは" in block
+    assert "超過分合計が 4 以上に見えたら" in block
+
+
+def test_seer_strategy_avoids_wasting_divination_on_non_co_white() -> None:
+    """占い師は超過分合計 3 で非 CO 位置が確白級になった場合、そこを
+    無駄占いせず、対抗 CO 群やまだ確定しない位置を優先して占う。"""
+    block = _build_strategy_block(Role.SEER)
+    assert "対抗 CO 超過分合計が 3 に達して能力役職 CO していない位置が非 CO 確白級" in block
+    assert "無駄占い" in block
+    assert "対抗 CO 群やまだ確定しない位置を優先して占う" in block
+
+
+def test_medium_strategy_updates_co_inference_via_medium_result() -> None:
+    """霊媒師は霊媒結果で CO 数推理を更新する。処刑された CO 者が黒なら
+    対抗 CO 群内の狼数を絞り、白なら真役職または狂人の可能性を分け、
+    非 CO 確白の前提が保たれるかを確認する (霊媒白=非狼のみのルール維持)。"""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "霊媒結果は対抗 CO 超過分の CO 数推理を更新する材料" in block
+    assert "対抗 CO 群内の狼数を絞り" in block
+    # 霊媒白は非狼だけを示す既存ルールとの整合: 真役職 / 狂人 を分ける。
+    assert "白なら真役職または狂人の可能性を分け" in block
+    assert "非 CO 確白の前提が保たれるか" in block
+
+
+def test_knight_strategy_protects_non_co_certified_white() -> None:
+    """騎士は超過分合計 3 で生まれた非 CO 確白級や、単独で対抗のない真寄り
+    情報役を護衛価値が高い対象として扱う。連続護衛不可・襲撃読み・
+    CO 時の説明可能性も合わせて判断。"""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "対抗 CO 超過分合計 3 で生まれた非 CO 確白級" in block
+    assert "単独で対抗のない真寄り情報役は護衛価値が高い" in block
+    # 既存制約 (連続護衛不可・襲撃読み・CO 時の説明可能性) との整合。
+    assert "連続護衛不可" in block
+    assert "襲撃読み" in block
+    assert "CO 時の説明可能性" in block
+
+
+def test_werewolf_strategy_acknowledges_overcounter_risk() -> None:
+    """人狼は能力役職 CO を増やしすぎると、対抗 CO 超過分合計が 3 に達した
+    時点で非 CO 位置が村陣営の確白級として扱われ、処刑候補が CO 群に
+    集中するリスクを認識する。騙りに出るか潜伏するかは CO 数と残り縄を
+    見て、相方と整合する形で選ぶ (相方語彙は wolf 専用)。"""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "対抗 CO 超過分" in block
+    assert "超過分合計が 3 に達した時点で" in block
+    assert "村陣営の確白級として扱われ" in block
+    assert "処刑候補が CO 群に集中する" in block
+    assert "相方と整合する形で選ぶ" in block
+
+
+def test_madman_strategy_acknowledges_overcounter_risk_without_partner_vocab() -> None:
+    """狂人は同じリスクを公開情報視点で認識する。本物の人狼位置を
+    知っている前提や bare `相方` (actor mode) を使ってはいけない。
+    `相方候補` (公開ログからの推理用語) は引き続き許容。"""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "対抗 CO 超過分" in block
+    assert "超過分合計が 3 に達した時点で" in block
+    assert "処刑候補が CO 群に集中するリスクを認識する" in block
+    # 公開情報視点であることが明示されていること。
+    assert "公開情報の各 CO 数と残り縄から判断する" in block
+    # Wolf-coordination 語彙の漏れがないこと (既存 leak guard と同形)。
+    assert not re.search(r"相方(?!候補)", block), (
+        "bare '相方' (actor mode) leaked into madman CO-overflow addition"
+    )
+    assert "襲撃先を揃える" not in block
+    # 既存 prohibition 文言は残ること。
+    assert "人狼位置を知っている前提で話してはならない" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_co_overflow_role_framings_do_not_cross_leak(role: Role) -> None:
+    """各 role の CO 超過分 framing 文言が他 role の strategy block へ
+    流れ込まないこと。共通ルールの数学的整理は `_build_game_rules_block`
+    側にあるため、strategy 側の役職別フレーズが横滑りしてはいけない。"""
+    block = _build_strategy_block(role)
+    villager_phrase = "投票先を CO 群に絞る"
+    seer_phrase = "非 CO 確白級になった場合、そこを無駄占いせず"
+    medium_phrase = "霊媒結果は対抗 CO 超過分の CO 数推理を更新する材料"
+    knight_phrase = "対抗 CO 超過分合計 3 で生まれた非 CO 確白級"
+    werewolf_phrase = "相方と整合する形で選ぶ"
+    madman_phrase = "公開情報の各 CO 数と残り縄から判断する"
+    if role is not Role.VILLAGER:
+        assert villager_phrase not in block, (
+            f"villager-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.SEER:
+        assert seer_phrase not in block, (
+            f"seer-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.MEDIUM:
+        assert medium_phrase not in block, (
+            f"medium-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.KNIGHT:
+        assert knight_phrase not in block, (
+            f"knight-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.WEREWOLF:
+        assert werewolf_phrase not in block, (
+            f"werewolf-framing of CO-overflow inference leaked into {role.name}"
+        )
+    if role is not Role.MADMAN:
+        assert madman_phrase not in block, (
+            f"madman-framing of CO-overflow inference leaked into {role.name}"
+        )
 
 
 # --------------------------------- wolf night-attack guard-aware vocabulary
@@ -1068,20 +1418,25 @@ def test_task_wolf_chat_includes_guard_and_knight_candidate_reasons() -> None:
 
 # ----------------------------------------------------- daytime speech task
 def test_task_daytime_speech_default_omits_first_round_rule() -> None:
-    """Default call (no `discussion_round`) — runoff and any backward-compat
-    caller — must NOT include the day-2+ first-round mandatory result rule."""
+    """Default call (no `discussion_round`, no `role`) — runoff and any
+    backward-compat caller — must NOT include the day-2+ first-round mandatory
+    result rule, NOR the day-1 wolf-side fake-CO selection nudge."""
     text = task_daytime_speech(2)
     assert "1 巡目" not in text
     assert "前夜の能力結果" not in text
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
 
 
 def test_task_daytime_speech_day1_round1_omits_day2_rule() -> None:
     """Day 1 round 1 must NOT include the day-2+ rule. Day 1 first results are
     already constrained by NIGHT_0 random white / day-1 first white in the
-    game rules block; the day-2+ rule does not apply on day 1."""
+    game rules block; the day-2+ rule does not apply on day 1. The default
+    (no `role`) call must also not include the wolf-side fake-CO selection
+    nudge — only WEREWOLF / MADMAN callers see it."""
     text = task_daytime_speech(1, discussion_round=1)
     assert "1 巡目" not in text
     assert "前夜の能力結果" not in text
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
 
 
 def test_task_daytime_speech_day2_round2_omits_first_round_rule() -> None:
@@ -1187,6 +1542,93 @@ def test_madman_fake_strategy_acknowledges_misfire_and_legal_constraints() -> No
     # Existing leak guard: bare 相方 absent; 相方候補 (inference) allowed.
     assert not re.search(r"相方(?!候補)", block)
     assert "襲撃先を揃える" not in block
+
+
+# ------------------------------------------ day 1 medium fake-CO / 2-2 / 1-2 layout
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_offers_medium_fake_as_day1_option(role: Role) -> None:
+    """Wolf and madman must teach day-1 medium fake-CO as a real choice
+    alongside seer fake and 潜伏 — not just a day-2+ post-hoc move. The
+    existing day-2+ post-hoc framing must remain (no regression)."""
+    block = _build_strategy_block(role)
+    assert "霊媒師騙りも day 1 の選択肢" in block
+    assert "占い師騙り" in block
+    assert "潜伏" in block
+    assert "対抗占い師 CO が出ている場合は、day 2 以降に霊媒師騙り" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_frames_2_2_and_1_2_as_engineerable_layouts(role: Role) -> None:
+    """Wolf-side strategy must frame 2-2 and 1-2 as boards the wolf side can
+    engineer through medium fake-CO, not just descriptive labels. The
+    creation-mode form `2-2 を作` is the directive anchor."""
+    block = _build_strategy_block(role)
+    assert "1-2" in block
+    assert "2-2 を作" in block
+    assert "霊媒ローラー" in block
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_fake_strategy_day1_medium_co_does_not_publish_result(role: Role) -> None:
+    """day-1 medium fake-CO must explicitly NOT publish an execution result —
+    no execution has happened yet. This composes with (does not replace) the
+    existing day-2+ '前日処刑者だけに結果を出す' rule."""
+    block = _build_strategy_block(role)
+    assert "day 1 に霊媒師騙りで CO する場合" in block
+    assert "まだ処刑が発生していない" in block
+    assert "存在しない初日結果を捏造しない" in block
+
+
+def test_madman_medium_fake_carries_misfire_awareness_for_both_colors() -> None:
+    """Madman-only: the medium-fake guidance must say even when picking
+    medium-black or medium-white, the madman never knows real wolf positions,
+    so 誤爆 / 誤支援 risk persists for both colors. Wolf-coordination
+    vocabulary stays absent."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "霊媒黒で本物の狼を切ってしまう" in block
+    assert "霊媒白で真占いを補強してしまう" in block
+    assert "誤爆" in block
+    assert "誤支援" in block
+    # Leak guard preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_layout_creation_directives_only_in_wolf_madman_strategy(role: Role) -> None:
+    """The wolf-side directive form '2-2 を作' / '1-2 を作' / '霊媒師騙りを選'
+    is creation-mode wolf-side guidance and must appear only in WEREWOLF and
+    MADMAN strategies — never in SEER / MEDIUM / KNIGHT / VILLAGER. The
+    descriptive board labels in the shared rules block are not wolf-side
+    directives and are unaffected by this guard."""
+    block = _build_strategy_block(role)
+    if role in (Role.WEREWOLF, Role.MADMAN):
+        # Creation directive must reach wolf side.
+        assert "2-2 を作" in block
+    else:
+        assert "2-2 を作" not in block, f"'2-2 を作' (creation directive) leaked into {role.name}"
+        assert "1-2 を作" not in block, f"'1-2 を作' (creation directive) leaked into {role.name}"
+        assert "霊媒師騙りを選" not in block, (
+            f"'霊媒師騙りを選' (wolf-side selection directive) leaked into {role.name}"
+        )
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round1_wolf_or_madman_offers_medium_fake_as_option(
+    role: Role,
+) -> None:
+    """At day-1 round-1 only, the daytime speech task injects a 3-way fake-CO
+    selection nudge for wolf and madman — a per-call task-level reminder that
+    re-surfaces the day-1 selection at the moment of speech generation.
+    Default (no role) and other rounds must not include it (verified by
+    sibling default-omission tests)."""
+    text = task_daytime_speech(1, discussion_round=1, role=role)
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" in text
+    assert "1-2" in text
+    assert "2-2 を作" in text
+    # Leak-guard regression — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
 
 
 # ------------------------------------------------ seer night-divination axes

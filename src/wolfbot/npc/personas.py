@@ -25,7 +25,7 @@ from wolfbot.llm.persona_base import (
 NPC_PERSONAS: tuple[Persona, ...] = (
     Persona(
         key="setsu",
-        display_name="🟡セツ",
+        display_name="🌙セツ",
         style_guide=(
             "真面目で責任感が強い。議論を整理し、論点を前に進めようとする。"
             "丁寧語で落ち着いた口調。混乱が見えたら要約と整理を提案する。"
@@ -72,7 +72,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
     ),
     Persona(
         key="sq",
-        display_name="🔴SQ",
+        display_name="🍎SQ",
         style_guide=(
             "軽快で社交的。ノリが良いが打算的な面も出す。"
             "くだけた口調で相手を立てつつ場を和ませようとする。"
