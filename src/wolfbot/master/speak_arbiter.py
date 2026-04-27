@@ -502,14 +502,25 @@ class SpeakArbiter:
         if state is None:
             return
 
-        # Pick the first online NPC whose assigned seat is alive and silent.
+        # Pick the next NPC. Priority: seats that have not yet spoken in this
+        # phase (PublicDiscussionState.silent_seats) before seats that have.
+        # Within each bucket, lowest assigned_seat wins. Without this two-key
+        # sort the picker would always return the lowest-seat NPC, monopolizing
+        # the discussion in pure-NPC games where no human speech triggers
+        # rotation. Once every alive NPC has spoken once the silent set is
+        # empty and the bucket becomes a no-op — order falls back to seat-no.
         online = self.registry.all_online()
-        for entry in sorted(online, key=lambda e: e.assigned_seat or 99):
+
+        def _pick_key(e: object) -> tuple[int, int]:
+            seat = getattr(e, "assigned_seat", None) or 99
+            in_silent = 0 if seat in state.silent_seats else 1
+            return (in_silent, seat)
+
+        for entry in sorted(online, key=_pick_key):
             if entry.assigned_seat is None or entry.game_id != game_id:
                 continue
             if entry.assigned_seat not in state.alive_seat_nos:
                 continue
-            # Prefer silent seats, but fall back to any alive NPC.
             await self.dispatch_request(
                 state=state,
                 candidate_npc_id=entry.npc_id,

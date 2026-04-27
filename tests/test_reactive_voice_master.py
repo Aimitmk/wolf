@@ -445,6 +445,107 @@ async def test_rebuild_public_state_from_master_restart(repo: SqliteRepo) -> Non
     assert state.alive_seat_nos == frozenset({1, 2})
 
 
+async def test_try_dispatch_next_prefers_silent_seat_over_lowest(
+    repo: SqliteRepo,
+) -> None:
+    """In pure-NPC games the only rotation signal is `silent_seats`. Without
+    silent-first ordering, `try_dispatch_next` would always pick the lowest
+    `assigned_seat` and the NPC at seat 2 would monopolize. The picker must
+    prefer NPCs whose seats are still in `silent_seats`.
+    """
+    g = Game(
+        id="rv-pick",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="Alice", discord_user_id="u1", is_llm=False, persona_key=None),
+        Seat(seat_no=2, display_name="セツ", discord_user_id=None, is_llm=True, persona_key="setsu"),
+        Seat(seat_no=3, display_name="ジーナ", discord_user_id=None, is_llm=True, persona_key="gina"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 2, Role.SEER)
+    await repo.set_player_role(g.id, 3, Role.VILLAGER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    # Seed phase baseline so PublicDiscussionState has alive_seat_nos {1,2,3}.
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3],
+            created_at_ms=1,
+        )
+    )
+    # Seat 2 has already spoken — silent_seats is now {1, 3}. Seat 1 is human
+    # (no assigned_seat in registry), so the only silent NPC seat is 3.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=2,
+            text="seat 2 already spoke",
+            created_at_ms=2,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    buf2: list[str] = []
+    buf3: list[str] = []
+    registry.register(
+        npc_id="npc_setsu",
+        discord_bot_user_id="bot2",
+        supported_voices=(),
+        version="1",
+        send=_captured_send(buf2),
+        now_ms=1000,
+        persona_key="setsu",
+    )
+    registry.register(
+        npc_id="npc_gina",
+        discord_bot_user_id="bot3",
+        supported_voices=(),
+        version="1",
+        send=_captured_send(buf3),
+        now_ms=1000,
+        persona_key="gina",
+    )
+    registry.assign("npc_setsu", seat=2, game_id=g.id, phase_id=phase_id)
+    registry.assign("npc_gina", seat=3, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=registry,
+        discussion=discussion,
+        now_ms=lambda: 1500,
+    )
+    await arb.try_dispatch_next(g.id)
+
+    # Without the silent-first fix, the lowest-seat NPC (seat 2) would have
+    # received the SpeakRequest. With the fix, only seat 3 (the silent NPC)
+    # gets it.
+    assert buf3, "silent NPC at seat 3 must be picked"
+    assert not buf2, "non-silent NPC at seat 2 must not be picked"
+
+
 def test_logic_packet_builder_includes_co_claims_in_summary() -> None:
     state = PublicDiscussionState(
         game_id="g",
