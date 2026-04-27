@@ -20,6 +20,9 @@ envs/npc/.env.*
 *.db-shm
 .DS_Store
 
+# scripts/run-bots.sh writes per-bot logs here.
+logs/
+
 # for git push
 .claude/
 

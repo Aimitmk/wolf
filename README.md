@@ -20,6 +20,7 @@
 - xAI API キー
 - 既存のメイン text チャンネル
 - 既存のメイン VC
+- (任意) `tmux` — `scripts/run-bots.sh` で複数 bot をまとめて起動する場合のみ。macOS は `brew install tmux`。
 
 ## セットアップ
 
@@ -115,6 +116,34 @@ uv run wolfbot
 ```
 
 起動後、`/wolf` コマンドが設定した guild に同期されます。
+
+### 5. (任意) Master + 複数 NPC bot を tmux でまとめて起動
+
+reactive_voice モードで Master と複数の NPC bot を一度に起動したい場合、`scripts/run-bots.sh` が tmux で 1 ウィンドウ = 1 bot のセッションを作ります。macOS 前提 (Linux でも動作)、`tmux` が必要 (`brew install tmux`)。
+
+```bash
+# envs/npc/.env.<persona> が存在するペルソナを自動検出して全部起動
+scripts/run-bots.sh
+
+# 個別指定したい場合
+scripts/run-bots.sh setsu gina sq raqio
+
+# 既に同名セッションがあるときは停止して作り直す
+FORCE=1 scripts/run-bots.sh
+
+# セッションに入って各ウィンドウのログを見る
+tmux attach -t wolfbot
+#   prefix + n / p          : 次/前ウィンドウ
+#   prefix + 0..9 / w       : 番号 / 一覧から選択
+#   prefix + d              : デタッチ (bot は動き続ける)
+
+# 全部止める
+scripts/stop-bots.sh
+```
+
+各 bot のログは tmux ペインと `logs/<persona>.log` の両方にストリームされます。プロセスが落ちてもウィンドウは残るので、終了直後の出力を確認できます。
+
+**人間 0 / NPC bot 9 体だけのゲーム**を観戦したい場合: `envs/npc/.env.<persona>` を 9 ペルソナぶん用意して `scripts/run-bots.sh` で全部起動 → Discord で `/wolf create` → `/wolf join` は打たず `/wolf start` で人数不足の 9 席すべてが NPC bot で埋まります。
 
 ## 環境変数一覧
 
