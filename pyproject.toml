@@ -13,10 +13,12 @@ dependencies = [
     "httpx>=0.27",
     "tenacity>=8.2",
     "websockets>=12",
+    "discord-ext-voice-recv>=0.5.2a179",
 ]
 
 [project.scripts]
 wolfbot = "wolfbot.main:cli"
+wolfbot-npc = "wolfbot.npc_bot_main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -38,9 +40,7 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
-filterwarnings = [
-    "ignore::DeprecationWarning:audioop",
-]
+filterwarnings = ["ignore::DeprecationWarning:audioop"]
 
 [tool.ruff]
 line-length = 100
@@ -49,16 +49,20 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = [
-    "E", "F", "W",       # pycodestyle / pyflakes
-    "I",                 # isort
-    "B",                 # bugbear
-    "UP",                # pyupgrade
-    "SIM",               # simplify
-    "RUF",               # ruff-specific
-    "TID",               # tidy imports
+    "E",
+    "F",
+    "W", # pycodestyle / pyflakes
+    "I", # isort
+    "B", # bugbear
+    "UP", # pyupgrade
+    "SIM", # simplify
+    "RUF", # ruff-specific
+    "TID", # tidy imports
+
 ]
 ignore = [
-    "E501",              # line length handled by formatter
+    "E501", # line length handled by formatter
+
 ]
 
 [tool.ruff.lint.per-file-ignores]

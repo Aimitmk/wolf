@@ -16,3 +16,10 @@ build/
 
 # for git push
 .claude/
+
+# Specflow local env
+.specflow/config.env
+.specflow/runs/
+.specflow/worktrees/
+.codex
+openspec

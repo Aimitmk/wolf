@@ -65,6 +65,7 @@ class SpeakArbiterConfig:
     request_ttl_ms: int = 8000
     playback_deadline_ms: int = 12_000
     heartbeat_timeout_ms: int = 5000
+    vad_finalization_timeout_ms: int = 4000
 
 
 @dataclass
@@ -105,22 +106,61 @@ class SpeakArbiter:
         # PlaybackAuthorized and the closing tts_failed / playback_finished /
         # playback_failed event. While non-empty, no new SpeakRequest is sent.
         self._active_playback: set[str] = set()
+        # Playback deadline tracking: request_id → deadline_ms.
+        self._playback_deadlines: dict[str, int] = {}
         # human_currently_speaking gate; the WS handler flips this on
         # vad_speech_started / vad_speech_ended (handled in voice-ingest
         # plumbing in Bundle 8). Empty by default.
         self._human_speaking_segments: set[str] = set()
+        # Segments awaiting STT finalization. The human-speaking gate stays
+        # closed for a segment until speech_event_payload or stt_failed
+        # arrives (or vad_finalization_timeout_ms elapses).
+        # segment_id → deadline_ms
+        self._pending_stt_segments: dict[str, int] = {}
 
     # ------------------------------------------------------------- gates
 
     def mark_human_speaking(self, segment_id: str) -> None:
         self._human_speaking_segments.add(segment_id)
 
+    def mark_pending_stt(self, segment_id: str) -> None:
+        """VAD ended — keep gate held until STT finalizes or times out."""
+        deadline = self._now_ms() + self.config.vad_finalization_timeout_ms
+        self._pending_stt_segments[segment_id] = deadline
+
+    def finalize_stt(self, segment_id: str) -> None:
+        """STT completed (payload or failure) — release the segment gate."""
+        self._pending_stt_segments.pop(segment_id, None)
+        self._human_speaking_segments.discard(segment_id)
+
     def clear_human_speaking(self, segment_id: str) -> None:
         self._human_speaking_segments.discard(segment_id)
 
     def is_blocked(self) -> str | None:
+        now = self._now_ms()
+        # Sweep expired STT finalization deadlines — release segments whose
+        # STT never arrived within vad_finalization_timeout_ms.
+        expired_stt = [
+            sid for sid, dl in self._pending_stt_segments.items() if now > dl
+        ]
+        for sid in expired_stt:
+            log.info("stt_finalization_timeout segment=%s", sid)
+            self._pending_stt_segments.pop(sid, None)
+            self._human_speaking_segments.discard(sid)
         if self._human_speaking_segments:
             return "human_currently_speaking"
+        # Sweep expired playback deadlines — close rows whose NPC never
+        # reported tts_failed / playback_finished / playback_failed.
+        expired_pb = [
+            rid for rid, dl in self._playback_deadlines.items() if now > dl
+        ]
+        for rid in expired_pb:
+            log.info("playback_deadline_exceeded request=%s", rid)
+            self._active_playback.discard(rid)
+            self._playback_deadlines.pop(rid, None)
+            self._pending.pop(rid, None)
+            # DB close is best-effort — fire-and-forget in the sync check.
+            # The actual row closure is done in _sweep_expired_playback.
         if self._active_playback:
             return "queue_busy"
         return None
@@ -267,7 +307,8 @@ class SpeakArbiter:
                 try:
                     await entry.send(payload)
                 except Exception:
-                    log.exception("speak_result_response_send_failed npc=%s", result.npc_id)
+                    log.exception(
+                        "speak_result_response_send_failed npc=%s", result.npc_id)
 
         async def _record_rejection(reason: str) -> None:
             await self.repo.insert_npc_speak_result(
@@ -346,6 +387,7 @@ class SpeakArbiter:
             playback_deadline_ms=deadline,
         )
         self._active_playback.add(result.request_id)
+        self._playback_deadlines[result.request_id] = deadline
         authorized = PlaybackAuthorized(
             ts=now,
             trace_id=result.trace_id,
@@ -382,6 +424,7 @@ class SpeakArbiter:
             failure_reason=msg.failure_reason,
         )
         self._active_playback.discard(msg.request_id)
+        self._playback_deadlines.pop(msg.request_id, None)
         self._pending.pop(msg.request_id, None)
 
     async def handle_playback_finished(self, msg: PlaybackFinished) -> None:
@@ -392,6 +435,7 @@ class SpeakArbiter:
             failure_reason=None,
         )
         self._active_playback.discard(msg.request_id)
+        self._playback_deadlines.pop(msg.request_id, None)
         self._pending.pop(msg.request_id, None)
 
     async def handle_playback_failed(self, msg: PlaybackFailed) -> None:
@@ -403,9 +447,31 @@ class SpeakArbiter:
             failure_reason=msg.failure_reason,
         )
         self._active_playback.discard(msg.request_id)
+        self._playback_deadlines.pop(msg.request_id, None)
         self._pending.pop(msg.request_id, None)
 
     # ------------------------------------------------------------- auto-dispatch
+
+    async def _sweep_expired_playback(self) -> None:
+        """Close DB rows for playback windows that exceeded their deadline."""
+        now = self._now_ms()
+        expired = [
+            rid for rid, dl in list(self._playback_deadlines.items()) if now > dl
+        ]
+        for rid in expired:
+            log.info("playback_deadline_enforced request=%s", rid)
+            try:
+                await self.repo.close_npc_playback(
+                    rid,
+                    finished_at_ms=now,
+                    outcome="failed",
+                    failure_reason="playback_deadline_exceeded",
+                )
+            except Exception:
+                log.exception("playback_deadline_close_failed request=%s", rid)
+            self._active_playback.discard(rid)
+            self._playback_deadlines.pop(rid, None)
+            self._pending.pop(rid, None)
 
     async def try_dispatch_next(self, game_id: str) -> None:
         """Auto-pick the next candidate NPC and dispatch a SpeakRequest.
@@ -414,6 +480,9 @@ class SpeakArbiter:
         playback completes. No-op when the serial-speech gate is blocked, no
         NPC is online, or no game is in a reactive_voice discussion phase.
         """
+        # Close expired playback rows in DB before checking the gate.
+        await self._sweep_expired_playback()
+
         game = await self.repo.load_game(game_id)
         if game is None or game.ended_at is not None:
             return

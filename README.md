@@ -106,12 +106,17 @@ uv run wolfbot
 | --- | --- | --- |
 | `DISCORD_TOKEN` | 必須 | Discord bot のトークン |
 | `XAI_API_KEY` | 必須 | xAI API キー |
-| `XAI_MODEL` | 既定値: `grok-4-1-fast-reasoning` | 使用する xAI モデル名 |
+| `XAI_MODEL` | 既定値: `grok-4-1-fast` | 使用する xAI モデル名 |
 | `DISCORD_GUILD_ID` | 必須 | `/wolf` コマンドを同期する guild の ID |
 | `MAIN_TEXT_CHANNEL_ID` | 必須 | 議論用に使う既存のメイン text チャンネル ID |
 | `MAIN_VOICE_CHANNEL_ID` | 必須 | 参加者が会話する既存のメイン VC の ID |
 | `WOLFBOT_DB_PATH` | 既定値: `./wolfbot.db` | SQLite データベースの保存先 |
 | `LOG_LEVEL` | 既定値: `INFO` | ログ出力レベル |
+| `LLM_DISCUSSION_MODE` | 既定値: `rounds` | LLM 議論モード (`rounds` / `reactive_voice`) |
+| `MASTER_WS_LISTEN` | 既定値: `127.0.0.1:8800` | Master ↔ NPC/voice-ingest WS の listen アドレス |
+| `MASTER_NPC_PSK` | 任意 | NPC bot / voice-ingest の WS 認証用 Pre-Shared Key |
+| `GEMINI_API_KEY` | 任意 | Gemini API キー (voice-ingest の音声解析用) |
+| `GEMINI_MODEL` | 既定値: `gemini-2.0-flash-lite` | voice-ingest で使用する Gemini モデル名 |
 
 ## Discord 側の準備
 

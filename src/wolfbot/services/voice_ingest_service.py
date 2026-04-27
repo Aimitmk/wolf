@@ -295,6 +295,7 @@ class VoiceIngestService:
                 duration_ms=result.duration_ms,
                 audio_start_ms=seg.audio_start_ms,
                 audio_end_ms=audio_end_ms,
+                summary=result.summary,
             )
         )
 

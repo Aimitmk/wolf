@@ -15,6 +15,7 @@ Contributor-facing conventions (commit style, test naming, PR expectations) live
 ```bash
 uv sync                                                  # install deps (main + dev)
 uv run wolfbot                                           # run the bot (requires .env)
+uv run wolfbot-npc                                       # run one NPC bot (requires NPC env vars)
 
 uv run pytest tests                                      # full test suite
 uv run pytest tests/test_rules_votes.py                  # single file
@@ -40,6 +41,11 @@ From `.env.example`. All must be set for the bot to start:
 - `DISCORD_GUILD_ID`, `MAIN_TEXT_CHANNEL_ID`, `MAIN_VOICE_CHANNEL_ID` — ints
 - `WOLFBOT_DB_PATH` — SQLite path (default `./wolfbot.db`)
 - `LOG_LEVEL` — default `INFO`
+- `LLM_DISCUSSION_MODE` — `rounds` (default) or `reactive_voice`
+- `MASTER_WS_LISTEN` — Master WS bind address (default `127.0.0.1:8800`)
+- `MASTER_NPC_PSK` — optional PSK for NPC/voice-ingest WS auth (SecretStr)
+- `GEMINI_API_KEY` — optional Gemini API key for voice-ingest audio analysis (SecretStr)
+- `GEMINI_MODEL` — Gemini model name (default `gemini-2.0-flash-lite`)
 
 Loaded at boot by `src/wolfbot/config.py::Settings` (pydantic-settings, reads `.env`, instantiated once in `main.py`). Adding a new env var = adding a typed field to `Settings` — do not parse `os.environ` directly from code paths.
 
@@ -135,6 +141,15 @@ During wolf-attack splits, the main channel announces only `未確定: N件` (hi
 ### LLM integration
 
 `src/wolfbot/services/llm_service.py` uses the `openai` client pointed at `https://api.x.ai/v1/chat/completions`. `response_format` enforces the `LLMAction` JSON schema strictly, and `tenacity` retries on transient errors.
+
+### Reactive voice pipeline (realtime chat)
+
+When `LLM_DISCUSSION_MODE=reactive_voice` and `MASTER_NPC_PSK` is set, `main.py` wires a realtime voice pipeline:
+
+- **Master side** (`main.py`): `InMemoryNpcRegistry` + `SpeakArbiter` + `MasterIngestService` + `WebsocketsMasterWsServer`. The Master joins VC via `voice_recv.VoiceRecvClient` + `WolfbotAudioSink` for STT ingest, receives human speech via `GeminiAudioAnalyzer`, and dispatches NPC turns via the arbiter. On phase enter, `_on_reactive_phase_enter` assigns online NPCs to LLM seats.
+- **NPC side** (`npc_bot_main.py`, one process per NPC bot): `discord.Client` joins VC → WebSocket to Master (PSK auth) → `NpcClient` handles `SpeakRequest` → `GrokNpcGenerator` (xAI Grok, structured JSON) → `NpcSpeechService` → `VoicevoxTtsService` (local VOICEVOX, 24kHz WAV) → `DiscordVoicePlayback` (`discord.FFmpegPCMAudio`).
+- **Seat assignment**: `_on_reactive_phase_enter` in `main.py` pairs online NPC bots with unassigned LLM seats via `npc_registry.assign()`. The arbiter only dispatches to NPCs with an assigned seat.
+- **Entry point**: `uv run wolfbot-npc` (each NPC needs its own Discord bot token, `NPC_ID`, and env vars — see `.env.example`).
 
 The system prompt is **composed per actor** by `src/wolfbot/llm/prompt_builder.py`, not loaded verbatim. Three programmatically-generated blocks are layered onto `src/wolfbot/prompts/llm_system_prompt.md`: `_build_game_rules_block()` (9-player ruleset derived from `ROLE_DISTRIBUTION` + `VILLAGE_SIZE` so the canonical numbers aren't duplicated, plus the shared reasoning heuristics every seat sees — currently CO evaluation: a **never-countered** single role-CO is presumed near-real, but a **sole survivor** of a contested CO history (same role had ≥2 COs, others died) is **not** auto-trusted; topical mention of a CO ("the seer CO 〜について") is distinguished from self-declaration; counter-COs and divination/attack alignment feed the judgment), `_ROLE_STRATEGIES[role]` (role-scoped tactical hints — wolf/madman carry day-phased fake-CO playbooks that deliberately mirror each other, knight carries peaceful-morning guard-CO guidance, seer/medium/villager carry judgment-integrity rules (villager strategy explicitly forbids 「村人CO」/「素村CO」 and equivalents); cross-leak tests assert one role never sees another's strategy), and `_build_speech_profile_block(persona)` (the persona's 話法 section). Routing when editing: shared heuristics every seat should see → `_build_game_rules_block`; role-specific strategy → `_ROLE_STRATEGIES`; base framing / output format / hard invariants → the markdown template. The markdown is a template, not the whole prompt.
 

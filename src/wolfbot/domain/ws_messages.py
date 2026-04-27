@@ -183,6 +183,7 @@ class SpeechEventPayload(BaseEnvelope):
     duration_ms: int
     audio_start_ms: int
     audio_end_ms: int
+    summary: str | None = None
 
 
 class SttFailed(BaseEnvelope):

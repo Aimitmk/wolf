@@ -1,8 +1,11 @@
-"""TTS adapter Protocol + cost-minimized default skeleton.
+"""TTS adapter Protocol + pluggable provider implementations.
 
-The MVP TTS provider is the Google Cloud TTS Standard voices (per design.md),
-but we want NPC bots to be configurable. Define a Protocol so production
-plugs in any provider and tests substitute `FakeTtsService`.
+Providers:
+- ``VoicevoxTtsService`` — local VOICEVOX engine (free, requires ``voicevox_engine``
+  running on localhost). Default for MVP; swap to another provider by changing the
+  ``TTS_PROVIDER`` env var.
+- ``GoogleCloudTtsService`` — skeleton; delegates to a user-supplied callable.
+- ``FakeTtsService`` — deterministic stub for tests.
 
 Each NPC bot keeps a small in-memory cache keyed by `(provider, voice_id,
 sha256(text), speed, pitch)` to avoid re-synthesizing the same utterance.
@@ -58,7 +61,8 @@ class FakeTtsService:
         default: TtsResult | None = None,
     ) -> None:
         self._scripted = list(scripted or [])
-        self._default = default or TtsResult(audio=b"audio-fake", duration_ms=500)
+        self._default = default or TtsResult(
+            audio=b"audio-fake", duration_ms=500)
         self.call_count = 0
         self.requests: list[TtsRequest] = []
 
@@ -134,6 +138,83 @@ class InMemoryTtsCache:
             self._entries.popitem(last=False)
 
 
+class VoicevoxTtsService:
+    """VOICEVOX local engine adapter.
+
+    Requires the VOICEVOX engine running at ``base_url`` (default
+    ``http://localhost:50021``). The ``voice_id`` maps to a VOICEVOX
+    speaker ID (int). The two-step API: ``audio_query`` → ``synthesis``.
+
+    Does NOT import ``httpx`` at module-load time so test environments
+    without a running VOICEVOX process still load this file.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "http://localhost:50021",
+        default_speaker: int = 3,
+        timeout_s: float = 15.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.default_speaker = default_speaker
+        self.timeout_s = timeout_s
+
+    def _speaker_id(self, voice_id: str) -> int:
+        try:
+            return int(voice_id)
+        except (ValueError, TypeError):
+            return self.default_speaker
+
+    async def synthesize(self, req: TtsRequest) -> TtsResult:
+        import httpx
+
+        speaker = self._speaker_id(req.voice_id)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                # Step 1: audio_query
+                query_resp = await client.post(
+                    f"{self.base_url}/audio_query",
+                    params={"text": req.text, "speaker": speaker},
+                )
+                if query_resp.status_code != 200:
+                    raise TtsProviderError(
+                        f"voicevox_audio_query_failed_{query_resp.status_code}"
+                    )
+                query_json = query_resp.json()
+                query_json["speedScale"] = req.speed
+                query_json["pitchScale"] = req.pitch
+
+                # Step 2: synthesis
+                synth_resp = await client.post(
+                    f"{self.base_url}/synthesis",
+                    params={"speaker": speaker},
+                    json=query_json,
+                )
+                if synth_resp.status_code != 200:
+                    raise TtsProviderError(
+                        f"voicevox_synthesis_failed_{synth_resp.status_code}"
+                    )
+                audio = synth_resp.content
+                # VOICEVOX outputs 24kHz WAV by default; estimate duration from size.
+                # WAV header is 44 bytes, 16-bit mono = 2 bytes/sample, 24kHz.
+                sample_rate = 24_000
+                data_bytes = max(0, len(audio) - 44)
+                duration_ms = int(data_bytes / (sample_rate * 2) * 1000)
+                return TtsResult(
+                    audio=audio, duration_ms=duration_ms, sample_rate=sample_rate
+                )
+        except TtsProviderError:
+            raise
+        except httpx.TimeoutException:
+            raise TtsProviderError("voicevox_timeout")
+        except httpx.ConnectError:
+            raise TtsProviderError("voicevox_connection_refused")
+        except Exception as exc:
+            raise TtsProviderError(
+                f"voicevox_unexpected_{type(exc).__name__}") from exc
+
+
 __all__ = [
     "FakeTtsService",
     "GoogleCloudTtsService",
@@ -142,4 +223,5 @@ __all__ = [
     "TtsRequest",
     "TtsResult",
     "TtsService",
+    "VoicevoxTtsService",
 ]

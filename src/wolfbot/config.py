@@ -10,7 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     DISCORD_TOKEN: SecretStr
     XAI_API_KEY: SecretStr
@@ -26,3 +27,6 @@ class Settings(BaseSettings):
     # Master ↔ NPC bot / voice-ingest WebSocket transport.
     MASTER_WS_LISTEN: str = "127.0.0.1:8800"
     MASTER_NPC_PSK: SecretStr | None = None
+    # Gemini API for voice-ingest audio analysis (STT + structured inference).
+    GEMINI_API_KEY: SecretStr | None = None
+    GEMINI_MODEL: str = "gemini-2.0-flash-lite"

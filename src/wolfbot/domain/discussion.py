@@ -76,6 +76,7 @@ class SpeechEvent(BaseModel):
     stt_confidence: float | None = None
     audio_start_ms: int | None = None
     audio_end_ms: int | None = None
+    summary: str | None = None
     alive_seat_nos_json: str | None = None
     created_at_ms: int
 

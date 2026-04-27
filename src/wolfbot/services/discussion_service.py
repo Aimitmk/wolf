@@ -57,7 +57,8 @@ class SpeechEventStore(Protocol):
 
     async def insert(self, event: SpeechEvent) -> None: ...
 
-    async def load_phase(self, game_id: str, phase_id: str) -> Sequence[SpeechEvent]: ...
+    async def load_phase(self, game_id: str,
+                         phase_id: str) -> Sequence[SpeechEvent]: ...
 
     async def load_for_game(self, game_id: str) -> Sequence[SpeechEvent]: ...
 
@@ -66,7 +67,8 @@ class SpeechEventStore(Protocol):
 class SpeechMessagePoster(Protocol):
     """Subset of DiscordBotAdapter used by the write hook for main-channel posts."""
 
-    async def post_public(self, game_id: str, text: str, kind: str) -> None: ...
+    async def post_public(self, game_id: str, text: str,
+                          kind: str) -> None: ...
 
 
 @runtime_checkable
@@ -91,8 +93,8 @@ class SqliteSpeechEventStore:
             INSERT INTO speech_events (
                 event_id, game_id, phase_id, day, phase, source, speaker_kind,
                 speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                alive_seat_nos_json, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                alive_seat_nos_json, summary, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.event_id,
@@ -108,6 +110,7 @@ class SqliteSpeechEventStore:
                 event.audio_start_ms,
                 event.audio_end_ms,
                 event.alive_seat_nos_json,
+                event.summary,
                 event.created_at_ms,
             ),
         )
@@ -118,7 +121,7 @@ class SqliteSpeechEventStore:
             """
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                   alive_seat_nos_json, created_at_ms
+                   alive_seat_nos_json, summary, created_at_ms
               FROM speech_events
              WHERE game_id=? AND phase_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -133,7 +136,7 @@ class SqliteSpeechEventStore:
             """
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
-                   alive_seat_nos_json, created_at_ms
+                   alive_seat_nos_json, summary, created_at_ms
               FROM speech_events
              WHERE game_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -159,7 +162,8 @@ def _row_to_event(row: Any) -> SpeechEvent:
         audio_start_ms=row[10],
         audio_end_ms=row[11],
         alive_seat_nos_json=row[12],
-        created_at_ms=row[13],
+        summary=row[13],
+        created_at_ms=row[14],
     )
 
 
@@ -349,7 +353,8 @@ class DiscussionService:
             except Exception:
                 log.exception(
                     "PLAYER_SPEECH log insert failed",
-                    extra={"event_id": event.event_id, "source": event.source.value},
+                    extra={"event_id": event.event_id,
+                           "source": event.source.value},
                 )
 
         if self._poster is not None and event.source != SpeechSource.TEXT and event.text:
@@ -358,7 +363,8 @@ class DiscussionService:
             except Exception:
                 log.exception(
                     "PLAYER_SPEECH channel post failed",
-                    extra={"event_id": event.event_id, "source": event.source.value},
+                    extra={"event_id": event.event_id,
+                           "source": event.source.value},
                 )
 
     async def begin_phase(
@@ -458,7 +464,8 @@ def apply_speech_event(
         return None
 
     speaker = event.speaker_seat
-    silent = set(state.silent_seats) if state.silent_seats else set(state.alive_seat_nos)
+    silent = set(state.silent_seats) if state.silent_seats else set(
+        state.alive_seat_nos)
     if state.silent_seats == frozenset() and not state.recent_speech_event_ids:
         # First non-baseline event: seed silent_seats from alive baseline.
         silent = set(state.alive_seat_nos)

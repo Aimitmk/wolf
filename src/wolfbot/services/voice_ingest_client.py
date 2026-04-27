@@ -33,7 +33,9 @@ class MasterIngestionClient(Protocol):
 
     async def send_vad_started(self, msg: VadSpeechStarted) -> None: ...
     async def send_vad_ended(self, msg: VadSpeechEnded) -> None: ...
-    async def send_speech_event_payload(self, msg: SpeechEventPayload) -> None: ...
+    async def send_speech_event_payload(
+        self, msg: SpeechEventPayload) -> None: ...
+
     async def send_stt_failed(self, msg: SttFailed) -> None: ...
     async def send_heartbeat(self, msg: Heartbeat) -> None: ...
 
@@ -102,6 +104,51 @@ class FakeMasterIngestionClient:
 
     async def send_heartbeat(self, msg: Heartbeat) -> None:
         self.heartbeats.append(msg)
+
+
+class DirectMasterIngestionClient:
+    """In-process bridge: calls Master-side handlers directly.
+
+    Used when voice-ingest is integrated into the Master process instead of
+    running as a separate WS-connected worker. Each method invokes the same
+    callback that would be triggered by an inbound WS message, skipping
+    serialization and network overhead entirely.
+
+    The callbacks are the same handler closures that ``main.py`` wires for
+    the WS path (``_on_vad_started``, ``_on_speech_payload``, etc.), but
+    here they're called directly. A thin ``ConnectionContext`` stub is
+    supplied because the handler signatures still expect one.
+    """
+
+    def __init__(
+        self,
+        *,
+        on_vad_started: Callable[[VadSpeechStarted], Awaitable[None]],
+        on_vad_ended: Callable[[VadSpeechEnded], Awaitable[None]],
+        on_speech_event_payload: Callable[[SpeechEventPayload], Awaitable[None]],
+        on_stt_failed: Callable[[SttFailed], Awaitable[None]],
+    ) -> None:
+        self._on_vad_started = on_vad_started
+        self._on_vad_ended = on_vad_ended
+        self._on_speech_event_payload = on_speech_event_payload
+        self._on_stt_failed = on_stt_failed
+
+    async def send_vad_started(self, msg: VadSpeechStarted) -> None:
+        await self._on_vad_started(msg)
+
+    async def send_vad_ended(self, msg: VadSpeechEnded) -> None:
+        await self._on_vad_ended(msg)
+
+    async def send_speech_event_payload(self, msg: SpeechEventPayload) -> None:
+        await self._on_speech_event_payload(msg)
+
+    async def send_stt_failed(self, msg: SttFailed) -> None:
+        await self._on_stt_failed(msg)
+
+    async def send_heartbeat(self, msg: Heartbeat) -> None:
+        # Heartbeat is a no-op when running in-process — the Master IS
+        # the voice-ingest, so liveness monitoring is unnecessary.
+        pass
 
 
 class WebsocketsMasterIngestionClient:
@@ -221,6 +268,7 @@ def make_default_listeners(
 
 
 __all__ = [
+    "DirectMasterIngestionClient",
     "FakeMasterIngestionClient",
     "InMemoryNpcRegistryView",
     "ListenerFactory",

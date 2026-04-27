@@ -166,6 +166,7 @@ DDL: list[str] = [
         audio_start_ms INTEGER,
         audio_end_ms INTEGER,
         alive_seat_nos_json TEXT,
+        summary TEXT,
         created_at_ms INTEGER NOT NULL
     )
     """,
@@ -285,4 +286,8 @@ async def migrate(db_path: str | Path) -> None:
                 "ALTER TABLE llm_speech_counts "
                 "ADD COLUMN runoff_speech_done INTEGER NOT NULL DEFAULT 0"
             )
+        async with db.execute("PRAGMA table_info(speech_events)") as cur:
+            cols = {row[1] async for row in cur}
+        if "summary" not in cols:
+            await db.execute("ALTER TABLE speech_events ADD COLUMN summary TEXT")
         await db.commit()
