@@ -1659,14 +1659,32 @@ def test_madman_fake_strategy_acknowledges_misfire_and_legal_constraints() -> No
 
 # ------------------------------------------ day 1 medium fake-CO / 2-2 / 1-2 layout
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
-def test_fake_strategy_offers_medium_fake_as_day1_option(role: Role) -> None:
-    """Wolf and madman must teach day-1 medium fake-CO as a real choice
-    alongside seer fake and 潜伏 — not just a day-2+ post-hoc move. The
-    existing day-2+ post-hoc framing must remain (no regression)."""
+def test_fake_strategy_day1_round1_suppresses_medium_fake_round2_conditional(
+    role: Role,
+) -> None:
+    """Wolf and madman must NOT fake medium on day-1 round 1. The medium-fake
+    decision is pushed to day-1 round 2 and gated on the post-round-1 board
+    read: 2-0 self-grey natural medium-CO, or 2-1 counter-medium when forced.
+    The day-2+ post-hoc fake-medium-under-counter-seer framing must remain
+    (no regression)."""
     block = _build_strategy_block(role)
-    assert "霊媒師騙りも day 1 の選択肢" in block
+    # Day-1 round-1 suppression.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in block
+    # Round-2 conditional anchors.
+    assert "2 巡目" in block
+    assert "2-0" in block
+    assert "占い師 CO 2 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "自分がグレー位置" in block
+    assert "投票候補" in block
+    assert "自然に出た霊媒 CO" in block
+    assert "2-1" in block
+    assert "対抗霊媒" in block
+    assert "出ざるを得ない" in block
+    # Existing seer-fake / lurk comparison vocabulary preserved on day 1 round 1.
     assert "占い師騙り" in block
     assert "潜伏" in block
+    # Existing day-2+ post-hoc fake-medium-under-counter-seer framing preserved.
     assert "対抗占い師 CO が出ている場合は、day 2 以降に霊媒師騙り" in block
 
 
@@ -1707,6 +1725,45 @@ def test_madman_medium_fake_carries_misfire_awareness_for_both_colors() -> None:
     assert "襲撃先を揃える" not in block
 
 
+def test_madman_strategy_carries_wolf_position_unawareness_in_medium_fake() -> None:
+    """Madman-only: the day-1 round-2 medium-fake guidance must explicitly
+    state madman never knows real wolf positions, so narrowing grey via
+    medium fake-CO can push real wolves toward execution. The wolf-side
+    medium-fake bullets do not carry this caveat (wolf does know its
+    partner)."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "本物の狼位置を知らない" in block
+    # Leak guards preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
+def test_medium_strategy_day1_co_timing() -> None:
+    """True medium must lurk on day-1 round 1 and CO on day-1 round 2 only
+    when the post-round-1 2-0 board confirms self in grey, or counter-CO
+    when a fake medium surfaces in round 2. day-1 medium CO must explicitly
+    carry no execution result. Wolf-coordination vocabulary stays absent
+    from the medium strategy block."""
+    block = _build_strategy_block(Role.MEDIUM)
+    # Round-1 silence.
+    assert "day 1 の 1 巡目では霊媒 CO しない" in block
+    # Round-2 grey CO anchors.
+    assert "2 巡目" in block
+    assert "2-0" in block
+    assert "占い師 CO 2 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "自分がグレー位置" in block
+    assert "投票候補を狭め" in block
+    # Round-2 counter-CO on fake medium.
+    assert "霊媒騙りが出た場合" in block
+    assert "当然対抗 CO" in block
+    # Day-1 has no execution → no medium result.
+    assert "まだ処刑がないため霊媒結果はない" in block
+    # Leak guard — medium block must not carry wolf vocabulary.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
 @pytest.mark.parametrize("role", list(Role))
 def test_layout_creation_directives_only_in_wolf_madman_strategy(role: Role) -> None:
     """The wolf-side directive form '2-2 を作' / '1-2 を作' / '霊媒師騙りを選'
@@ -1727,19 +1784,76 @@ def test_layout_creation_directives_only_in_wolf_madman_strategy(role: Role) -> 
 
 
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
-def test_task_daytime_speech_day1_round1_wolf_or_madman_offers_medium_fake_as_option(
+def test_task_daytime_speech_day1_round1_wolf_or_madman_suppresses_medium_fake(
     role: Role,
 ) -> None:
-    """At day-1 round-1 only, the daytime speech task injects a 3-way fake-CO
-    selection nudge for wolf and madman — a per-call task-level reminder that
-    re-surfaces the day-1 selection at the moment of speech generation.
-    Default (no role) and other rounds must not include it (verified by
-    sibling default-omission tests)."""
+    """At day-1 round-1, wolf and madman get a per-call task-level reminder
+    that medium-fake is OFF the table — only seer fake and lurk are compared.
+    The medium-fake decision is pushed to round 2 conditional on the post-
+    round-1 board read. Default (no role) and other rounds must not include
+    this nudge (verified by sibling default-omission tests)."""
     text = task_daytime_speech(1, discussion_round=1, role=role)
-    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" in text
-    assert "1-2" in text
-    assert "2-2 を作" in text
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in text
+    # Old 3-way (seer/medium/lurk) phrasing must be fully removed.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
+    # Round-2 conditional pointer present so the LLM knows when medium-fake
+    # becomes available again.
+    assert "2-0" in text
+    assert "2-1" in text
+    assert "2 巡目" in text
     # Leak-guard regression — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round2_wolf_or_madman_includes_conditional_medium_fake(
+    role: Role,
+) -> None:
+    """At day-1 round-2, wolf and madman get the conditional medium-fake
+    nudge: 2-0 self-grey natural medium-CO, or 2-1 counter-medium when
+    forced. day-1 has no execution → no medium result allowed."""
+    text = task_daytime_speech(1, discussion_round=2, role=role)
+    assert "2-0" in text
+    assert "2-1" in text
+    assert "自分がグレー位置" in text
+    assert "投票候補" in text
+    assert "自然に出た霊媒 CO" in text
+    assert "対抗霊媒" in text
+    assert "出ざるを得ない" in text
+    # Day-1 medium CO must not publish a result.
+    assert "霊媒結果は出さず" in text
+    # Leak-guard — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+def test_task_daytime_speech_day1_round1_medium_lurks() -> None:
+    """At day-1 round-1, the true medium gets an explicit don't-CO nudge so
+    the seat doesn't reveal too early. The old wolf-side 3-way phrasing
+    must not leak into the medium task block."""
+    text = task_daytime_speech(1, discussion_round=1, role=Role.MEDIUM)
+    assert "day 1 の 1 巡目では霊媒 CO しない" in text
+    # Wolf-side phrasing must not leak into medium task block.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
+    # Leak-guard.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+def test_task_daytime_speech_day1_round2_medium_co_or_counter() -> None:
+    """At day-1 round-2, the true medium gets the 2-0 self-grey CO nudge
+    plus a counter-CO directive if a medium-fake surfaces. day-1 has no
+    execution → no medium result allowed."""
+    text = task_daytime_speech(1, discussion_round=2, role=Role.MEDIUM)
+    assert "2-0" in text
+    assert "自分がグレー位置" in text
+    assert "霊媒 CO" in text
+    assert "霊媒騙りが出た場合" in text
+    assert "当然対抗 CO" in text
+    # Day-1 has no execution → no medium result.
+    assert "霊媒結果はありません" in text
+    # Leak-guard.
     assert not re.search(r"相方(?!候補)", text)
     assert "襲撃先を揃える" not in text
 

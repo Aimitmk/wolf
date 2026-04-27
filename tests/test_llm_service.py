@@ -1905,6 +1905,79 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "誤爆リスクは day 2 以降の黒出しでも常に残る" in system_prompt
 
 
+async def test_ask_system_prompt_wolf_seat_day1_round_conditional_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """The werewolf system prompt must carry the day-1 round-1 medium-fake
+    suppression and the day-1 round-2 conditional medium-fake (2-0 self-grey
+    natural CO, or 2-1 counter-medium when forced)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    # Day-1 round-1 suppression.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in system_prompt
+    # Round-2 conditional anchors.
+    assert "2 巡目" in system_prompt
+    assert "2-0" in system_prompt
+    assert "占い師 CO 2 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補" in system_prompt
+    assert "自然に出た霊媒 CO" in system_prompt
+    assert "対抗霊媒" in system_prompt
+    assert "出ざるを得ない" in system_prompt
+
+
+async def test_ask_system_prompt_madman_day1_round_conditional_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """The madman system prompt must carry the same day-1 round-1 medium-fake
+    suppression and day-1 round-2 conditional medium-fake (2-0 self-grey
+    natural CO, or 2-1 counter-medium) — plus the wolf-position-unawareness
+    caveat. Wolf-coordination vocabulary must remain absent."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    # Day-1 round-1 suppression.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in system_prompt
+    # Round-2 conditional anchors.
+    assert "2 巡目" in system_prompt
+    assert "2-0" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補" in system_prompt
+    assert "自然に出た霊媒 CO" in system_prompt
+    assert "対抗霊媒" in system_prompt
+    assert "出ざるを得ない" in system_prompt
+    # Madman-only wolf-position-unawareness caveat.
+    assert "本物の狼位置を知らない" in system_prompt
+    # Wolf-coordination leak guard preserved.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+
+
+async def test_ask_system_prompt_medium_includes_day1_co_timing(
+    repo: SqliteRepo,
+) -> None:
+    """The true medium's system prompt must carry the day-1 round-1 silence
+    and the day-1 round-2 grey-CO / counter-CO directives. day-1 medium CO
+    must explicitly carry no execution result. Wolf-coordination vocabulary
+    must remain absent from the medium seat."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
+    # Round-1 silence.
+    assert "day 1 の 1 巡目では霊媒 CO しない" in system_prompt
+    # Round-2 grey CO anchors.
+    assert "2 巡目" in system_prompt
+    assert "2-0" in system_prompt
+    assert "占い師 CO 2 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補を狭め" in system_prompt
+    # Round-2 counter-CO on fake medium.
+    assert "霊媒騙りが出た場合" in system_prompt
+    assert "当然対抗 CO" in system_prompt
+    # Day-1 has no execution → no medium result.
+    assert "まだ処刑がないため霊媒結果はない" in system_prompt
+    # Wolf-coordination leak guard.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+
+
 async def test_ask_system_prompt_seer_includes_night_targeting_axes(
     repo: SqliteRepo,
 ) -> None:
@@ -2254,6 +2327,234 @@ async def test_discussion_speech_day1_round1_omits_day2_rule(
     # phrase ("これは day 2 以降の 1 巡目発言です。") must not appear.
     assert "day 2 以降の 1 巡目発言" not in system_prompt
     assert "前夜の能力結果" not in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+async def test_discussion_speech_day1_round1_wolf_suppresses_medium_fake(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """End-to-end: when `_do_one_discussion_speech(discussion_round=1)` runs
+    on a day-1 game with a wolf or madman LLM seat, the captured task block
+    must include the day-1 round-1 medium-fake suppression directive — and
+    the old 3-way (seer/medium/lurk) phrasing must be fully removed."""
+    game = Game(
+        id=f"g-d1r1-w-{role.value}",
+        guild_id=f"gu-d1r1-w-{role.value}",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=1
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Day-1 round-1 suppression directive must reach the LLM via the task block.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in system_prompt
+    # Old 3-way (seer/medium/lurk) phrasing must be fully removed.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+async def test_discussion_speech_day1_round2_wolf_includes_conditional_medium_fake(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """End-to-end: when `_do_one_discussion_speech(discussion_round=2)` runs
+    on a day-1 game with a wolf or madman LLM seat, the captured task block
+    must include the day-1 round-2 conditional medium-fake guidance: 2-0
+    self-grey natural CO, or 2-1 counter-medium when forced. day-1 has no
+    execution → no medium result allowed."""
+    game = Game(
+        id=f"g-d1r2-w-{role.value}",
+        guild_id=f"gu-d1r2-w-{role.value}",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=2
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Round-2 conditional anchors must reach the LLM via the task block.
+    assert "2-0" in system_prompt
+    assert "2-1" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補" in system_prompt
+    assert "自然に出た霊媒 CO" in system_prompt
+    assert "対抗霊媒" in system_prompt
+    assert "出ざるを得ない" in system_prompt
+    # Day-1 has no execution → no medium result.
+    assert "霊媒結果は出さず" in system_prompt
+
+
+async def test_discussion_speech_day1_round1_medium_lurks(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: at day-1 round-1, the true medium gets an explicit don't-CO
+    directive via the captured task block. Wolf-side phrasing must not leak."""
+    game = Game(
+        id="g-d1r1-medium",
+        guild_id="gu-d1r1-medium",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.MEDIUM)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=1
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Medium round-1 silence directive must reach the LLM via the task block.
+    assert "day 1 の 1 巡目では霊媒 CO しない" in system_prompt
+    # Wolf-side phrasing must not leak into medium task block.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in system_prompt
+
+
+async def test_discussion_speech_day1_round2_medium_co_or_counter(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: at day-1 round-2, the true medium gets the 2-0 self-grey
+    CO directive plus a counter-CO directive if a medium-fake surfaces.
+    Day-1 has no execution → no medium result."""
+    game = Game(
+        id="g-d1r2-medium",
+        guild_id="gu-d1r2-medium",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.MEDIUM)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=2
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Round-2 medium CO / counter-CO directives must reach the LLM.
+    assert "2-0" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "霊媒 CO" in system_prompt
+    assert "霊媒騙りが出た場合" in system_prompt
+    assert "当然対抗 CO" in system_prompt
+    # Day-1 has no execution → no medium result.
+    assert "霊媒結果はありません" in system_prompt
 
 
 def test_task_daytime_speech_runoff_default_omits_first_round_rule() -> None:
