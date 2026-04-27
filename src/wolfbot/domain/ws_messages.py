@@ -56,6 +56,29 @@ class NpcRegistered(BaseEnvelope):
     phase_id: str | None = None
 
 
+class SeatAssigned(BaseEnvelope):
+    """Master → NPC: this NPC bot was picked for `game_id`. Join VC and
+    stand by for SpeakRequests. Sent at phase entry after the registry
+    pairs the bot with an LLM seat."""
+
+    type: Literal["seat_assigned"] = "seat_assigned"
+    npc_id: str
+    seat_no: int
+    game_id: str
+    phase_id: str
+
+
+class SeatReleased(BaseEnvelope):
+    """Master → NPC: this NPC bot is no longer attached to a game. Leave
+    VC and idle until the next `seat_assigned`. Sent on game end / host
+    abort / explicit unassign so unselected bots don't linger in VC."""
+
+    type: Literal["seat_released"] = "seat_released"
+    npc_id: str
+    game_id: str | None = None
+    reason: str = "game_ended"
+
+
 class Heartbeat(BaseEnvelope):
     type: Literal["heartbeat"] = "heartbeat"
     npc_id: str | None = None  # populated by NPC bots; None for voice-ingest
@@ -261,6 +284,8 @@ __all__ = [
     "PlaybackRejected",
     "RegistrySnapshot",
     "RegistryUpdate",
+    "SeatAssigned",
+    "SeatReleased",
     "SpeakRequest",
     "SpeakResult",
     "SpeechEventPayload",

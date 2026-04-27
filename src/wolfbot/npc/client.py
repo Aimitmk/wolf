@@ -31,6 +31,8 @@ from wolfbot.domain.ws_messages import (
     PlaybackFailed,
     PlaybackFinished,
     PlaybackRejected,
+    SeatAssigned,
+    SeatReleased,
     SpeakRequest,
     TtsFailed,
     TtsFinished,
@@ -83,11 +85,20 @@ class NpcClient:
     send: Callable[[str], Awaitable[None]]
     now_ms: Callable[[], int]
     cache: InMemoryTtsCache = field(default_factory=lambda: InMemoryTtsCache(max_entries=64))
+    # VC lifecycle callbacks. Master sends `seat_assigned` only to NPC bots
+    # that were picked for an active game — at that moment we join VC; on
+    # `seat_released` (or `npc_registered` arriving with no assignment) we
+    # leave. Optional so tests / pure-message-loop scenarios can omit them.
+    on_vc_join: Callable[[], Awaitable[None]] | None = None
+    on_vc_leave: Callable[[], Awaitable[None]] | None = None
 
     _logic_cache: dict[str, LogicPacket] = field(default_factory=dict)
     _pending_playback: dict[str, _PendingForPlayback] = field(default_factory=dict)
     pending_authorizations: list[_AuthorizedPlayback] = field(default_factory=list)
     registered: bool = False
+    assigned_seat: int | None = None
+    assigned_game_id: str | None = None
+    assigned_phase_id: str | None = None
 
     # ---------------------------------------------------------- registration
 
@@ -121,7 +132,11 @@ class NpcClient:
             return
         t = payload["type"]
         if t == "npc_registered":
-            self._on_registered(NpcRegistered.model_validate(payload))
+            await self._on_registered(NpcRegistered.model_validate(payload))
+        elif t == "seat_assigned":
+            await self._on_seat_assigned(SeatAssigned.model_validate(payload))
+        elif t == "seat_released":
+            await self._on_seat_released(SeatReleased.model_validate(payload))
         elif t == "logic_packet":
             self._on_logic_packet(LogicPacket.model_validate(payload))
         elif t == "speak_request":
@@ -133,14 +148,62 @@ class NpcClient:
         else:
             log.info("npc_client_unhandled_type type=%s", t)
 
-    def _on_registered(self, msg: NpcRegistered) -> None:
+    async def _on_registered(self, msg: NpcRegistered) -> None:
         self.registered = True
+        self.assigned_seat = msg.assigned_seat
+        self.assigned_game_id = msg.game_id
+        self.assigned_phase_id = msg.phase_id
         log.info(
             "npc_registered npc_id=%s seat=%s game=%s",
             msg.npc_id,
             msg.assigned_seat,
             msg.game_id,
         )
+        # Recovery path: if Master tells us we were already assigned at
+        # register time (e.g. NPC bot reconnected mid-game), join VC.
+        if msg.assigned_seat is not None and self.on_vc_join is not None:
+            try:
+                await self.on_vc_join()
+            except Exception:
+                log.exception(
+                    "npc_vc_join_failed_on_recovery npc_id=%s", msg.npc_id
+                )
+
+    async def _on_seat_assigned(self, msg: SeatAssigned) -> None:
+        self.assigned_seat = msg.seat_no
+        self.assigned_game_id = msg.game_id
+        self.assigned_phase_id = msg.phase_id
+        log.info(
+            "npc_seat_assigned npc_id=%s seat=%d game=%s",
+            msg.npc_id,
+            msg.seat_no,
+            msg.game_id,
+        )
+        if self.on_vc_join is not None:
+            try:
+                await self.on_vc_join()
+            except Exception:
+                log.exception(
+                    "npc_vc_join_failed npc_id=%s seat=%d",
+                    msg.npc_id,
+                    msg.seat_no,
+                )
+
+    async def _on_seat_released(self, msg: SeatReleased) -> None:
+        log.info(
+            "npc_seat_released npc_id=%s game=%s reason=%s",
+            msg.npc_id,
+            msg.game_id,
+            msg.reason,
+        )
+        self.assigned_seat = None
+        self.assigned_game_id = None
+        self.assigned_phase_id = None
+        if self.on_vc_leave is not None:
+            try:
+                await self.on_vc_leave()
+            except Exception:
+                log.exception("npc_vc_leave_failed npc_id=%s", msg.npc_id)
 
     def _on_logic_packet(self, packet: LogicPacket) -> None:
         self._logic_cache[packet.packet_id] = packet

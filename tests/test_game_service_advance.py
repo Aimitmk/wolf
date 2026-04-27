@@ -585,6 +585,36 @@ async def test_host_abort_ends_game(
     assert any(c.name == "on_game_end" for c in disc.calls)
 
 
+async def test_host_abort_invokes_on_reactive_game_end_callback(
+    repo: SqliteRepo,
+) -> None:
+    """The reactive_voice plumbing release path must fire on host_abort so
+    NPC bots leave VC. Mirrors `discord.on_game_end` but on a separate hook
+    so reactive_voice plumbing stays out of the GameService core."""
+    disc = FakeDiscordAdapter()
+    llm = FakeLLMAdapter()
+    reg = EngineRegistry()
+    fired: list[str] = []
+
+    async def on_end(game_id: str) -> None:
+        fired.append(game_id)
+
+    service = GameService(
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        rng=random.Random(0),
+        on_reactive_game_end=on_end,
+    )
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+
+    ok = await service.host_abort(game.id)
+    assert ok
+    assert fired == [game.id]
+
+
 async def test_host_abort_returns_false_when_already_ended(
     repo: SqliteRepo,
     svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],

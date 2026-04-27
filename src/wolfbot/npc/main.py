@@ -78,26 +78,53 @@ async def _main() -> None:
 
     vc_client_ref: list[discord.VoiceClient | None] = [None]
     ready_event = asyncio.Event()
+    vc_lock = asyncio.Lock()
 
     @bot.event
     async def on_ready() -> None:
+        # Don't auto-join VC. The bot stays Discord-connected + WS-registered
+        # so Master can pick it later via /wolf start; the actual VC join
+        # waits for a `seat_assigned` message from Master. This keeps
+        # unselected NPCs out of the voice channel until they're chosen.
         log.info("npc_discord_ready user=%s", bot.user)
-        guild = bot.get_guild(settings.DISCORD_GUILD_ID)
-        if guild is None:
-            log.error("npc_guild_not_found id=%s", settings.DISCORD_GUILD_ID)
-            return
-        vc_channel = guild.get_channel(settings.MAIN_VOICE_CHANNEL_ID)
-        if vc_channel is None or not isinstance(vc_channel, discord.VoiceChannel):
-            log.error("npc_vc_channel_not_found id=%s",
-                      settings.MAIN_VOICE_CHANNEL_ID)
-            return
-        try:
-            vc_client_ref[0] = await vc_channel.connect()
-            log.info("npc_vc_joined channel=%s", settings.MAIN_VOICE_CHANNEL_ID)
-        except Exception:
-            log.exception("npc_vc_join_failed channel=%s",
-                          settings.MAIN_VOICE_CHANNEL_ID)
         ready_event.set()
+
+    async def _ensure_vc_joined() -> None:
+        async with vc_lock:
+            existing = vc_client_ref[0]
+            if existing is not None and existing.is_connected():
+                return
+            guild = bot.get_guild(settings.DISCORD_GUILD_ID)
+            if guild is None:
+                log.error("npc_guild_not_found id=%s", settings.DISCORD_GUILD_ID)
+                return
+            vc_channel = guild.get_channel(settings.MAIN_VOICE_CHANNEL_ID)
+            if vc_channel is None or not isinstance(vc_channel, discord.VoiceChannel):
+                log.error(
+                    "npc_vc_channel_not_found id=%s", settings.MAIN_VOICE_CHANNEL_ID
+                )
+                return
+            try:
+                vc_client_ref[0] = await vc_channel.connect()
+                log.info("npc_vc_joined channel=%s", settings.MAIN_VOICE_CHANNEL_ID)
+            except Exception:
+                log.exception(
+                    "npc_vc_join_failed channel=%s", settings.MAIN_VOICE_CHANNEL_ID
+                )
+
+    async def _ensure_vc_left() -> None:
+        async with vc_lock:
+            vc = vc_client_ref[0]
+            if vc is None:
+                return
+            try:
+                if vc.is_connected():
+                    await vc.disconnect()
+                    log.info("npc_vc_left channel=%s", settings.MAIN_VOICE_CHANNEL_ID)
+            except Exception:
+                log.exception("npc_vc_leave_failed")
+            finally:
+                vc_client_ref[0] = None
 
     # Start Discord in background
     discord_task = asyncio.create_task(
@@ -182,6 +209,8 @@ async def _main() -> None:
         playback=playback,
         send=_ws_send,
         now_ms=_now_ms,
+        on_vc_join=_ensure_vc_joined,
+        on_vc_leave=_ensure_vc_left,
     )
 
     # Register with Master

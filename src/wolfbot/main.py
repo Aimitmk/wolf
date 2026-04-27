@@ -110,6 +110,8 @@ async def _run() -> None:
         await _refresh_voice_ingest_cache(game_id)
         # Assign online NPC bots to their game seats so the arbiter can pick them.
         if _npc_registry_ref and _vc_phase_cache[0] is not None:
+            from wolfbot.domain.ws_messages import SeatAssigned
+
             _game_id, phase_id = _vc_phase_cache[0]
             npc_reg = _npc_registry_ref[0]
             seats = await repo.load_seats(game_id)
@@ -128,8 +130,60 @@ async def _run() -> None:
                                game_id=game_id, phase_id=phase_id)
                 log.info("npc_seat_assigned npc=%s seat=%d game=%s",
                          npc_entry.npc_id, seat.seat_no, game_id)
+                # Tell the picked bot to join VC. Unselected NPCs receive
+                # nothing and stay idle (no VC).
+                if npc_entry.send is not None:
+                    try:
+                        msg = SeatAssigned(
+                            ts=int(asyncio.get_running_loop().time() * 1000),
+                            trace_id=f"assign-{game_id}-{seat.seat_no}",
+                            npc_id=npc_entry.npc_id,
+                            seat_no=seat.seat_no,
+                            game_id=game_id,
+                            phase_id=phase_id,
+                        )
+                        await npc_entry.send(msg.model_dump_json())
+                    except Exception:
+                        log.exception(
+                            "seat_assigned_send_failed npc=%s seat=%d",
+                            npc_entry.npc_id,
+                            seat.seat_no,
+                        )
         if _reactive_phase_cb:
             await _reactive_phase_cb[0].try_dispatch_next(game_id)
+
+    async def _on_reactive_game_end(game_id: str) -> None:
+        """Release every NPC bot attached to this game so they leave VC.
+
+        Called from `GameService` at natural end + host abort. Sends a
+        `seat_released` to each, then clears the registry's assignment
+        fields so the bot is available for the next /wolf start.
+        """
+        if not _npc_registry_ref:
+            return
+        from wolfbot.domain.ws_messages import SeatReleased
+
+        npc_reg = _npc_registry_ref[0]
+        attached = list(npc_reg.assigned_to_game(game_id))
+        for entry in attached:
+            if entry.send is not None:
+                try:
+                    msg = SeatReleased(
+                        ts=int(asyncio.get_running_loop().time() * 1000),
+                        trace_id=f"release-{game_id}-{entry.npc_id}",
+                        npc_id=entry.npc_id,
+                        game_id=game_id,
+                        reason="game_ended",
+                    )
+                    await entry.send(msg.model_dump_json())
+                except Exception:
+                    log.exception(
+                        "seat_released_send_failed npc=%s game=%s",
+                        entry.npc_id,
+                        game_id,
+                    )
+            npc_reg.unassign(entry.npc_id)
+            log.info("npc_seat_unassigned npc=%s game=%s", entry.npc_id, game_id)
 
     game_service = GameService(
         repo=repo,
@@ -137,6 +191,7 @@ async def _run() -> None:
         llm=llm_adapter,
         wake=registry,
         on_reactive_phase_enter=_on_reactive_phase_enter,
+        on_reactive_game_end=_on_reactive_game_end,
     )
     discord_adapter.set_game_service(game_service)
     llm_adapter.set_game_service(game_service)

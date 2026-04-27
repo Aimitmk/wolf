@@ -144,6 +144,7 @@ class GameService:
         clock: Callable[[], int] = lambda: int(time.time()),
         rng: Random | None = None,
         on_reactive_phase_enter: Callable[[str], Awaitable[None]] | None = None,
+        on_reactive_game_end: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.repo = repo
         self.discord = discord
@@ -153,6 +154,10 @@ class GameService:
         self.rng = rng or Random()
         self._advance_locks: dict[str, asyncio.Lock] = {}
         self._on_reactive_phase_enter = on_reactive_phase_enter
+        # Symmetric to `on_reactive_phase_enter`: invoked at natural end and
+        # host abort so reactive_voice plumbing (NPC seat assignments, VC
+        # joins) can be released.
+        self._on_reactive_game_end = on_reactive_game_end
 
     def _lock_for(self, game_id: str) -> asyncio.Lock:
         lock = self._advance_locks.get(game_id)
@@ -261,6 +266,13 @@ class GameService:
                 await self.discord.on_game_end(new_game, seats)
             except Exception:
                 log.exception("on_game_end failed for %s", game_id)
+            if self._on_reactive_game_end is not None:
+                try:
+                    await self._on_reactive_game_end(game_id)
+                except Exception:
+                    log.exception(
+                        "on_reactive_game_end failed for %s", game_id
+                    )
             await self.repo.end_game(game_id, ended_at_epoch=self.clock())
 
         # 7. Wake the engine so it reschedules on the new deadline.
@@ -990,6 +1002,13 @@ class GameService:
             await self.discord.on_game_end(game, seats)
         except Exception:
             log.exception("on_game_end failed during abort %s", game_id)
+        if self._on_reactive_game_end is not None:
+            try:
+                await self._on_reactive_game_end(game_id)
+            except Exception:
+                log.exception(
+                    "on_reactive_game_end failed during abort %s", game_id
+                )
         await self.repo.end_game(game_id, ended_at_epoch=self.clock())
         self.wake.wake(game_id)
         return True

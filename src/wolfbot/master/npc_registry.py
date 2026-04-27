@@ -81,6 +81,19 @@ class NpcRegistry(Protocol):
 
     def prune_offline(self, now_ms: int, timeout_ms: int) -> list[str]: ...
 
+    def assign(
+        self,
+        npc_id: str,
+        *,
+        seat: int,
+        game_id: str,
+        phase_id: str,
+    ) -> None: ...
+
+    def unassign(self, npc_id: str) -> None: ...
+
+    def assigned_to_game(self, game_id: str) -> list[NpcEntry]: ...
+
 
 class InMemoryNpcRegistry:
     """The default registry — production and test both use this."""
@@ -200,6 +213,20 @@ class InMemoryNpcRegistry:
         entry.assigned_seat = seat
         entry.game_id = game_id
         entry.phase_id = phase_id
+
+    def unassign(self, npc_id: str) -> None:
+        """Clear assignment fields for one NPC (game ended / never picked)."""
+        entry = self._entries.get(npc_id)
+        if entry is None:
+            return
+        entry.assigned_seat = None
+        entry.game_id = None
+        entry.phase_id = None
+
+    def assigned_to_game(self, game_id: str) -> list[NpcEntry]:
+        """All entries currently assigned to ``game_id``. Used by the
+        game-end hook to release every bot in one pass."""
+        return [e for e in self._entries.values() if e.game_id == game_id]
 
     # ---------------------------------------------------------- listeners
 
