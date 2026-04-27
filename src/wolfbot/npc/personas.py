@@ -45,6 +45,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.4,
             bandwagon_tendency=0.5,
         ),
+        tts_voice_id=8,
     ),
     Persona(
         key="gina",
@@ -67,6 +68,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.25,
             bandwagon_tendency=0.3,
         ),
+        tts_voice_id=9,
     ),
     Persona(
         key="sq",
@@ -95,6 +97,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.55,
             bandwagon_tendency=0.3,
         ),
+        tts_voice_id=2,
     ),
     Persona(
         key="raqio",
@@ -117,6 +120,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.85,
             bandwagon_tendency=0.15,
         ),
+        tts_voice_id=13,
     ),
     Persona(
         key="stella",
@@ -144,6 +148,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.3,
             bandwagon_tendency=0.5,
         ),
+        tts_voice_id=4,
     ),
     Persona(
         key="shigemichi",
@@ -167,6 +172,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.85,
             bandwagon_tendency=0.7,
         ),
+        tts_voice_id=11,
     ),
     Persona(
         key="chipie",
@@ -190,6 +196,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.4,
             bandwagon_tendency=0.4,
         ),
+        tts_voice_id=6,
     ),
     Persona(
         key="comet",
@@ -213,6 +220,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.6,
             bandwagon_tendency=0.4,
         ),
+        tts_voice_id=1,
     ),
     Persona(
         key="jonas",
@@ -236,6 +244,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.7,
             bandwagon_tendency=0.3,
         ),
+        tts_voice_id=12,
     ),
     Persona(
         key="kukrushka",
@@ -256,6 +265,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.3,
             bandwagon_tendency=0.3,
         ),
+        tts_voice_id=0,
     ),
     Persona(
         key="otome",
@@ -278,6 +288,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.5,
             bandwagon_tendency=0.55,
         ),
+        tts_voice_id=7,
     ),
     Persona(
         key="sha_ming",
@@ -301,6 +312,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.7,
             bandwagon_tendency=0.3,
         ),
+        tts_voice_id=5,
     ),
     Persona(
         key="remnan",
@@ -324,6 +336,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.2,
             bandwagon_tendency=0.25,
         ),
+        tts_voice_id=10,
     ),
     Persona(
         key="yuriko",
@@ -351,6 +364,7 @@ NPC_PERSONAS: tuple[Persona, ...] = (
             aggression=0.85,
             bandwagon_tendency=0.15,
         ),
+        tts_voice_id=3,
     ),
 )
 

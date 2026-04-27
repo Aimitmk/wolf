@@ -83,6 +83,7 @@ class Persona:
     style_guide: str
     speech_profile: SpeechProfile
     judgment_profile: JudgmentProfile = _DEFAULT_JUDGMENT_PROFILE
+    tts_voice_id: int | None = None
 
 
 def index_by_key(pool: Sequence[Persona]) -> dict[str, Persona]:
