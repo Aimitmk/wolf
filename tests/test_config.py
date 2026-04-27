@@ -142,6 +142,31 @@ def test_gemini_empty_vertex_project_rejected() -> None:
         )
 
 
+# --------------------------------------------------------------- mock provider
+def test_mock_provider_does_not_require_api_key_or_vertex_project() -> None:
+    """``GAMEPLAY_LLM_PROVIDER=mock`` is for offline integration tests —
+    no credentials should be required."""
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_PROVIDER="mock",
+    )
+    assert s.GAMEPLAY_LLM_PROVIDER == "mock"
+    assert s.GAMEPLAY_LLM_API_KEY is None
+    assert s.GAMEPLAY_LLM_VERTEX_PROJECT is None
+
+
+def test_mock_decider_config_round_trips() -> None:
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_PROVIDER="mock",
+    )
+    cfg = s.gameplay_decider_config()
+    assert cfg.provider == "mock"
+    assert cfg.api_key is None
+
+
 # ---------------------------------------------------------------- common
 def test_unknown_provider_rejected() -> None:
     with pytest.raises(ValidationError):

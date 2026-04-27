@@ -87,6 +87,13 @@ def make_npc_generator(cfg: LLMDeciderConfig, *, persona_key: str) -> NpcGenerat
         gen_gemini.set_persona(persona_key)
         return gen_gemini
 
+    if cfg.provider == "mock":
+        from wolfbot.npc.mock_generator import MockNpcGenerator
+
+        gen_mock = MockNpcGenerator()
+        gen_mock.set_persona(persona_key)
+        return gen_mock
+
     raise ValueError(f"unknown provider: {cfg.provider!r}")
 
 

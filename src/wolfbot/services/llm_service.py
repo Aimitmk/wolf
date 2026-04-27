@@ -306,6 +306,93 @@ class GeminiLLMActionDecider:
         return LLMAction.model_validate_json(content)
 
 
+class MockLLMActionDecider:
+    """Offline mock decider used when ``GAMEPLAY_LLM_PROVIDER=mock``.
+
+    Returns deterministic LLMActions based on phrases unique to each
+    ``task_*`` prompt generator in :mod:`wolfbot.llm.prompt_builder`.
+    Vote and night-action targets are intentionally ``None`` so
+    :meth:`LLMAdapter._resolve_target` falls back to a uniform-random
+    legal target — sidestepping the brittle "parse legal candidates out
+    of user_context" path while still producing valid game progression.
+
+    Speech messages are persona-blind canned phrases drawn round-robin
+    from a per-instance counter, kept under 80 chars to fit the discussion
+    text length convention. The Master Gameplay LLM only generates speech
+    in ``rounds`` mode; in ``reactive_voice`` mode the speech path is
+    routed to NPC bots and this decider produces only votes / night
+    actions / wolf-chat coordination text.
+    """
+
+    _SPEECHES: tuple[str, ...] = (
+        "状況を整理しましょうか。今のところ大きな決め手はないですね。",
+        "発言の少ない方が気になります。考えを聞きたいです。",
+        "占い結果が出るまで断定は避けたいですね。",
+        "票筋から見ると、何人か怪しい位置はあります。",
+        "今のところ私は様子を見たい立場です。",
+    )
+
+    _WOLF_CHAT: tuple[str, ...] = (
+        "情報を持ってそうな位置を狙いたい。",
+        "騎士候補から先に処理する案もある。",
+        "今夜は無難な相手に揃えよう。",
+    )
+
+    def __init__(
+        self,
+        *,
+        speeches: Sequence[str] | None = None,
+        wolf_chat: Sequence[str] | None = None,
+    ) -> None:
+        self._speeches: tuple[str, ...] = tuple(speeches or self._SPEECHES)
+        self._wolf_chat: tuple[str, ...] = tuple(wolf_chat or self._WOLF_CHAT)
+        self._speech_idx = 0
+        self._wolf_idx = 0
+        self.call_count = 0
+
+    def _next_speech(self) -> str:
+        text = self._speeches[self._speech_idx % len(self._speeches)]
+        self._speech_idx += 1
+        return text
+
+    def _next_wolf_chat(self) -> str:
+        text = self._wolf_chat[self._wolf_idx % len(self._wolf_chat)]
+        self._wolf_idx += 1
+        return text
+
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        self.call_count += 1
+        # The user_context is built by prompt_builder.task_*; each task has
+        # an unambiguous unique phrase.
+        if "投票先として合法な候補は" in user_context:
+            return LLMAction(
+                intent="vote",
+                target_name=None,
+                reason_summary="mock vote",
+                confidence=0.5,
+            )
+        if "対象を 1 名選んでください" in user_context:
+            return LLMAction(
+                intent="night_action",
+                target_name=None,
+                reason_summary="mock night action",
+                confidence=0.5,
+            )
+        if "人狼チャット" in user_context:
+            return LLMAction(
+                intent="speak",
+                public_message=self._next_wolf_chat(),
+                reason_summary="mock wolf chat",
+                confidence=0.5,
+            )
+        return LLMAction(
+            intent="speak",
+            public_message=self._next_speech(),
+            reason_summary="mock speech",
+            confidence=0.5,
+        )
+
+
 class FakeLLMActionDecider:
     """Deterministic stub. Returns ACTIONS[n] round-robin per call."""
 
@@ -1364,6 +1451,8 @@ def make_llm_decider(cfg: LLMDeciderConfig) -> LLMActionDecider:
             thinking_level=cfg.thinking_level,
             timeout=cfg.timeout,
         )
+    if cfg.provider == "mock":
+        return MockLLMActionDecider()
     raise ValueError(f"unknown provider: {cfg.provider!r}")
 
 
@@ -1375,6 +1464,7 @@ __all__ = [
     "LLMAction",
     "LLMActionDecider",
     "LLMAdapter",
+    "MockLLMActionDecider",
     "XAILLMActionDecider",
     "make_deepseek_decider",
     "make_gemini_decider",

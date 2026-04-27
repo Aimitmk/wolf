@@ -81,3 +81,27 @@ def test_npc_decider_config_round_trips_deepseek() -> None:
     assert cfg.api_key.get_secret_value() == "d"
     assert cfg.thinking == "enabled"
     assert cfg.reasoning_effort == "max"
+
+
+def test_mock_provider_does_not_require_api_key_or_vertex_project() -> None:
+    """``NPC_LLM_PROVIDER=mock`` is for offline integration tests —
+    no credentials should be required."""
+    s = NpcSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        NPC_LLM_PROVIDER="mock",
+    )
+    assert s.NPC_LLM_PROVIDER == "mock"
+    assert s.NPC_LLM_API_KEY is None
+    assert s.NPC_LLM_VERTEX_PROJECT is None
+
+
+def test_npc_decider_config_round_trips_mock() -> None:
+    s = NpcSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        NPC_LLM_PROVIDER="mock",
+    )
+    cfg = s.npc_decider_config()
+    assert cfg.provider == "mock"
+    assert cfg.api_key is None

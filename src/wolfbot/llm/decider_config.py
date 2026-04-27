@@ -32,7 +32,7 @@ from typing import Literal
 
 from pydantic import SecretStr
 
-LLMProvider = Literal["xai", "deepseek", "gemini"]
+LLMProvider = Literal["xai", "deepseek", "gemini", "mock"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,12 @@ class LLMDeciderConfig:
     that the field tied to the chosen provider is non-None / non-empty
     by the time we construct this — the asserts in the factories are
     documentation aids for mypy.
+
+    The ``"mock"`` provider is a special offline-test mode: no credential
+    is required, no network call is ever made, and the decider/generator
+    factories return a deterministic stub. Used by integration test rigs
+    that exercise the full Master + NPC pipeline without burning real
+    LLM tokens.
     """
 
     provider: LLMProvider
