@@ -1,43 +1,76 @@
-# NPC bot env templates
+# NPC bot env files
 
-各ペルソナごとに 1 つのテンプレ (`.env.<persona>.example`) がある。NPC bot は
-**1 プロセス = 1 ペルソナ**なので、立ち上げたいペルソナぶんコピーして使う。
+NPC bot は **1 プロセス = 1 ペルソナ** で動きます。各ペルソナの env ファイル
+(`envs/npc/.env.<persona>`) は手書きせず、テンプレと `tokens.txt` から
+**生成スクリプトで自動作成**します。
 
-## ファイルの意味
+## 構成
 
-| パターン | 意味 | git |
+| ファイル | 意味 | git |
 |---|---|---|
-| `envs/npc/.env.<persona>.example` | テンプレ (秘密値は空欄) | コミットされる |
-| `envs/npc/.env.<persona>` | 実 env (秘密値を埋めたもの) | gitignore |
+| `envs/npc/.env.npc.example` | 単一テンプレ (`{{...}}` プレースホルダ) | コミットされる |
+| `envs/npc/.env.<persona>` | 生成された実 env (秘密値を含む) | gitignored |
+| `tokens.txt` (リポジトリルート) | `<persona>: <token>` の一覧 | gitignored |
 
-## 使い方
+## セットアップ
 
-```bash
-# 1) テンプレをコピー
-cp envs/npc/.env.setsu.example envs/npc/.env.setsu
+### 1. tokens.txt を用意
 
-# 2) 編集して秘密値を埋める
-#   NPC_DISCORD_TOKEN     ── このペルソナ専用の Discord bot トークン
-#   DISCORD_GUILD_ID      ── Master と同じ guild ID
-#   MAIN_VOICE_CHANNEL_ID ── Master と同じ VC ID
-#   MASTER_NPC_PSK        ── Master の MASTER_NPC_PSK と同値
-#   NPC_LLM_API_KEY       ── NPC LLM の API キー
-#                            (Master の GAMEPLAY_LLM_API_KEY と共用可)
-$EDITOR envs/npc/.env.setsu
+リポジトリルートに `tokens.txt` を作り、Discord Developer Portal で発行した
+NPC bot のトークンを 1 行 1 ペルソナで貼る:
 
-# 3) 起動 (env ファイルは WOLFBOT_NPC_ENV で指定)
-WOLFBOT_NPC_ENV=envs/npc/.env.setsu uv run wolfbot-npc
-
-# 4) 別ペルソナを増やす場合は別プロセスで
-WOLFBOT_NPC_ENV=envs/npc/.env.gina uv run wolfbot-npc &
-WOLFBOT_NPC_ENV=envs/npc/.env.sq   uv run wolfbot-npc &
+```
+master: <Master bot のトークン>          ← 任意 (生成時はスキップされる)
+setsu:  <セツ bot のトークン>
+gina:   <ジナ bot のトークン>
+sq:     <SQ bot のトークン>
+raqio:  <ラキオ bot のトークン>
+...
 ```
 
-`reactive_voice` モードで `/wolf start` するとき、Master は
-**online な NPC bot のうち未割当のものを席に充てる**。出したい
-ペルソナのプロセスだけを起動しておけば、それだけが選ばれる。
+- 行の先頭が `#` ならコメントとして無視される
+- `master` 行は **Master 用なので生成対象から除外** される (Master のトークンは
+  `.env.master` に書く)
+- `setu` のような typo は `setsu` に自動マッピングされる (`PERSONA_ALIASES` で
+  定義済み)
 
-## ペルソナ一覧 (テンプレで既定値を割り当て済み)
+### 2. .env.master を先に用意
+
+生成スクリプトは以下の値を `.env.master` から拾うので、先に値を埋めておく:
+
+- `DISCORD_GUILD_ID`
+- `MAIN_VOICE_CHANNEL_ID`
+- `MASTER_NPC_PSK`
+- `GAMEPLAY_LLM_API_KEY` (各 NPC の `NPC_LLM_API_KEY` として再利用される)
+
+### 3. 生成スクリプトを実行
+
+```bash
+# 全ペルソナぶん生成
+python3 scripts/generate_npc_envs.py
+
+# 既存ファイルを上書きしたくない
+python3 scripts/generate_npc_envs.py --no-overwrite
+
+# 実際には書かず内容だけ確認
+python3 scripts/generate_npc_envs.py --dry-run
+
+# 入力パスを変えたい
+python3 scripts/generate_npc_envs.py --tokens path/to/tokens.txt --master path/to/.env.master
+```
+
+`tokens.txt` を更新したり `.env.master` の共有値を変えたりしたら**再実行**で
+全 NPC env を一括更新できます。手書き編集はやめて、編集はテンプレ側に集約。
+
+### 4. 起動
+
+```bash
+WOLFBOT_NPC_ENV=envs/npc/.env.setsu uv run wolfbot-npc
+```
+
+複数まとめて起動したいときは `scripts/run-bots.sh` (tmux で 1 ウィンドウ = 1 bot)。
+
+## ペルソナ一覧 (canonical source: `wolfbot.npc.personas`)
 
 | Key | 表示名 | スタイル | TTS_VOICE_ID |
 |---|---|---|---|
@@ -56,14 +89,12 @@ WOLFBOT_NPC_ENV=envs/npc/.env.sq   uv run wolfbot-npc &
 | `remnan` | ⚪️レムナン | 内向的で慎重。観察は細かい | 10 |
 | `yuriko` | 👑ユリコ | 冷静で威圧感がある。少ない語数で核心を突く | 3 |
 
-`TTS_VOICE_ID` は VOICEVOX のスピーカー ID。重複しないように既定で
-割り当ててあるが、好みの声に変えたい場合だけ編集する
-(<https://voicevox.hiroshiba.jp/> で確認)。
+`TTS_VOICE_ID` は `wolfbot.npc.personas` の `Persona.tts_voice_id` が一次情報。
+別の声に変えたい場合は (a) Persona 定義を編集してスクリプトを再実行、または
+(b) 生成された `.env.<persona>` を後から手動で書き換える。
 
 ## 事前にやっておくこと
 
 - 各ペルソナぶんの Discord bot アプリを Developer Portal で作成し、
-  guild に**手動で招待**しておく (Discord は bot から bot を guild に
-  追加できないので、これは 1 度きりのセットアップ作業)。
-- Master の `.env.master` を先に用意し、`MASTER_NPC_PSK` を決めておく。
-- VOICEVOX エンジンを立ち上げておく (既定 `http://localhost:50021`)。
+  guild に手動で招待しておく (1 度きりのセットアップ作業)。
+- VOICEVOX エンジンを起動 (既定 `http://localhost:50021`)。

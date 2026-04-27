@@ -38,16 +38,21 @@ uv sync
 cp .env.master.example .env.master
 ```
 
-reactive_voice モードで NPC bot も動かす場合は、**1 ペルソナ = 1 プロセス = 1 Discord bot アカウント** で別途用意します。リポジトリには 14 体ぶんのテンプレが [envs/npc/](envs/npc/) 配下に `.env.<persona>.example` の形で入っているので、必要なペルソナぶんコピーして秘密値を埋めます。
+reactive_voice モードで NPC bot も動かす場合は、**1 ペルソナ = 1 プロセス = 1 Discord bot アカウント** で別途用意します。各ペルソナの env ファイルは手書きせず、リポジトリルートの `tokens.txt` (gitignored) と単一テンプレ `envs/npc/.env.npc.example` から自動生成します。
 
 ```bash
-cp envs/npc/.env.setsu.example envs/npc/.env.setsu
-# envs/npc/.env.setsu の NPC_DISCORD_TOKEN / MASTER_NPC_PSK /
-# NPC_LLM_API_KEY / DISCORD_GUILD_ID / MAIN_VOICE_CHANNEL_ID を埋める
+# 1) tokens.txt にトークンを 1 行 1 ペルソナで貼る (リポジトリルートに作る)
+#    例:
+#      setsu:  MTQ5...
+#      gina:   MTQ5...
+#      sq:     MTQ5...
+#      ...
 
-WOLFBOT_NPC_ENV=envs/npc/.env.setsu uv run wolfbot-npc &
-WOLFBOT_NPC_ENV=envs/npc/.env.gina  uv run wolfbot-npc &
-# 必要なペルソナぶん起動
+# 2) 生成 (envs/npc/.env.<persona> がペルソナぶんできる)
+python3 scripts/generate_npc_envs.py
+
+# 3) tmux で Master + 起動済みの全 NPC を一括起動
+scripts/run-bots.sh
 ```
 
 各 NPC bot のセットアップ詳細・ペルソナ一覧・TTS_VOICE_ID の既定値は [envs/npc/README.md](envs/npc/README.md) を参照してください。
