@@ -249,15 +249,22 @@ class _StubPhaseLookup:
         self,
         mapping: dict[str, tuple[Phase, int]],
         alive_seats: dict[str, list[int]] | None = None,
+        addressed: dict[tuple[str, str], int] | None = None,
     ) -> None:
         self._mapping = mapping
         self._alive = alive_seats or {}
+        self._addressed = addressed or {}
 
     async def get_phase(self, game_id: str) -> tuple[Phase, int] | None:
         return self._mapping.get(game_id)
 
     async def get_alive_seat_nos(self, game_id: str) -> list[int]:
         return self._alive.get(game_id, [])
+
+    async def resolve_addressed_seat(
+        self, game_id: str, addressed_name: str
+    ) -> int | None:
+        return self._addressed.get((game_id, addressed_name))
 
 
 async def test_master_ingest_discards_npc_speaker(repo: SqliteRepo) -> None:
@@ -505,7 +512,8 @@ async def test_close_npc_playback_only_affects_open_rows(repo: SqliteRepo) -> No
 
 
 def test_phase_lookup_protocol_runtime_check() -> None:
-    """A class with `get_phase` and `get_alive_seat_nos` satisfies PhaseLookup."""
+    """A class with `get_phase`, `get_alive_seat_nos`, and
+    `resolve_addressed_seat` satisfies PhaseLookup."""
 
     class Impl:
         async def get_phase(self, game_id: str) -> tuple[Phase, int] | None:
@@ -513,6 +521,11 @@ def test_phase_lookup_protocol_runtime_check() -> None:
 
         async def get_alive_seat_nos(self, game_id: str) -> list[int]:
             return []
+
+        async def resolve_addressed_seat(
+            self, game_id: str, addressed_name: str
+        ) -> int | None:
+            return None
 
     obj = Impl()
     # Use the runtime-checkable protocol; this asserts the structural match.

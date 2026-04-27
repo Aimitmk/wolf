@@ -502,19 +502,25 @@ class SpeakArbiter:
         if state is None:
             return
 
-        # Pick the next NPC. Priority: seats that have not yet spoken in this
-        # phase (PublicDiscussionState.silent_seats) before seats that have.
-        # Within each bucket, lowest assigned_seat wins. Without this two-key
-        # sort the picker would always return the lowest-seat NPC, monopolizing
-        # the discussion in pure-NPC games where no human speech triggers
-        # rotation. Once every alive NPC has spoken once the silent set is
-        # empty and the bucket becomes a no-op — order falls back to seat-no.
+        # Pick the next NPC. Priority order, applied as a 3-key sort:
+        #   1. addressed seat — if a recent human utterance carries
+        #      `addressed_seat_no`, that NPC must reply before anyone else.
+        #   2. silent seats — NPCs who haven't yet spoken in this phase win
+        #      over those who have. Without this the lowest-seat NPC would
+        #      monopolize pure-NPC games where no human speech triggers
+        #      rotation. Once every alive NPC has spoken the bucket becomes
+        #      a no-op and order falls back to seat number.
+        #   3. lowest assigned_seat as a stable tiebreaker.
+        addressed = state.last_addressed_seat
         online = self.registry.all_online()
 
-        def _pick_key(e: object) -> tuple[int, int]:
+        def _pick_key(e: object) -> tuple[int, int, int]:
             seat = getattr(e, "assigned_seat", None) or 99
+            is_addressed = 0 if (
+                addressed is not None and seat == addressed
+            ) else 1
             in_silent = 0 if seat in state.silent_seats else 1
-            return (in_silent, seat)
+            return (is_addressed, in_silent, seat)
 
         for entry in sorted(online, key=_pick_key):
             if entry.assigned_seat is None or entry.game_id != game_id:

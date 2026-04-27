@@ -208,6 +208,16 @@ async def _run() -> None:
                 players = await repo.load_players(game_id)
                 return sorted(p.seat_no for p in players if p.alive)
 
+            async def resolve_addressed_seat(
+                self, game_id: str, addressed_name: str
+            ) -> int | None:
+                from wolfbot.master.ingest_service import resolve_seat_by_name
+
+                seats = await repo.load_seats(game_id)
+                players = await repo.load_players(game_id)
+                alive = {p.seat_no for p in players if p.alive}
+                return resolve_seat_by_name(addressed_name, seats, alive)
+
         ingest_service = MasterIngestService(
             registry=npc_registry,
             discussion=discussion_service,

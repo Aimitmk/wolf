@@ -17,6 +17,9 @@ text-message capture path on `WolfCog` (which also produces SpeechEvents).
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
+from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 from wolfbot.domain.discussion import (
@@ -25,6 +28,7 @@ from wolfbot.domain.discussion import (
     make_phase_id,
 )
 from wolfbot.domain.enums import Phase
+from wolfbot.domain.models import Seat
 from wolfbot.domain.ws_messages import SpeechEventPayload
 from wolfbot.master.npc_registry import NpcRegistry
 from wolfbot.services.discussion_service import (
@@ -36,6 +40,97 @@ from wolfbot.services.discussion_service import (
 )
 
 log = logging.getLogger(__name__)
+
+
+_HONORIFICS: tuple[str, ...] = ("さん", "くん", "ちゃん", "様", "さま", "君")
+
+
+def _strip_emoji(name: str) -> str:
+    """Drop leading emoji + whitespace; persona display_names are like '🌙セツ'."""
+    out: list[str] = []
+    skipping = True
+    for ch in name:
+        if skipping:
+            if ch.isspace():
+                continue
+            cat = unicodedata.category(ch)
+            # Symbols (S*) and 'Cn' (unassigned) covers most emoji codepoints.
+            if cat.startswith("S") or cat == "Cn":
+                continue
+            skipping = False
+        out.append(ch)
+    return "".join(out).strip()
+
+
+def _normalize_name(name: str) -> str:
+    """Lowercase + NFKC + strip whitespace, emoji, and trailing honorifics.
+
+    Used for both the spoken alias and the seat display name so the
+    comparison is symmetric and forgiving.
+    """
+    folded = unicodedata.normalize("NFKC", name).strip().lower()
+    folded = _strip_emoji(folded)
+    for honorific in _HONORIFICS:
+        if folded.endswith(honorific):
+            folded = folded[: -len(honorific)].rstrip()
+            break
+    return folded
+
+
+_SEAT_NUMBER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^席?\s*(\d+)\s*(?:番|ばん)?$"),
+    re.compile(r"^seat\s*(\d+)$"),
+)
+
+
+def resolve_seat_by_name(
+    addressed_name: str,
+    seats: Iterable[Seat],
+    alive: frozenset[int] | set[int] | None = None,
+) -> int | None:
+    """Map ``addressed_name`` (literal handle from voice) to a seat number.
+
+    Returns ``None`` when no seat matches, or when ``alive`` is provided and
+    the candidate is not currently alive (we never route an address at a
+    dead seat — they cannot reply). Ambiguous matches across multiple seats
+    also return ``None`` to fail closed.
+    """
+    norm = _normalize_name(addressed_name)
+    if not norm:
+        return None
+
+    for pat in _SEAT_NUMBER_PATTERNS:
+        m = pat.match(norm)
+        if m:
+            try:
+                seat_no = int(m.group(1))
+            except ValueError:
+                continue
+            if 1 <= seat_no <= 9 and (alive is None or seat_no in alive):
+                return seat_no
+            return None
+
+    matches: set[int] = set()
+    for seat in seats:
+        if alive is not None and seat.seat_no not in alive:
+            continue
+        candidates = {_normalize_name(seat.display_name)}
+        if seat.persona_key:
+            candidates.add(_normalize_name(seat.persona_key))
+        candidates.discard("")
+        if norm in candidates:
+            matches.add(seat.seat_no)
+            continue
+        # Fall back to substring containment in either direction so handles
+        # like "ジナ" still match a display_name "ジナ・メイユイ".
+        for cand in candidates:
+            if cand and (norm == cand or norm in cand or cand in norm):
+                matches.add(seat.seat_no)
+                break
+
+    if len(matches) == 1:
+        return matches.pop()
+    return None
 
 
 @runtime_checkable
@@ -50,6 +145,14 @@ class PhaseLookup(Protocol):
     async def get_phase(self, game_id: str) -> tuple[Phase, int] | None: ...
 
     async def get_alive_seat_nos(self, game_id: str) -> list[int]: ...
+
+    async def resolve_addressed_seat(
+        self, game_id: str, addressed_name: str
+    ) -> int | None:
+        """Map a literal name/handle ('セツ', '席3', 'Alice さん') to a seat
+        number for `game_id`. Returns ``None`` when no seat matches or the
+        match is ambiguous."""
+        ...
 
 
 class MasterIngestService:
@@ -113,6 +216,23 @@ class MasterIngestService:
             alive_seat_nos=alive_seat_nos,
         )
 
+        addressed_seat_no: int | None = None
+        if payload.addressed_name:
+            try:
+                addressed_seat_no = await self.phase_lookup.resolve_addressed_seat(
+                    payload.game_id, payload.addressed_name
+                )
+            except Exception:
+                log.exception(
+                    "addressed_seat_resolution_failed game=%s name=%s",
+                    payload.game_id,
+                    payload.addressed_name,
+                )
+                addressed_seat_no = None
+            # Self-address never needs a routed reply.
+            if addressed_seat_no is not None and addressed_seat_no == payload.seat_no:
+                addressed_seat_no = None
+
         event = SpeechEvent(
             event_id=new_event_id(),
             game_id=payload.game_id,
@@ -128,10 +248,11 @@ class MasterIngestService:
             audio_end_ms=payload.audio_end_ms,
             summary=payload.summary,
             co_declaration=payload.co_declaration,
+            addressed_seat_no=addressed_seat_no,
             created_at_ms=default_now_ms(),
         )
         await self.discussion.record(event)
         return (event, None)
 
 
-__all__ = ["MasterIngestService", "PhaseLookup"]
+__all__ = ["MasterIngestService", "PhaseLookup", "resolve_seat_by_name"]

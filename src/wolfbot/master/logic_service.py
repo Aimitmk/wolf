@@ -65,6 +65,21 @@ def build_logic_packet(
         else "(none)"
     )
     summary = f"phase_id={state.phase_id} day={state.day} co_claims=[{co_repr}] {silent_repr}"
+    if state.last_addressed_seat is not None:
+        speaker_repr = (
+            f"席{state.last_addressed_speaker_seat}"
+            if state.last_addressed_speaker_seat is not None
+            else "human"
+        )
+        # Truncate the spoken line so the packet stays small even if the
+        # speaker rambled. NPCs only need the gist to respond on-topic.
+        utter = state.last_addressed_text.strip().replace("\n", " ")
+        if len(utter) > 160:
+            utter = utter[:160] + "…"
+        summary += (
+            f" last_address=席{state.last_addressed_seat}"
+            f" from={speaker_repr} text=\"{utter}\""
+        )
 
     return LogicPacket(
         ts=now_ms,
