@@ -584,6 +584,15 @@ async def test_host_abort_ends_game(
     assert loaded.ended_at is not None
     assert any(c.name == "on_game_end" for c in disc.calls)
 
+    public_posts = [c for c in disc.calls if c.name == "post_public"]
+    role_reveals = [c for c in public_posts if c.kwargs["kind"] == "ROLE_REVEAL"]
+    assert len(role_reveals) == 1
+    reveal_text = role_reveals[0].kwargs["text"]
+    assert reveal_text.startswith("最終配役:\n")
+    for sn in range(1, 10):
+        assert f"- 席{sn} " in reveal_text
+    assert "(生存)" in reveal_text or "(死亡)" in reveal_text
+
 
 async def test_host_abort_returns_false_when_already_ended(
     repo: SqliteRepo,
@@ -597,11 +606,22 @@ async def test_host_abort_returns_false_when_already_ended(
     first = await service.host_abort(game.id)
     assert first
     on_game_end_after_first = sum(1 for c in disc.calls if c.name == "on_game_end")
+    role_reveals_after_first = sum(
+        1
+        for c in disc.calls
+        if c.name == "post_public" and c.kwargs["kind"] == "ROLE_REVEAL"
+    )
 
     second = await service.host_abort(game.id)
     assert not second
     on_game_end_after_second = sum(1 for c in disc.calls if c.name == "on_game_end")
     assert on_game_end_after_second == on_game_end_after_first
+    role_reveals_after_second = sum(
+        1
+        for c in disc.calls
+        if c.name == "post_public" and c.kwargs["kind"] == "ROLE_REVEAL"
+    )
+    assert role_reveals_after_second == role_reveals_after_first
 
 
 async def test_optimistic_lock_prevents_double_advance(

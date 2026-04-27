@@ -38,6 +38,7 @@ from wolfbot.domain.rules import (
     resolve_wolf_attack,
 )
 from wolfbot.domain.state_machine import (
+    build_role_reveal_text,
     plan_day_discussion_to_vote,
     plan_day_discussion_wait,
     plan_day_runoff_resolve,
@@ -919,6 +920,13 @@ class GameService:
         if game is None or game.ended_at is not None:
             return False
         seats = await self.repo.load_seats(game_id)
+        players = await self.repo.load_players(game_id)
+        seats_by_no = {s.seat_no: s for s in seats}
+        await self._safe_post_public(
+            game,
+            build_role_reveal_text(players, seats_by_no),
+            "ROLE_REVEAL",
+        )
         try:
             await self.discord.on_game_end(game, seats)
         except Exception:

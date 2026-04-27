@@ -128,6 +128,23 @@ def _victory_log(game: Game, v: Faction, now_epoch: int) -> LogEntry:
     )
 
 
+def build_role_reveal_text(
+    players_after: Sequence[Player],
+    seats_by_no: Mapping[int, Seat],
+) -> str:
+    """Compose the `最終配役:` reveal block. Pure: no I/O, no clock, no DB.
+
+    Shared between the normal end-of-game `_role_reveal_log` (victory paths) and
+    `GameService.host_abort` (bot-test convenience reveal on `/wolf abort`).
+    """
+    lines = ["最終配役:"]
+    for p in sorted(players_after, key=lambda x: x.seat_no):
+        role_ja = ROLE_JA[p.role] if p.role is not None else "?"
+        status = "生存" if p.alive else "死亡"
+        lines.append(f"- 席{p.seat_no} {_name(seats_by_no, p.seat_no)}: {role_ja} ({status})")
+    return "\n".join(lines)
+
+
 def _role_reveal_log(
     game: Game,
     players_after: Sequence[Player],
@@ -139,15 +156,10 @@ def _role_reveal_log(
     `players_after` must already reflect post-transition alive/dead state — caller
     is responsible for applying newly-dead seat flips before handing players in.
     """
-    lines = ["最終配役:"]
-    for p in sorted(players_after, key=lambda x: x.seat_no):
-        role_ja = ROLE_JA[p.role] if p.role is not None else "?"
-        status = "生存" if p.alive else "死亡"
-        lines.append(f"- 席{p.seat_no} {_name(seats_by_no, p.seat_no)}: {role_ja} ({status})")
     return _public_log(
         game,
         kind="ROLE_REVEAL",
-        text="\n".join(lines),
+        text=build_role_reveal_text(players_after, seats_by_no),
         now_epoch=now_epoch,
         phase=Phase.GAME_OVER,
     )
