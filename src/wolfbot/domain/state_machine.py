@@ -73,6 +73,15 @@ RUNOFF_SPEECH_DEADLINE = 60
 # Re-check interval used by `plan_runoff_speech_wait`, mirroring DAY_DISCUSSION_GRACE.
 RUNOFF_SPEECH_GRACE = 30
 
+# Initial deadline for DAY_EXECUTION_SPEECH (pre-execution last-words intermediate
+# phase entered when a vote/runoff resolution executes an LLM seat). Same safety
+# net role as RUNOFF_SPEECH_DEADLINE; the LLM dispatcher's `finally` block always
+# advances `execution_speech_done` so death processing can resume.
+EXECUTION_SPEECH_DEADLINE = 60
+
+# Re-check interval used by `plan_execution_speech_wait`, mirroring RUNOFF_SPEECH_GRACE.
+EXECUTION_SPEECH_GRACE = 30
+
 
 # ---------------------------------------------------------------- helpers
 def _name(seats: Mapping[int, Seat], seat_no: int) -> str:
@@ -365,6 +374,26 @@ def plan_day_vote_resolve(
     tally_suffix = f"\n\n{tally}" if tally else ""
 
     if outcome.executed is not None:
+        executed_seat_obj = seats_by_no.get(outcome.executed)
+        if executed_seat_obj is not None and executed_seat_obj.is_llm:
+            # LLM executions park in DAY_EXECUTION_SPEECH so the condemned LLM
+            # gets one public last-words turn before death processing. Tally
+            # rides on the entry log only — the formal EXECUTION log emits
+            # later with `tally_suffix=""` to avoid duplication.
+            pub = _execution_speech_entry_log(
+                game,
+                _name(seats_by_no, outcome.executed),
+                "投票の結果、",
+                tally_suffix,
+                now_epoch,
+            )
+            return Transition(
+                next_phase=Phase.DAY_EXECUTION_SPEECH,
+                next_day=game.day_number,
+                new_deadline_epoch=now_epoch + EXECUTION_SPEECH_DEADLINE,
+                public_logs=(pub,),
+                clear_force_skip=True,
+            )
         return _apply_execution(
             game,
             players,
@@ -471,6 +500,22 @@ def plan_day_runoff_resolve(
     tally_suffix = f"\n\n{tally}" if tally else ""
 
     if outcome.executed is not None:
+        executed_seat_obj = seats_by_no.get(outcome.executed)
+        if executed_seat_obj is not None and executed_seat_obj.is_llm:
+            pub = _execution_speech_entry_log(
+                game,
+                _name(seats_by_no, outcome.executed),
+                "決選投票の結果、",
+                tally_suffix,
+                now_epoch,
+            )
+            return Transition(
+                next_phase=Phase.DAY_EXECUTION_SPEECH,
+                next_day=game.day_number,
+                new_deadline_epoch=now_epoch + EXECUTION_SPEECH_DEADLINE,
+                public_logs=(pub,),
+                clear_force_skip=True,
+            )
         return _apply_execution(
             game,
             players,
@@ -777,6 +822,20 @@ def plan_night_resolve(
     record_guard: tuple[int, int] | None = None
     if knight_seat is not None and guard_target is not None:
         record_guard = (knight_seat, guard_target)
+        # Emit a private guard log so the knight can recall its own history when
+        # giving a CO speech or last words. Mirrors SEER_RESULT/MEDIUM_RESULT —
+        # the only role-specific private log knight had before was the
+        # `previous_guard` row (next-night blocked-target rule), which carries
+        # last-guard only and is not surfaced to the LLM context.
+        private.append(
+            _private_log(
+                game,
+                audience_seat=knight_seat,
+                kind="KNIGHT_GUARD",
+                text=f"{game.day_number}日目に {_name(seats_by_no, guard_target)} を護衛しました。",
+                now_epoch=now_epoch,
+            )
+        )
 
     public_logs: tuple[LogEntry, ...] = (
         _public_log(
@@ -907,8 +966,81 @@ def plan_runoff_speech_wait(game: Game, now_epoch: int) -> Transition:
     )
 
 
+# -------------------------------------- DAY_EXECUTION_SPEECH (LLM last words)
+def _execution_speech_entry_log(
+    game: Game,
+    name: str,
+    prefix_text: str,
+    tally_suffix: str,
+    now_epoch: int,
+) -> LogEntry:
+    """Public log emitted on entry to DAY_EXECUTION_SPEECH.
+
+    Wording avoids meta-references like "遺言を待っています" because the
+    condemned LLM itself sees the public log block via `build_user_context`,
+    and we don't want it framing its own speech as "I am being executed".
+    The "this is a last words turn" framing lives in `task_last_words` (only
+    the executed LLM sees that block).
+    """
+    return _public_log(
+        game,
+        kind="EXECUTION_PENDING",
+        text=f"{prefix_text}{name} が処刑対象に決まりました。最後の発言を聞きます。{tally_suffix}",
+        now_epoch=now_epoch,
+        phase=Phase.DAY_EXECUTION_SPEECH,
+    )
+
+
+def plan_execution_speech_wait(game: Game, now_epoch: int) -> Transition:
+    """Park in DAY_EXECUTION_SPEECH with a short grace deadline.
+
+    Mirrors `plan_runoff_speech_wait`. Triggers when the safety-net deadline
+    expires before the condemned LLM finishes its single last-words turn; the
+    LLM dispatcher's `finally` block also wakes the engine when the seat
+    completes (success / skip / empty / decider exception).
+    """
+    return Transition(
+        next_phase=Phase.DAY_EXECUTION_SPEECH,
+        next_day=game.day_number,
+        new_deadline_epoch=now_epoch + EXECUTION_SPEECH_GRACE,
+    )
+
+
+def plan_execution_speech_to_execution(
+    game: Game,
+    players: Sequence[Player],
+    seats_by_no: Mapping[int, Seat],
+    executed_seat: int,
+    now_epoch: int,
+    *,
+    clear_force: bool,
+) -> Transition:
+    """DAY_EXECUTION_SPEECH → NIGHT/GAME_OVER after the LLM has spoken.
+
+    Delegates to `_apply_execution` with `tally_suffix=""` because the tally
+    was already shown on the EXECUTION_PENDING entry log. The downstream
+    death-update / victory-check / role-reveal / NIGHT-or-GAME_OVER routing
+    is shared with the direct execution path.
+
+    Defense in depth: if `executed_seat` is somehow dead / unknown by the time
+    we resume here (corrupt state, race), `_apply_execution`'s alive-guard
+    yields a NO_EXECUTION transition to NIGHT — no extra branch needed.
+    """
+    return _apply_execution(
+        game,
+        players,
+        seats_by_no,
+        executed_seat,
+        now_epoch,
+        clear_force=clear_force,
+        tally_suffix="",
+    )
+
+
 __all__ = [
     "DAY_DISCUSSION_GRACE",
+    "EXECUTION_SPEECH_DEADLINE",
+    "EXECUTION_SPEECH_GRACE",
     "NIGHT_DURATION",
     "RUNOFF_DURATION",
     "RUNOFF_SPEECH_DEADLINE",
@@ -918,6 +1050,8 @@ __all__ = [
     "plan_day_discussion_wait",
     "plan_day_runoff_resolve",
     "plan_day_vote_resolve",
+    "plan_execution_speech_to_execution",
+    "plan_execution_speech_wait",
     "plan_extend_deadline",
     "plan_night0",
     "plan_night_resolve",

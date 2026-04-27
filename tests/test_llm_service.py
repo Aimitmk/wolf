@@ -1152,17 +1152,11 @@ async def test_ask_system_prompt_contains_co_overflow_rule_for_any_role(
         system_prompt = await _capture_ask_system_prompt(repo, role)
         assert "対抗 CO 超過分" in system_prompt, f"{role.name} missed 対抗 CO 超過分"
         assert "CO 数 - 1" in system_prompt, f"{role.name} missed CO 数 - 1"
-        assert "超過分合計が 3 に達した場合" in system_prompt, (
-            f"{role.name} missed sum-3 trigger"
-        )
-        assert "村陣営の確白級" in system_prompt, (
-            f"{role.name} missed non-CO 確白級 consequence"
-        )
+        assert "超過分合計が 3 に達した場合" in system_prompt, f"{role.name} missed sum-3 trigger"
+        assert "村陣営の確白級" in system_prompt, f"{role.name} missed non-CO 確白級 consequence"
         assert "0〜2" in system_prompt, f"{role.name} missed sum 0〜2 caveat"
         assert "4 以上" in system_prompt, f"{role.name} missed sum 4+ contradiction"
-        assert "配役上の消去法" in system_prompt, (
-            f"{role.name} missed 配役上の消去法 framing"
-        )
+        assert "配役上の消去法" in system_prompt, f"{role.name} missed 配役上の消去法 framing"
 
 
 async def test_ask_system_prompt_contains_co_overflow_examples_for_any_role(
@@ -1202,14 +1196,10 @@ async def test_ask_system_prompt_contains_rope_margin_rules_for_any_role(
     ):
         system_prompt = await _capture_ask_system_prompt(repo, role)
         assert "吊り余裕" in system_prompt, f"{role.name} missed 吊り余裕"
-        assert "残り縄 - 推定残り人狼数" in system_prompt, (
-            f"{role.name} missed margin formula"
-        )
+        assert "残り縄 - 推定残り人狼数" in system_prompt, f"{role.name} missed margin formula"
         assert "推定残り人狼数" in system_prompt, f"{role.name} missed 推定残り人狼数"
         assert "投票で吊り切る" in system_prompt, f"{role.name} missed 投票で吊り切る"
-        assert "吊り余裕が 0 以下" in system_prompt, (
-            f"{role.name} missed zero-margin rule"
-        )
+        assert "吊り余裕が 0 以下" in system_prompt, f"{role.name} missed zero-margin rule"
         assert "非狼濃厚位置" in system_prompt, f"{role.name} missed 非狼濃厚位置"
         assert "敗着になり得る" in system_prompt, f"{role.name} missed 敗着"
         # Estimation source is public info, not a bot-provided secret.
@@ -1289,8 +1279,7 @@ async def test_ask_system_prompt_madman_co_overflow_addition_keeps_partner_isola
     assert "公開情報の各 CO 数と残り縄から判断する" in system_prompt
     # Wolf-coordination 語彙が漏れていないこと。
     assert not re.search(r"相方(?!候補)", system_prompt), (
-        "bare '相方' (actor mode) leaked into madman system prompt via "
-        "CO-overflow addition"
+        "bare '相方' (actor mode) leaked into madman system prompt via CO-overflow addition"
     )
     assert "襲撃先を揃える" not in system_prompt
     # 既存 prohibition 文言が残っていること。
@@ -3131,3 +3120,281 @@ def test_make_llm_decider_gemini_branch_passes_temperature_from_settings(
     decider = make_llm_decider(s)
     assert isinstance(decider, GeminiLLMActionDecider)
     assert decider.temperature == 0.3
+
+
+# ============================================================
+# DAY_EXECUTION_SPEECH (LLM last words) — submit + per-seat run
+# ============================================================
+async def _seed_execution_speech_game(repo: SqliteRepo) -> tuple[Game, list[Seat]]:
+    """One LLM seat (seat 2, role=SEER) parked in DAY_EXECUTION_SPEECH on day 1.
+
+    The seat is the executed LLM about to give last words. Other seats are
+    irrelevant to this dispatch path so we keep them minimal.
+    """
+    game = Game(
+        id="g-exec-speech",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_EXECUTION_SPEECH,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.SEER)
+    return game, seats
+
+
+async def test_submit_llm_execution_speech_is_fire_and_forget(repo: SqliteRepo) -> None:
+    """Caller returns immediately; xAI work happens in a background task."""
+    game, seats = await _seed_execution_speech_game(repo)
+    release = asyncio.Event()
+    decider = _BlockingDecider(
+        [
+            LLMAction(
+                intent="speak",
+                public_message="最後に村の方々へ、占い結果を残します。",
+                reason_summary="",
+                confidence=0.9,
+            )
+        ],
+        release,
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    # The submit call must return promptly even though decider blocks.
+    await asyncio.wait_for(
+        adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2),
+        timeout=0.5,
+    )
+    # Allow the background task to start (it will block on `release`).
+    await asyncio.sleep(0.05)
+    # No public post yet — decider hasn't returned.
+    assert poster.public == []
+    # Release and drain the task.
+    release.set()
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+    assert len(poster.public) == 1
+
+
+async def test_execution_speech_speak_intent_posts_and_logs(repo: SqliteRepo) -> None:
+    """speak + non-empty message → post_public + PLAYER_SPEECH log."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider(
+        [
+            LLMAction(
+                intent="speak",
+                public_message="占い師 CO。day 0 ランダム白は H1。day 1 朝の発言で 3 を黒予想。",
+                reason_summary="",
+                confidence=0.9,
+            )
+        ]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(
+        repo=repo, decider=decider, message_poster=poster, rng=random.Random(0), clock=lambda: 555
+    )
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert len(poster.public) == 1
+    body = poster.public[0][1]
+    assert "セツ" in body and "占い師 CO" in body
+    logs = await repo.load_public_logs(game.id, limit=40)
+    speech_rows = [r for r in logs if r.get("kind") == "PLAYER_SPEECH"]
+    assert len(speech_rows) == 1
+    assert speech_rows[0].get("actor_seat") == 2
+    # Progress marked.
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+async def test_execution_speech_skip_intent_marks_done_without_posting(
+    repo: SqliteRepo,
+) -> None:
+    """intent=skip is allowed (rare) — nothing is posted, but the seat must
+    still be marked done so the engine can advance."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider(
+        [LLMAction(intent="skip", reason_summary="nothing useful to add", confidence=0.3)]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+    logs = await repo.load_public_logs(game.id, limit=40)
+    assert [r for r in logs if r.get("kind") == "PLAYER_SPEECH"] == []
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+async def test_execution_speech_empty_message_marks_done_without_posting(
+    repo: SqliteRepo,
+) -> None:
+    """speak with empty/whitespace message → no post but progress marked."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider(
+        [LLMAction(intent="speak", public_message="   ", reason_summary="", confidence=0.5)]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+class _ExplodingDecider:
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        raise RuntimeError("simulated decider failure")
+
+
+async def test_execution_speech_decider_exception_still_marks_done(
+    repo: SqliteRepo,
+) -> None:
+    """Decider raises → caught, progress still set so engine can advance."""
+    game, seats = await _seed_execution_speech_game(repo)
+    poster = _FakePoster()
+    adapter = LLMAdapter(
+        repo=repo, decider=_ExplodingDecider(), message_poster=poster, rng=random.Random(0)
+    )
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # _ask catches decider exceptions and returns intent=skip, so no post.
+    # Progress is marked in the run loop's finally regardless.
+    assert poster.public == []
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+async def test_execution_speech_stale_phase_no_post(repo: SqliteRepo) -> None:
+    """If the game has already advanced past DAY_EXECUTION_SPEECH (e.g. host
+    force-skipped) by the time the background task runs, the speech is dropped."""
+    game, seats = await _seed_execution_speech_game(repo)
+    # Move the game out of DAY_EXECUTION_SPEECH before dispatch — the background
+    # task will reload `fresh` and bail.
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET phase=? WHERE id=?",
+        (Phase.NIGHT.value, game.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+
+    decider = _ScriptedDecider(
+        [
+            LLMAction(
+                intent="speak", public_message="should not post", reason_summary="", confidence=0.9
+            )
+        ]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # No post; no progress mark either (the early-bail path doesn't write
+    # progress because the game isn't in DAY_EXECUTION_SPEECH any more — the
+    # mark only fires after a real attempt or skipped persona).
+    assert poster.public == []
+
+
+async def test_execution_speech_already_done_skips_redispatch(repo: SqliteRepo) -> None:
+    """Recovery overlap / double-wake: if execution_speech_done is already True,
+    re-dispatch is a no-op (no decider call, no post)."""
+    game, seats = await _seed_execution_speech_game(repo)
+    await repo.mark_llm_execution_speech_done(game.id, day=1, seat_no=2)
+    decider = _ScriptedDecider([])  # empty: any call would IndexError
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+
+
+async def test_execution_speech_skipped_for_human_seat(repo: SqliteRepo) -> None:
+    """If executed_seat happens to be human, the dispatcher no-ops without
+    invoking the decider — the planner shouldn't have parked in
+    DAY_EXECUTION_SPEECH for a human, but defense-in-depth keeps us safe."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider([])  # empty: any call would IndexError
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=1)  # H1
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+    # No flag set on the human seat either.
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=1) is False
+
+
+async def test_execution_speech_uses_task_last_words_text(repo: SqliteRepo) -> None:
+    """The decider receives a system prompt whose task block matches
+    `task_last_words(day, role=...)` — verifies role-specific guidance flows."""
+    from wolfbot.llm.prompt_builder import task_last_words
+
+    game, seats = await _seed_execution_speech_game(repo)
+    captured: list[tuple[str, str]] = []
+
+    class _Capturing:
+        async def decide(self, system: str, user: str) -> LLMAction:
+            captured.append((system, user))
+            return LLMAction(intent="skip", reason_summary="", confidence=0.5)
+
+    poster = _FakePoster()
+    adapter = LLMAdapter(
+        repo=repo, decider=_Capturing(), message_poster=poster, rng=random.Random(0)
+    )
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert len(captured) == 1
+    system_prompt = captured[0][0]
+    # Seer-specific guidance from task_last_words must be present in the task block.
+    assert "占い師 CO" in system_prompt
+    # Cross-check: the helper itself produced the same line.
+    assert "占い師 CO" in task_last_words(1, role=Role.SEER)

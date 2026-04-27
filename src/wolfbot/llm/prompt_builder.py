@@ -1098,11 +1098,100 @@ def task_wolf_chat(partner_tokens: Sequence[str], candidate_tokens: Sequence[str
     )
 
 
+def task_last_words(day_number: int, *, role: Role | None = None) -> str:
+    """Prompt for the executed LLM player's single last-words public turn.
+
+    Called only on the DAY_EXECUTION_SPEECH path — the LLM has been voted out
+    and is about to die. One public utterance, 80〜300 字, then formal
+    execution proceeds. Role-conditional branches reinforce existing system-
+    prompt rules at the moment they matter most: village info roles surface
+    unpublished CO/results; wolf/madman avoid leaking partner / true attack
+    target / internal state; villager is forbidden from村人 CO (consistent
+    with `_ROLE_STRATEGIES[Role.VILLAGER]`).
+
+    CO-status detection is left to the LLM: it reads the public log block in
+    `build_user_context` and decides whether it has already CO'd. The legacy
+    CO parser is intentionally not reintroduced (per CLAUDE.md).
+    """
+    base = (
+        f"現在は day {day_number} の処刑前遺言フェイズです。"
+        " あなたは投票で処刑されることが確定しました。"
+        "死亡処理の前に、最後の公開発言を 1 回だけできます。"
+        " `intent=speak` を返し、`public_message` に 80〜300 字で短く書いてください。"
+        " 本当に話すことがない場合のみ `intent=skip` を返してください。"
+        " 自分の人生・メタ発言・「AI」等への言及はせず、ゲーム内の最後の発言として"
+        "自然に振る舞ってください。"
+        " 村陣営なら、残る生存者が次に使える情報 (未公開の CO / 結果 / 推理筋) を"
+        "最優先で残してください。"
+        " 人狼陣営なら、露骨な自白や相方漏洩を避け、最後まで勝ち筋が残る"
+        "公開主張をしてください。"
+    )
+    if role is Role.SEER:
+        base += (
+            " あなたは占い師です。公開ログを確認し、まだ占い師 CO していなければ、"
+            "ここで占い師 CO してください。初日のランダム白 + 以後の占い結果を"
+            "「day N: 対象 → 白/黒」の形で時系列に並べ、結果が指す狼候補を短く添えます。"
+            " すでに占い師 CO 済みなら、未公開分の判定と、自分の処刑後に残る生存者が"
+            "注視すべき狼候補・対抗占いの真贋整理を短く残してください。"
+        )
+    if role is Role.MEDIUM:
+        base += (
+            " あなたは霊媒師です。公開ログを確認し、まだ霊媒師 CO していなければ、"
+            "ここで霊媒師 CO してください。これまでの処刑者への霊媒結果を"
+            "「day N 処刑者: 人狼/人狼ではない」の形で時系列に並べてください。"
+            " 処刑がなかった日 (day 1 など) は結果なしとして扱い、"
+            "存在しない結果を作らないでください。"
+            " 既に CO 済みなら、未公開分の結果と、対抗霊媒の真贋判断材料を残します。"
+        )
+    if role is Role.KNIGHT:
+        base += (
+            " あなたは騎士です。公開ログを確認し、まだ騎士 CO していなければ、"
+            "ここで騎士 CO してください。私的メモ (KNIGHT_GUARD) に残っている"
+            "合法な護衛履歴を「day N: 護衛先」の形で日付順に並べ、"
+            "平和な朝があれば護衛成功可能性を短く添えます。"
+            " 自分護衛・同一対象連続護衛・死亡済み対象護衛・死者が出た朝の不自然な"
+            "護衛成功主張は禁止です。"
+        )
+        if day_number == 1:
+            base += (
+                " ただし day 1 は前夜の護衛履歴がありません。"
+                "履歴のない CO は信用が取れず破綻するため、無理に CO せず、"
+                "公開ログから読み取れる推理 (CO 数・占い真贋・吊り余裕) を残すほうを優先してください。"
+            )
+        else:
+            base += " 既に CO 済みなら、未公開分の護衛筋と注視すべき狼候補を残します。"
+    if role is Role.WEREWOLF:
+        base += (
+            " あなたは人狼です。仲間の人狼名・夜の真の襲撃先・狂人の位置・"
+            "占い師との真贋など、村人が知り得ない内部情報は `public_message` に"
+            "絶対に書かないでください。"
+            " 公開ログと自分の過去発言に最も整合する公開主張を 1 つ選んでください: "
+            "霊媒騙り / 騎士騙り / 占い騙り / 疑い返し のうち、破綻しにくいもの。"
+            " すでに偽 CO 済みならその役職の続きを演じきり、相方を不自然に庇わないこと。"
+        )
+    if role is Role.MADMAN:
+        base += (
+            " あなたは狂人です。本物の人狼位置を知っている前提で話してはいけません。"
+            "公開ログから読める範囲だけで主張してください。"
+            " 偽 CO を残す場合は、誤爆 (本物の役職への対抗ぶつけ) リスクと"
+            "公開ログとの整合を意識し、破綻しやすい騙りは選ばないでください。"
+        )
+    if role is Role.VILLAGER:
+        base += (
+            " あなたは村人です。「村人 CO」「素村 CO」で信用を取ろうとしないでください"
+            "(熟練者は素村 CO を信用材料にしません)。"
+            " 公開情報からの推理 (CO 履歴・占い/霊媒結果・票筋・噛み筋・吊り余裕・"
+            "3 役 CO の超過分整理) を、残る生存者が次の議論で使える形に短くまとめて残してください。"
+        )
+    return base
+
+
 __all__ = [
     "FACTION_JA",
     "build_system_prompt",
     "build_user_context",
     "task_daytime_speech",
+    "task_last_words",
     "task_night_action",
     "task_vote",
     "task_wolf_chat",

@@ -198,6 +198,24 @@ class FakeLLMAdapter:
             )
         )
 
+    async def submit_llm_execution_speech(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        executed_seat: int,
+    ) -> None:
+        self.calls.append(
+            Recorded(
+                "submit_llm_execution_speech",
+                {
+                    "game_id": game.id,
+                    "players": [p.seat_no for p in players],
+                    "executed_seat": executed_seat,
+                },
+            )
+        )
+
 
 @dataclass
 class FakeClock:

@@ -114,9 +114,7 @@ async def test_create_game_db_failure_cleans_up_both_channels(repo) -> None:
     wolves = FakeChannel(id=12)
     queue: list[FakeChannel] = [heaven, wolves]
 
-    async def fake_create(
-        guild: Any, name: str, *, safe_to_delete_ids: set[str]
-    ) -> FakeChannel:
+    async def fake_create(guild: Any, name: str, *, safe_to_delete_ids: set[str]) -> FakeChannel:
         return queue.pop(0)
 
     cog._create_private_channel = fake_create  # type: ignore[method-assign]

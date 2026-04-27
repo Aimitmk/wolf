@@ -45,7 +45,5 @@ class Settings(BaseSettings):
         if self.LLM_PROVIDER == "deepseek" and self.DEEPSEEK_API_KEY is None:
             raise ValueError("LLM_PROVIDER=deepseek requires DEEPSEEK_API_KEY to be set")
         if self.LLM_PROVIDER == "gemini" and not self.GEMINI_VERTEX_PROJECT:
-            raise ValueError(
-                "LLM_PROVIDER=gemini requires GEMINI_VERTEX_PROJECT to be set"
-            )
+            raise ValueError("LLM_PROVIDER=gemini requires GEMINI_VERTEX_PROJECT to be set")
         return self

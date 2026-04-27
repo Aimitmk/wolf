@@ -261,9 +261,11 @@ async def test_host_force_skip_resolves_vote_with_abstentions(
     clock.tick(300)
     await service.advance(game.id)  # DAY_VOTE
 
-    # 5 vote for seat 7
+    # 5 vote for seat 4 (a human seat; LLM execution now routes through
+    # DAY_EXECUTION_SPEECH so this force-skip test uses a human target to
+    # exercise the direct-execution path it actually cares about).
     for voter in range(1, 6):
-        await service.submit_vote(game.id, voter, 7, round_=0, day=1)
+        await service.submit_vote(game.id, voter, 4, round_=0, day=1)
     clock.tick(60)
     await service.advance(game.id)  # → WAITING
 
@@ -275,10 +277,10 @@ async def test_host_force_skip_resolves_vote_with_abstentions(
 
     loaded = await repo.load_game(game.id)
     assert loaded is not None
-    # seat 7 got 5 votes, everyone else 0 after abstention → executed
+    # seat 4 got 5 votes, everyone else 0 after abstention → executed
     assert loaded.phase in (Phase.NIGHT, Phase.GAME_OVER)
     dead = [p for p in await repo.load_players(game.id) if not p.alive]
-    assert any(p.seat_no == 7 for p in dead)
+    assert any(p.seat_no == 4 for p in dead)
 
 
 async def test_host_extend_resumes_phase_with_new_deadline(
@@ -607,9 +609,7 @@ async def test_host_abort_returns_false_when_already_ended(
     assert first
     on_game_end_after_first = sum(1 for c in disc.calls if c.name == "on_game_end")
     role_reveals_after_first = sum(
-        1
-        for c in disc.calls
-        if c.name == "post_public" and c.kwargs["kind"] == "ROLE_REVEAL"
+        1 for c in disc.calls if c.name == "post_public" and c.kwargs["kind"] == "ROLE_REVEAL"
     )
 
     second = await service.host_abort(game.id)
@@ -617,9 +617,7 @@ async def test_host_abort_returns_false_when_already_ended(
     on_game_end_after_second = sum(1 for c in disc.calls if c.name == "on_game_end")
     assert on_game_end_after_second == on_game_end_after_first
     role_reveals_after_second = sum(
-        1
-        for c in disc.calls
-        if c.name == "post_public" and c.kwargs["kind"] == "ROLE_REVEAL"
+        1 for c in disc.calls if c.name == "post_public" and c.kwargs["kind"] == "ROLE_REVEAL"
     )
     assert role_reveals_after_second == role_reveals_after_first
 
@@ -1890,20 +1888,12 @@ async def test_mixed_human_llm_wolf_split_triggers_early_wake(
     wakes: list[str] = []
     reg.wake = lambda gid: wakes.append(gid)  # type: ignore[method-assign]
 
-    await service.submit_night_action(
-        game.id, 2, SubmissionType.SEER_DIVINE, 9, day=1
-    )
-    await service.submit_night_action(
-        game.id, 3, SubmissionType.KNIGHT_GUARD, 2, day=1
-    )
+    await service.submit_night_action(game.id, 2, SubmissionType.SEER_DIVINE, 9, day=1)
+    await service.submit_night_action(game.id, 3, SubmissionType.KNIGHT_GUARD, 2, day=1)
     # Wolves split: human picks 4, LLM picks 5. Human-wolf priority resolves
     # in favor of seat 4, so the night is decided.
-    await service.submit_night_action(
-        game.id, 1, SubmissionType.WOLF_ATTACK, 4, day=1
-    )
-    await service.submit_night_action(
-        game.id, 9, SubmissionType.WOLF_ATTACK, 5, day=1
-    )
+    await service.submit_night_action(game.id, 1, SubmissionType.WOLF_ATTACK, 4, day=1)
+    await service.submit_night_action(game.id, 9, SubmissionType.WOLF_ATTACK, 5, day=1)
 
     assert wakes == [game.id]
 
@@ -2119,3 +2109,212 @@ async def test_advance_runoff_skips_speech_when_tie_is_all_human(
     loaded = await repo.load_game(game.id)
     assert loaded is not None
     assert loaded.phase is Phase.DAY_RUNOFF
+
+
+# ----------------------------- DAY_EXECUTION_SPEECH branching
+async def test_advance_execution_speech_on_llm_unique_plurality(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """LLM unique plurality in DAY_VOTE → DAY_EXECUTION_SPEECH +
+    submit_llm_execution_speech dispatch with executed_seat carried through."""
+    from wolfbot.domain.state_machine import EXECUTION_SPEECH_DEADLINE
+
+    service, _, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    # 5 humans + 2 LLMs (8, 9) vote for seat 7 (LLM); seats 6, 7 abstain.
+    for v in (1, 2, 3, 4, 5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=None, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_EXECUTION_SPEECH
+    assert loaded.deadline_epoch == clock.now + EXECUTION_SPEECH_DEADLINE
+    # The condemned LLM is still alive — death happens on the speech-done advance.
+    players = await repo.load_players(game.id)
+    assert next(p for p in players if p.seat_no == 7).alive is True
+    # Dispatch was made for seat 7 specifically.
+    calls = [c for c in llm.calls if c.name == "submit_llm_execution_speech"]
+    assert len(calls) == 1
+    assert calls[0].kwargs["executed_seat"] == 7
+
+
+async def test_advance_execution_speech_advances_when_done(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """When `execution_speech_done` is True, DAY_EXECUTION_SPEECH advances to
+    NIGHT/GAME_OVER via the shared _apply_execution path."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    for v in (1, 2, 3, 4, 5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=None, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)  # → DAY_EXECUTION_SPEECH
+    await repo.mark_llm_execution_speech_done(game.id, day=1, seat_no=7)
+    await service.advance(game.id)  # → NIGHT or GAME_OVER
+
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase in (Phase.NIGHT, Phase.GAME_OVER)
+    players = await repo.load_players(game.id)
+    assert not next(p for p in players if p.seat_no == 7).alive
+
+
+async def test_advance_execution_speech_parks_before_deadline_when_not_done(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Before deadline + done=False → engine parks (advance is no-op). Phase
+    remains DAY_EXECUTION_SPEECH."""
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    for v in (1, 2, 3, 4, 5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=None, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)  # → DAY_EXECUTION_SPEECH
+    # Don't tick clock past deadline; advance now should be a no-op.
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_EXECUTION_SPEECH
+
+
+async def test_advance_execution_speech_grace_after_deadline(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Past deadline + done=False → grace transition (same phase, deadline pushed)."""
+    from wolfbot.domain.state_machine import EXECUTION_SPEECH_GRACE
+
+    service, _, _, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    for v in (1, 2, 3, 4, 5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=None, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)  # → DAY_EXECUTION_SPEECH
+    # Tick past deadline without marking done → grace.
+    clock.tick(60)
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_EXECUTION_SPEECH
+    assert loaded.deadline_epoch == clock.now + EXECUTION_SPEECH_GRACE
+
+
+async def test_advance_execution_speech_no_redispatch_on_grace(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Same-phase grace re-commit (DAY_EXECUTION_SPEECH → DAY_EXECUTION_SPEECH)
+    must NOT re-dispatch the speech task."""
+    service, _, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    for v in (1, 2, 3, 4, 5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=None, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)  # → DAY_EXECUTION_SPEECH (1st dispatch)
+    assert sum(1 for c in llm.calls if c.name == "submit_llm_execution_speech") == 1
+    # Tick past deadline → grace re-commit (same phase). Must NOT re-dispatch.
+    clock.tick(60)
+    await service.advance(game.id)
+    assert sum(1 for c in llm.calls if c.name == "submit_llm_execution_speech") == 1
+
+
+async def test_advance_human_executed_immediately_no_speech_phase(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Human executed → direct path to NIGHT/GAME_OVER, no DAY_EXECUTION_SPEECH."""
+    service, _, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    # 7 votes for seat 4 (human). Seats 4 and 9 abstain.
+    for v in (1, 2, 3, 5, 6, 7, 8):
+        await service.submit_vote(game.id, v, target_seat=4, round_=0, day=1)
+    await service.submit_vote(game.id, 4, target_seat=None, round_=0, day=1)
+    await service.submit_vote(game.id, 9, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase in (Phase.NIGHT, Phase.GAME_OVER)
+    # No execution speech dispatch was made.
+    exec_speech_calls = [c for c in llm.calls if c.name == "submit_llm_execution_speech"]
+    assert exec_speech_calls == []
+
+
+async def test_advance_runoff_executed_llm_goes_through_execution_speech(
+    repo: SqliteRepo,
+    svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
+) -> None:
+    """Runoff resolution executing an LLM → DAY_EXECUTION_SPEECH; recompute
+    via round-1 votes works correctly (round-1 winner derived from round-0 tied)."""
+    service, _, llm, _, clock = svc
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+    await service.advance(game.id)
+    await _seed_llm_discussion_rounds_done(repo, game.id, day=1)
+    clock.tick(300)
+    await service.advance(game.id)  # → DAY_VOTE
+    # Round 0: 4-4 tie between LLM seat 6 and LLM seat 7.
+    for v in (1, 2, 3, 4):
+        await service.submit_vote(game.id, v, target_seat=6, round_=0, day=1)
+    for v in (5, 8, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 6, target_seat=7, round_=0, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=0, day=1)
+    await service.advance(game.id)  # → DAY_RUNOFF_SPEECH
+    await repo.mark_llm_runoff_speech_done(game.id, day=1, seat_no=6)
+    await repo.mark_llm_runoff_speech_done(game.id, day=1, seat_no=7)
+    await service.advance(game.id)  # → DAY_RUNOFF
+    # Round 1: 5 vote 6, 3 vote 7, 1 abstains → seat 6 executed (LLM).
+    for v in (1, 2, 3, 4, 8):
+        await service.submit_vote(game.id, v, target_seat=6, round_=1, day=1)
+    for v in (5, 9):
+        await service.submit_vote(game.id, v, target_seat=7, round_=1, day=1)
+    await service.submit_vote(game.id, 6, target_seat=7, round_=1, day=1)
+    await service.submit_vote(game.id, 7, target_seat=None, round_=1, day=1)
+    await service.advance(game.id)
+    loaded = await repo.load_game(game.id)
+    assert loaded is not None
+    assert loaded.phase is Phase.DAY_EXECUTION_SPEECH
+    # _recompute_executed_seat picks seat 6 from round-1 votes (after recomputing
+    # round-0 tied set). The dispatch carries that.
+    calls = [c for c in llm.calls if c.name == "submit_llm_execution_speech"]
+    assert len(calls) == 1
+    assert calls[0].kwargs["executed_seat"] == 6

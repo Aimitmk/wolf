@@ -43,6 +43,8 @@ from wolfbot.domain.state_machine import (
     plan_day_discussion_wait,
     plan_day_runoff_resolve,
     plan_day_vote_resolve,
+    plan_execution_speech_to_execution,
+    plan_execution_speech_wait,
     plan_extend_deadline,
     plan_night0,
     plan_night_resolve,
@@ -126,6 +128,13 @@ class LLMAdapter(Protocol):
         players: Sequence[Player],
         seats: Sequence[Seat],
         tied_candidates: Sequence[int],
+    ) -> None: ...
+    async def submit_llm_execution_speech(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        executed_seat: int,
     ) -> None: ...
 
 
@@ -343,6 +352,34 @@ class GameService:
                 game.force_skip_pending,
                 now,
             )
+        if game.phase is Phase.DAY_EXECUTION_SPEECH:
+            # Recompute executed seat from current-day vote rows — never stored.
+            # Round 1 votes (runoff) take precedence when present, otherwise
+            # round 0 plurality. Defense-in-depth: if recompute returns None or
+            # a dead seat, `_apply_execution` inside
+            # `plan_execution_speech_to_execution` collapses to NO_EXECUTION.
+            alive_set = {p.seat_no for p in players if p.alive}
+            executed = await self._recompute_executed_seat(game.id, game.day_number, alive_set)
+            seats_by_no = {s.seat_no: s for s in seats}
+            if executed is None:
+                # Pathological: shouldn't reach DAY_EXECUTION_SPEECH without an
+                # executed seat. Fall through to NO_EXECUTION via _apply_execution
+                # by passing a known-dead sentinel — but pick any sentinel that
+                # isn't alive so the alive check fires. -1 is never a real seat.
+                return plan_execution_speech_to_execution(
+                    game, players, seats_by_no, -1, now, clear_force=True
+                )
+            done = await self.repo.load_llm_execution_speech_done(
+                game.id, game.day_number, executed
+            )
+            if done:
+                return plan_execution_speech_to_execution(
+                    game, players, seats_by_no, executed, now, clear_force=True
+                )
+            deadline_passed = game.deadline_epoch is not None and now >= game.deadline_epoch
+            if deadline_passed:
+                return plan_execution_speech_wait(game, now)
+            return None
         if game.phase is Phase.NIGHT:
             actions = await self.repo.load_night_actions(game.id, day=game.day_number)
             prev = await self.repo.load_previous_guard(game.id)
@@ -357,6 +394,25 @@ class GameService:
                 now,
             )
         return None
+
+    async def _recompute_executed_seat(
+        self, game_id: str, day: int, alive_set: set[int]
+    ) -> int | None:
+        """Re-derive the executed seat from current-day vote rows.
+
+        Round 1 votes win when present (runoff path), otherwise round 0
+        plurality (direct DAY_VOTE path). Pure derivation — no DB writes.
+        Mirrors the resolver logic in `plan_day_vote_resolve` /
+        `plan_day_runoff_resolve` so DAY_EXECUTION_SPEECH never needs a
+        stored `executed_seat` field.
+        """
+        round1 = await self.repo.load_votes(game_id, day=day, round_=1)
+        if round1:
+            round0 = await self.repo.load_votes(game_id, day=day, round_=0)
+            tied = compute_vote_result(round0, alive_set).tied
+            return compute_vote_result(round1, alive_set, candidate_seats=set(tied)).executed
+        round0 = await self.repo.load_votes(game_id, day=day, round_=0)
+        return compute_vote_result(round0, alive_set).executed
 
     async def _dispatch_submissions(
         self,
@@ -440,6 +496,28 @@ class GameService:
                 await self.llm.submit_llm_discussion_rounds(new_game, alive_players, seats)
             except Exception:
                 log.exception("llm discussion rounds dispatch failed for %s", new_game.id)
+        elif transition.next_phase is Phase.DAY_EXECUTION_SPEECH:
+            # Same-phase grace re-commit must not redispatch.
+            if previous_phase is Phase.DAY_EXECUTION_SPEECH:
+                return
+            alive_set = {p.seat_no for p in players_after if p.alive}
+            executed = await self._recompute_executed_seat(
+                new_game.id, new_game.day_number, alive_set
+            )
+            if executed is None:
+                return
+            seats_by_no = {s.seat_no: s for s in seats}
+            seat = seats_by_no.get(executed)
+            if seat is None or not seat.is_llm:
+                # Human / unknown seat shouldn't reach DAY_EXECUTION_SPEECH;
+                # the planner branches around them. Belt-and-braces no-op.
+                return
+            try:
+                await self.llm.submit_llm_execution_speech(
+                    new_game, players_after, seats, executed_seat=executed
+                )
+            except Exception:
+                log.exception("llm execution speech dispatch failed for %s", new_game.id)
 
     async def _safe_post_public(self, game: Game, text: str, kind: str) -> None:
         try:
@@ -802,6 +880,23 @@ class GameService:
                 )
             except Exception:
                 log.exception("resume runoff candidate speeches failed for %s", game_id)
+            return
+        if game.phase is Phase.DAY_EXECUTION_SPEECH:
+            alive_set = {p.seat_no for p in players if p.alive}
+            executed = await self._recompute_executed_seat(game_id, game.day_number, alive_set)
+            if executed is None:
+                return
+            seat = seats_by_no.get(executed)
+            if seat is None or not seat.is_llm:
+                return
+            if await self.repo.load_llm_execution_speech_done(game_id, game.day_number, executed):
+                return
+            try:
+                await self.llm.submit_llm_execution_speech(
+                    game, players, seats, executed_seat=executed
+                )
+            except Exception:
+                log.exception("resume execution speech failed for %s", game_id)
 
     async def _all_votes_in(self, game: Game, round_: int) -> bool:
         players = await self.repo.load_players(game.id)

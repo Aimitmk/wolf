@@ -28,6 +28,7 @@ from wolfbot.llm.prompt_builder import (
     build_system_prompt,
     build_user_context,
     task_daytime_speech,
+    task_last_words,
     task_night_action,
     task_vote,
     task_wolf_chat,
@@ -1422,17 +1423,13 @@ def test_werewolf_strategy_disclaims_real_role_inference() -> None:
     assert "公開情報からの推定" in block
 
 
-@pytest.mark.parametrize(
-    "role", [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER]
-)
+@pytest.mark.parametrize("role", [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
 def test_wolf_attack_only_vocabulary_never_in_non_wolf_strategy(role: Role) -> None:
     """The new tactical phrases are wolf-private. Any leak (e.g. someone copies
     the wolf bullet into the knight strategy by mistake) must trip this guard."""
     block = _build_strategy_block(role)
     for phrase in _WOLF_ATTACK_ONLY_PHRASES:
-        assert phrase not in block, (
-            f"wolf-only attack vocab {phrase!r} leaked into {role.name}"
-        )
+        assert phrase not in block, f"wolf-only attack vocab {phrase!r} leaked into {role.name}"
 
 
 # ---------------------------------------------------- night-action task block
@@ -2881,3 +2878,111 @@ def test_build_user_context_rope_block_reminds_hanging_margin() -> None:
     # New margin reminder.
     assert "推定残り人狼数を踏まえ" in out
     assert "吊り余裕 = 残り縄 - 推定残り人狼数" in out
+
+
+# --------------------------------------------------- task_last_words
+def test_task_last_words_base_text_present() -> None:
+    """Base text covers: framing as last public turn, char range, role-agnostic
+    village-vs-wolf priorities, and meta-leak guard."""
+    text = task_last_words(2)
+    assert "処刑前遺言" in text
+    assert "最後の公開発言を 1 回だけ" in text
+    assert "80〜300 字" in text
+    assert "intent=skip" in text
+    assert "メタ発言" in text
+    assert "村陣営なら" in text
+    assert "人狼陣営なら" in text
+
+
+def test_task_last_words_seer_branch_publishes_results() -> None:
+    """Seer branch directs CO + chronological divination publication."""
+    text = task_last_words(3, role=Role.SEER)
+    assert "占い師 CO" in text
+    assert "初日のランダム白" in text
+    assert "時系列" in text
+
+
+def test_task_last_words_medium_branch_no_fabricated_results() -> None:
+    """Medium must not fabricate results for days with no execution (e.g. day 1)."""
+    text = task_last_words(2, role=Role.MEDIUM)
+    assert "霊媒師 CO" in text
+    assert "存在しない結果を作らない" in text
+
+
+def test_task_last_words_knight_branch_with_history_day_2() -> None:
+    """Knight branch on day 2+ asks for chronological guard history."""
+    text = task_last_words(3, role=Role.KNIGHT)
+    assert "騎士 CO" in text
+    assert "護衛履歴" in text
+    assert "日付順" in text
+    # Defensive guard-claim discipline
+    assert "自分護衛" in text
+    assert "同一対象連続護衛" in text
+
+
+def test_task_last_words_knight_day1_no_history_note() -> None:
+    """Day-1 knight has zero guard history; the prompt must steer them away
+    from a hollow CO and toward public-log推理 instead."""
+    text = task_last_words(1, role=Role.KNIGHT)
+    assert "day 1 は前夜の護衛履歴がありません" in text
+    assert "破綻" in text
+
+
+def test_task_last_words_werewolf_branch_forbids_partner_leak() -> None:
+    """Wolf last-words must reinforce the no-partner-leak rule strongly."""
+    text = task_last_words(2, role=Role.WEREWOLF)
+    assert "仲間の人狼名" in text
+    assert "絶対に書かない" in text
+    assert "夜の真の襲撃先" in text
+    # Available fake routes — but we don't assert ALL of them; just that the
+    # taxonomy is present.
+    assert "霊媒騙り" in text
+    assert "騎士騙り" in text
+    assert "占い騙り" in text
+
+
+def test_task_last_words_madman_branch_no_real_wolf_knowledge() -> None:
+    """Madman must not pretend to know real wolf positions."""
+    text = task_last_words(2, role=Role.MADMAN)
+    assert "本物の人狼位置を知っている前提で話してはいけません" in text
+    assert "誤爆" in text
+
+
+def test_task_last_words_villager_branch_forbids_villager_co() -> None:
+    """Villager last-words explicitly forbids 村人 / 素村 CO (matches
+    `_ROLE_STRATEGIES[Role.VILLAGER]`)."""
+    text = task_last_words(2, role=Role.VILLAGER)
+    assert "村人 CO" in text
+    assert "素村 CO" in text
+    assert "信用を取ろうとしない" in text
+
+
+@pytest.mark.parametrize(
+    "role,foreign",
+    [
+        (Role.VILLAGER, "仲間の人狼名"),  # wolf-only partner-leak prohibition
+        (Role.SEER, "本物の人狼位置を知っている前提"),  # madman line
+        (Role.MEDIUM, "存在しない結果を作らない"),  # this IS in medium, used as positive control
+        (Role.KNIGHT, "村人 CO"),  # villager-only
+        (Role.WEREWOLF, "占い師 CO してください"),  # seer's CO instruction
+    ],
+)
+def test_task_last_words_no_cross_role_leak(role: Role, foreign: str) -> None:
+    """Role-conditional branches must not leak content from other roles. The
+    medium row uses a positive control (the assertion is inverted there)."""
+    text = task_last_words(2, role=role)
+    if role is Role.MEDIUM:
+        assert foreign in text  # positive control on medium's own line
+    else:
+        assert foreign not in text
+
+
+def test_task_last_words_default_no_role_omits_role_specific_branches() -> None:
+    """Without a role, the prompt is the role-agnostic base text only."""
+    text = task_last_words(2)
+    # No role-conditional content should appear.
+    assert "占い師 CO" not in text
+    assert "霊媒師 CO" not in text
+    assert "騎士 CO" not in text
+    assert "仲間の人狼名" not in text
+    assert "村人 CO" not in text

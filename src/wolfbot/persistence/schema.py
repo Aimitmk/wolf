@@ -147,6 +147,7 @@ DDL: list[str] = [
         last_spoke_epoch INTEGER,
         discussion_rounds_done INTEGER NOT NULL DEFAULT 0,
         runoff_speech_done INTEGER NOT NULL DEFAULT 0,
+        execution_speech_done INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (game_id, day, seat_no)
     )
     """,
@@ -192,5 +193,10 @@ async def migrate(db_path: str | Path) -> None:
             await db.execute(
                 "ALTER TABLE llm_speech_counts "
                 "ADD COLUMN runoff_speech_done INTEGER NOT NULL DEFAULT 0"
+            )
+        if "execution_speech_done" not in cols:
+            await db.execute(
+                "ALTER TABLE llm_speech_counts "
+                "ADD COLUMN execution_speech_done INTEGER NOT NULL DEFAULT 0"
             )
         await db.commit()
