@@ -13,6 +13,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from wolfbot.config import MasterSettings
+from wolfbot.domain.enums import Phase
 from wolfbot.persistence.schema import migrate
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discord_service import DiscordBotAdapter, WolfCog
@@ -191,6 +192,32 @@ async def _run() -> None:
         g_for_vc = await repo.load_game(game_id)
         if g_for_vc is not None:
             await _master_join_vc_for_game(g_for_vc)
+            # Seed the phase_baseline sentinel so SpeakArbiter's
+            # `rebuild_public_state` has an alive-seat baseline to fold
+            # against. In rounds mode this happens inside
+            # `submit_llm_discussion_rounds`, but reactive_voice skips
+            # that batch entirely — without seeding here, the arbiter
+            # silently no-ops on every dispatch attempt because the
+            # rebuilt state is None. begin_phase_if_absent is idempotent
+            # across re-entries / recovery.
+            if g_for_vc.discussion_mode == "reactive_voice":
+                players_for_baseline = await repo.load_players(game_id)
+                alive_seat_nos = sorted(
+                    p.seat_no for p in players_for_baseline if p.alive
+                )
+                try:
+                    await discussion_service.begin_phase_if_absent(
+                        game_id=game_id,
+                        day=g_for_vc.day_number,
+                        phase=g_for_vc.phase,
+                        alive_seat_nos=alive_seat_nos,
+                    )
+                except Exception:
+                    log.exception(
+                        "phase_baseline_seed_failed game=%s phase=%s",
+                        game_id,
+                        g_for_vc.phase,
+                    )
         # Assign online NPC bots to their game seats so the arbiter can pick them.
         if _npc_registry_ref and _vc_phase_cache[0] is not None:
             from wolfbot.domain.ws_messages import SeatAssigned
@@ -366,6 +393,143 @@ async def _run() -> None:
             await arbiter.try_dispatch_next(game_id)
 
         recovery._reactive_voice_reenter = _reactive_voice_reenter
+
+        # ---- Master narration (Levi TTS in VC + long content to VC chat) ----
+        # Built once per process; the narrator callback is installed on
+        # `discord_adapter` so `post_public` / `post_morning` route through
+        # it whenever the active game is in reactive_voice mode.
+        from wolfbot.master.narration import (
+            NarrationContext,
+            render_master_narration,
+        )
+        from wolfbot.master.tts_playback import MasterTtsPlayback
+        from wolfbot.npc.tts import VoicevoxTtsService
+
+        master_tts = MasterTtsPlayback(
+            tts=VoicevoxTtsService(
+                base_url=settings.MASTER_VOICEVOX_URL,
+                default_speaker=settings.MASTER_TTS_VOICE_ID,
+            ),
+            voice_id=str(settings.MASTER_TTS_VOICE_ID),
+            vc_ref=master_vc_ref,
+        )
+
+        async def _post_to_vc_chat(game: Any, text: str) -> None:
+            """Post `text` to the VC's attached text chat. Falls back to
+            the main text channel if the VC channel can't be resolved.
+
+            Discord voice channels (since 2022) carry an attached text
+            chat reachable at the same channel id; both `VoiceChannel`
+            and `TextChannel` implement `Messageable`, so we narrow on
+            those two before sending."""
+            try:
+                channel_id: int | None = int(game.main_vc_channel_id)
+            except (TypeError, ValueError):
+                channel_id = None
+            channel = bot.get_channel(channel_id) if channel_id else None
+            if not isinstance(
+                channel, discord.TextChannel | discord.VoiceChannel
+            ):
+                channel = bot.get_channel(int(game.main_text_channel_id))
+            if not isinstance(
+                channel, discord.TextChannel | discord.VoiceChannel
+            ):
+                log.warning(
+                    "vc_chat_post_no_channel game=%s vc=%s",
+                    game.id,
+                    game.main_vc_channel_id,
+                )
+                return
+            try:
+                await channel.send(text)
+            except Exception:
+                log.exception(
+                    "vc_chat_post_failed game=%s channel=%s",
+                    game.id,
+                    getattr(channel, "id", None),
+                )
+
+        async def _master_narrate(game: Any, kind: str, text: str) -> bool:
+            """Public-post narrator: voice + VC chat in reactive_voice mode.
+
+            Returns True when the post has been fully handled (the adapter
+            must skip its main-text-channel default). Returns False to
+            let the legacy text path run — used when not in reactive_voice
+            mode, when Master isn't actually in VC, or when no narration
+            template applies.
+            """
+            if game.discussion_mode != "reactive_voice":
+                return False
+            if master_vc_ref[0] is None:
+                # Game is reactive_voice but Master never joined VC (e.g.
+                # voice_ingest is off). Fall through to text so progress
+                # still surfaces somewhere.
+                return False
+            from wolfbot.domain.models import LogEntry as _LogEntry
+
+            players = await repo.load_players(game.id)
+            seats = await repo.load_seats(game.id)
+            ctx = NarrationContext(
+                day_number=game.day_number,
+                phase=game.phase,
+                alive_count=sum(1 for p in players if p.alive),
+                seats_by_no={s.seat_no: s for s in seats},
+            )
+            # Synthesize an entry-shaped object for the narrator. The
+            # caller (DiscordAdapter.post_public / post_morning) only
+            # gives us text + kind, so we reconstruct what the narrator
+            # needs without hitting the public_logs table.
+            actor_seat: int | None = None
+            if kind in ("EXECUTION", "MORNING"):
+                # Recover actor_seat from the public_log row that
+                # GameService.apply_transition just wrote so MORNING
+                # narration can name the deceased seat. The matching
+                # row's text equals the text the adapter received here
+                # (LogEntry.text round-trips). Walk the most recent
+                # entries newest-first.
+                try:
+                    rows = await repo.load_public_logs(game.id, limit=10)
+                except Exception:
+                    rows = []
+                for row in reversed(rows):
+                    if row.get("kind") == kind and row.get("text") == text:
+                        actor_seat = row.get("actor_seat")
+                        break
+            faux_entry = _LogEntry(
+                game_id=game.id,
+                day=game.day_number,
+                phase=game.phase,
+                kind=kind,
+                actor_seat=actor_seat,
+                visibility="PUBLIC",
+                text=text,
+                created_at=0,
+            )
+            output = render_master_narration(faux_entry, ctx)
+            if output.is_silent():
+                # No template matched — let the caller fall through to
+                # the legacy main-text post so the message isn't dropped.
+                return False
+            if output.chat_text:
+                await _post_to_vc_chat(game, output.chat_text)
+            if output.voice_text:
+                async with master_tts.suppress_npc_dispatch(arbiter):
+                    await master_tts.speak(output.voice_text)
+                # After Master narrates, give NPC dispatch a kick — a
+                # PHASE_CHANGE into DAY_DISCUSSION should immediately
+                # invite an NPC reply.
+                if game.phase in (
+                    Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH
+                ):
+                    try:
+                        await arbiter.try_dispatch_next(game.id)
+                    except Exception:
+                        log.exception(
+                            "post_narration_dispatch_failed game=%s", game.id
+                        )
+            return True
+
+        discord_adapter.set_narrator(_master_narrate)
 
         class _RepoPhase:
             """Adapts SqliteRepo to MasterIngestService.PhaseLookup."""

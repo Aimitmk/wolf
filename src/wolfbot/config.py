@@ -80,6 +80,17 @@ class MasterSettings(BaseSettings):
     VOICE_LLM_API_KEY: SecretStr | None = None
     VOICE_LLM_MODEL: str = "gemini-2.0-flash-lite"
 
+    # ── Master TTS narration (reactive_voice only) ────────────────────
+    # When `LLM_DISCUSSION_MODE=reactive_voice` and Master is in VC,
+    # phase-transition announcements (PHASE_CHANGE / MORNING / VICTORY
+    # / EXECUTION headlines) are read aloud by Master via VOICEVOX. Long
+    # content (vote tallies, role reveal) goes to the VC's text chat.
+    # Default speaker 47 = ナースロボ_タイプT (machine-like polite).
+    MASTER_TTS_VOICE_ID: int = 47
+    # Reuse the NPC-side VOICEVOX HTTP engine. Single shared local engine
+    # is the typical setup; override only if Master needs a different one.
+    MASTER_VOICEVOX_URL: str = "http://localhost:50021"
+
     @model_validator(mode="after")
     def _require_gameplay_provider_key(self) -> MasterSettings:
         if (

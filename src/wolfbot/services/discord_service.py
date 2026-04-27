@@ -116,6 +116,12 @@ def _main_channel_should_llm_react(author_seat: int | None, players: Sequence[Pl
 
 
 # --------------------------------------------------------------- DiscordBotAdapter
+# Type alias: narrator callback. Returns True when the call has been
+# fully handled (the adapter must skip its default text post). Returns
+# False to fall through to the legacy main-text-channel behavior.
+PublicPostNarrator = Callable[[Game, str, str], Awaitable[bool]]
+
+
 class DiscordBotAdapter:
     """Implements the DiscordAdapter protocol by operating on a live discord.Client."""
 
@@ -125,6 +131,7 @@ class DiscordBotAdapter:
         repo: SqliteRepo,
         settings: MasterSettings,
         game_service_ref: dict[str, GameService] | None = None,
+        public_post_narrator: PublicPostNarrator | None = None,
     ) -> None:
         self.bot = bot
         self.repo = repo
@@ -133,9 +140,20 @@ class DiscordBotAdapter:
         # Circular: DiscordBotAdapter needs GameService (for submit callbacks passed into
         # Views) and GameService needs DiscordBotAdapter. We stash a dict to break the cycle.
         self._gs_slot: dict[str, GameService] = game_service_ref or {}
+        # Optional: in reactive_voice mode this routes Master narration
+        # (PHASE_CHANGE / MORNING / VICTORY / EXECUTION etc.) to TTS in
+        # VC + the VC's attached text chat for long content. Returns
+        # True to fully consume the post (suppress the main text-channel
+        # output); False to fall through unchanged.
+        self._narrator = public_post_narrator
 
     def set_game_service(self, gs: GameService) -> None:
         self._gs_slot["gs"] = gs
+
+    def set_narrator(self, narrator: PublicPostNarrator | None) -> None:
+        """Late-bind the narrator. Used by main.py when the reactive_voice
+        pipeline is wired after `DiscordBotAdapter` construction."""
+        self._narrator = narrator
 
     @property
     def gs(self) -> GameService:
@@ -162,7 +180,25 @@ class DiscordBotAdapter:
         await self.perms.on_game_end(game, seats)
 
     # ------------------------------------------------------ channel posts
+    async def _maybe_narrate(self, game: Game, kind: str, text: str) -> bool:
+        """Route through the narrator if installed. Defensive try/except
+        so a narration failure never blocks the SpeechEvent /
+        permission flow that follows in GameService.advance."""
+        if self._narrator is None:
+            return False
+        try:
+            return await self._narrator(game, kind, text)
+        except Exception:
+            log.exception(
+                "narrator failed for game=%s kind=%s; falling back to text",
+                game.id,
+                kind,
+            )
+            return False
+
     async def post_public(self, game: Game, text: str, kind: str) -> None:
+        if await self._maybe_narrate(game, kind, text):
+            return
         channel = self._main_text(game)
         if channel is None:
             return
@@ -172,6 +208,8 @@ class DiscordBotAdapter:
             log.exception("post_public failed %s", game.id)
 
     async def post_morning(self, game: Game, text: str) -> None:
+        if await self._maybe_narrate(game, "MORNING", text):
+            return
         channel = self._main_text(game)
         if channel is None:
             return
