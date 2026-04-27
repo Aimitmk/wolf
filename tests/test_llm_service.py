@@ -1098,6 +1098,42 @@ async def test_ask_system_prompt_contains_2_1_and_1_2_formations_for_any_role(
         assert "1-2" in system_prompt, f"{role.name} missed 1-2"
 
 
+async def test_ask_system_prompt_contains_three_seer_co_elimination_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """3占いCO・2非狼確定で残る 1 人を確定黒級とする消去法は共通ルール経由で
+    全 role の system prompt に届く。非狼確定の厳格さと前提崩壊時の解除も同様。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "残る 1 人の占い師 CO を固定配役上の消去法" in system_prompt, (
+            f"{role.name} missed the elimination rule"
+        )
+        assert "『白判定』と『非狼確定』を混同しない" in system_prompt, (
+            f"{role.name} missed the white-vs-confirmation caveat"
+        )
+        assert "前提が崩れた場合は確定黒扱いを解除" in system_prompt, (
+            f"{role.name} missed the breakdown / re-organize clause"
+        )
+
+
+async def test_ask_system_prompt_villager_seat_includes_three_seer_co_elimination_framing(
+    repo: SqliteRepo,
+) -> None:
+    """村人席は共通ルールに加え、村人視点の framing
+    (投票・発言・進行提案で残る占い師 CO 位置を狼として扱う) も system prompt
+    に届く。"""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
+    assert "残る占い師 CO 位置を投票・発言・進行提案" in system_prompt
+    assert "前提が崩れた瞬間" in system_prompt
+
+
 async def test_ask_system_prompt_contains_advanced_guard_vocab_for_any_role(
     repo: SqliteRepo,
 ) -> None:

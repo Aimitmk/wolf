@@ -303,6 +303,59 @@ def test_game_rules_block_requires_completing_medium_roller_by_default() -> None
     assert "原則として完走" in block
 
 
+# -------------------------- 3 占い CO + 2 非狼確定 で残る 1 人を確定黒級とする消去法
+def test_game_rules_block_describes_three_seer_co_elimination_inference() -> None:
+    """3-1 で占い CO 3 人のうち 2 人が公開情報上『本物の人狼ではない』と確定したら、
+    残る 1 人を固定配役上の消去法で確定黒級の人狼位置として扱う。"""
+    block = _build_game_rules_block()
+    assert "2 人が公開情報上『本物の人狼ではない』と確定" in block
+    assert "残る 1 人の占い師 CO を固定配役上の消去法" in block
+    assert "確定黒級" in block
+    assert "人狼 2 人固定の配役" in block
+
+
+def test_game_rules_block_distinguishes_white_judgement_from_non_wolf_confirmation() -> None:
+    """『白判定』と『非狼確定』を混同しない。信用未確定の占い CO の白、
+    偽が混じり得る霊媒結果、印象だけの白寄り評価は非狼確定として数えない。"""
+    block = _build_game_rules_block()
+    assert "『白判定』と『非狼確定』を混同しない" in block
+    assert "信用が未確定な占い師 CO が出した白" in block
+    assert "偽が混じり得る霊媒結果" in block
+    assert "印象だけの白寄り評価は非狼確定として数えない" in block
+    assert "単発の白だけで非狼扱いを固定しない" in block
+
+
+def test_game_rules_block_lists_acceptable_non_wolf_confirmation_grounds() -> None:
+    """非狼確定として数えてよい根拠は公開ログ・霊媒結果・襲撃死・
+    真寄り情報役の判定・CO 破綻整理に限る。"""
+    block = _build_game_rules_block()
+    assert "公開ログ・霊媒結果・襲撃死・真寄り情報役の判定" in block
+    assert "CO 破綻整理" in block
+    assert "本物の人狼ではないと示す襲撃死" in block
+
+
+def test_game_rules_block_treats_remaining_seer_co_as_fixed_wolf_position() -> None:
+    """2 人非狼確定が成立したら、残る占い師 CO は『まだ灰の 1 人』ではなく
+    固定配役上の狼位置として投票・発言・進行提案へ反映させる。"""
+    block = _build_game_rules_block()
+    assert "『まだ灰の 1 人』ではなく" in block
+    assert "固定配役上の狼位置として投票・発言・進行提案へ反映" in block
+    assert "残る占い師 CO の処刑提案" in block
+
+
+def test_game_rules_block_releases_fixed_black_when_premise_collapses() -> None:
+    """村陣営騙り・CO 撤回・霊媒師 CO 偽の浮上・非狼確定根拠の破綻など
+    前提が崩れたら、確定黒扱いを解除して時系列から再整理する。"""
+    block = _build_game_rules_block()
+    assert "前提が崩れた場合は確定黒扱いを解除して時系列から再整理" in block
+    assert "村陣営の騙り" in block
+    assert "CO 撤回" in block
+    # 既存の line 108 文言と区別するため『の浮上』『後から』語尾の anchor を使う
+    assert "霊媒師 CO 側が偽だった可能性が後から浮上した状況" in block
+    assert "非狼確定の根拠が後から破綻した場合" in block
+    assert "CO 履歴と判定履歴を時系列で再整理" in block
+
+
 # ------------------------------------- terminology (推理語彙) in rules block
 # Advanced jinro vocabulary is shared across every LLM seat via the game-rules
 # block (not per-role strategy). These assertions pin the substrings that the
@@ -680,6 +733,17 @@ def test_medium_strategy_routes_seer_co_suspicion_through_corroboration() -> Non
     assert "死亡タイミング" in block
 
 
+def test_medium_strategy_includes_three_seer_co_elimination_inference() -> None:
+    """霊媒師は 3占いCO 盤面で 2 人非狼確定にできるかを毎日整理する。
+    霊媒白を非狼確定として数えてよいのは、自分の霊媒 CO 側が真寄りと
+    十分読める段階で、霊媒結果以外の整合も併せて説明できる場合に限る。"""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "占い師 CO が 3 人" in block
+    assert "自分の霊媒 CO 側が真寄りと十分読める段階" in block
+    assert "霊媒結果以外の整合" in block
+    assert "残る占い師 CO を確定黒級として処刑提案・投票誘導" in block
+
+
 def test_knight_strategy_advises_protection_success_co() -> None:
     """On a peaceful morning (no casualty), the knight should consider CO-ing
     with the guard target attached — and must always attach the guard target
@@ -812,6 +876,17 @@ def test_seer_strategy_covers_proactive_and_counter_co() -> None:
     assert "単独真として扱わせてしまう" in block
 
 
+def test_seer_strategy_includes_three_seer_co_elimination_for_targeting() -> None:
+    """占い師は 3占いCO・自分以外の 2 人が非狼確定の盤面で、夜の占い対象選びで
+    残る占い師 CO 位置の確認や相方候補ペア仮説を崩す方向を優先する。
+    非狼確定として数える根拠は説明可能なものに限る。"""
+    block = _build_strategy_block(Role.SEER)
+    assert "占い師 CO が 3 人" in block
+    assert "自分以外の 2 人が公開情報上で非狼確定" in block
+    assert "相方候補ペア仮説を崩す方向" in block
+    assert "霊媒結果・襲撃死・CO 破綻など説明可能な根拠に限る" in block
+
+
 def test_medium_strategy_covers_post_execution_publication_and_counter_co() -> None:
     """Medium must publish results the day after an execution and must run
     counter-CO against a fake medium with time-ordered history framing while
@@ -875,6 +950,16 @@ def test_knight_strategy_warns_against_sutekogo_overuse() -> None:
     assert "毎夜の既定行動にしない" in block
 
 
+def test_knight_strategy_includes_three_seer_co_elimination_for_guard_choice() -> None:
+    """騎士は 3占いCO・2 人非狼確定が成立したら、残る 1 人からの黒判定で
+    守るべき真情報役・確白寄りと、次夜の本命護衛余地を比較する。
+    前提が崩れたら護衛方針も再整理する。"""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "占い師 CO が 3 人" in block
+    assert "次夜の本命護衛余地" in block
+    assert "前提が崩れたら護衛方針も再整理" in block
+
+
 def test_villager_strategy_anchors_in_checklist() -> None:
     """Villager must still forbid CO fakes AND must anchor speech in the
     shared enthusiast checklist (CO / divination / vote histories)."""
@@ -913,6 +998,45 @@ def test_villager_co_prohibition_does_not_leak_to_other_roles(role: Role) -> Non
     block = _build_strategy_block(role)
     assert "村人CO" not in block
     assert "素村CO" not in block
+
+
+def test_villager_strategy_includes_three_seer_co_elimination_inference() -> None:
+    """村人は 3占いCO・2非狼確定の盤面で、残る占い師 CO 位置を投票・発言・
+    進行提案で固定配役上の狼位置として扱う方針を持つ。非狼確定の数え方の
+    厳格さと前提崩壊時の再整理も明示。"""
+    block = _build_strategy_block(Role.VILLAGER)
+    assert "占い師 CO が 3 人" in block
+    assert "残る占い師 CO 位置を投票・発言・進行提案" in block
+    assert "印象白や信用未確定 CO の白判定では数えず" in block
+    assert "前提が崩れた瞬間" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_three_seer_co_elimination_role_framings_do_not_cross_leak(role: Role) -> None:
+    """役職別 framing 文言が他 role の strategy block へ流れ込まないこと。
+    共通ルール本体は `_build_game_rules_block` 側にあるため、strategy 側の
+    役職別フレーズが横滑りしてはいけない。"""
+    block = _build_strategy_block(role)
+    villager_phrase = "残る占い師 CO 位置を投票・発言・進行提案"
+    seer_phrase = "相方候補ペア仮説を崩す方向"
+    medium_phrase = "残る占い師 CO を確定黒級として処刑提案・投票誘導"
+    knight_phrase = "次夜の本命護衛余地"
+    if role is not Role.VILLAGER:
+        assert villager_phrase not in block, (
+            f"villager-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+    if role is not Role.SEER:
+        assert seer_phrase not in block, (
+            f"seer-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+    if role is not Role.MEDIUM:
+        assert medium_phrase not in block, (
+            f"medium-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
+    if role is not Role.KNIGHT:
+        assert knight_phrase not in block, (
+            f"knight-framing of 3-seer-CO elimination leaked into {role.name}"
+        )
 
 
 # --------------------------------- wolf night-attack guard-aware vocabulary
