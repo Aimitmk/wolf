@@ -35,8 +35,9 @@ if ! command -v tmux >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! command -v uv >/dev/null 2>&1; then
-    echo "ERROR: uv is not installed (https://docs.astral.sh/uv/)."
+if [[ ! -x "${REPO_ROOT}/.venv/bin/wolfbot" || ! -x "${REPO_ROOT}/.venv/bin/wolfbot-npc" ]]; then
+    echo "ERROR: wolfbot entry points not found in ${REPO_ROOT}/.venv/bin/."
+    echo "       Run 'uv sync' first to create the project venv."
     exit 1
 fi
 
@@ -45,6 +46,14 @@ if [[ ! -f "${REPO_ROOT}/.env.master" ]]; then
     echo "       Copy .env.master.example, fill the secrets, and rerun."
     exit 1
 fi
+
+# We invoke .venv/bin/wolfbot* directly rather than `uv run` so that the
+# project's pinned Python 3.11 is used regardless of the user's shell
+# environment. UV_PYTHON / VIRTUAL_ENV pointing elsewhere (3.12 / 3.14
+# system pythons) is common on multi-project machines and would cause
+# `uv run` to error out with "incompatible interpreter".
+WOLFBOT_BIN="${REPO_ROOT}/.venv/bin/wolfbot"
+WOLFBOT_NPC_BIN="${REPO_ROOT}/.venv/bin/wolfbot-npc"
 
 # ─── work out which NPC personas to launch ────────────────────────────────
 declare -a PERSONAS=()
@@ -119,13 +128,36 @@ launch_in_window() {
 echo "Starting tmux session '${SESSION}' with 1 master + ${#PERSONAS[@]} NPC bot(s)..."
 tmux new-session -d -s "${SESSION}" -c "${REPO_ROOT}"
 
-launch_in_window "master" "${LOG_DIR}/master.log" "uv run wolfbot" "no"
+launch_in_window "master" "${LOG_DIR}/master.log" "'${WOLFBOT_BIN}'" "no"
+
+# Wait for Master to announce its WebSocket bind in the log. Polling with
+# a TCP probe (e.g. /dev/tcp) would write bytes to the socket and trigger
+# spurious EOFError tracebacks on the websockets server side; tailing the
+# log is non-intrusive. Discord login + VC join takes ~5-10s, and any NPC
+# bot that tries to connect before that gets ConnectionRefusedError
+# without auto-retry, so we serialize the dependency here.
+echo "Waiting for Master to announce 'master_ws_listening' (up to 60s)..."
+WS_READY=0
+for _ in $(seq 1 60); do
+    if grep -q "master_ws_listening" "${LOG_DIR}/master.log" 2>/dev/null; then
+        WS_READY=1
+        break
+    fi
+    sleep 1
+done
+if [[ "${WS_READY}" != "1" ]]; then
+    echo "WARNING: Master did not announce WS readiness within 60s."
+    echo "         Check 'tail -f ${LOG_DIR}/master.log' for errors before launching NPCs."
+    echo "         NPC bots will still be started but may need manual restart after Master."
+else
+    echo "Master WS is ready."
+fi
 
 for persona in "${PERSONAS[@]}"; do
     launch_in_window \
         "${persona}" \
         "${LOG_DIR}/${persona}.log" \
-        "WOLFBOT_NPC_ENV=envs/npc/.env.${persona} uv run wolfbot-npc"
+        "WOLFBOT_NPC_ENV=envs/npc/.env.${persona} '${WOLFBOT_NPC_BIN}'"
 done
 
 # Land on the master window when the user attaches.
