@@ -47,6 +47,7 @@ From `.env.example`. The provider identity field (`XAI_API_KEY`, `DEEPSEEK_API_K
 - `GEMINI_VERTEX_LOCATION` — default `global`; the Vertex AI Gemini location
 - `GEMINI_MODEL` — default `gemini-3-flash-preview`
 - `GEMINI_THINKING_LEVEL` — `minimal` / `low` / `medium` / `high` (default `high`)
+- `GEMINI_TEMPERATURE` — Vertex AI Gemini sampling temperature, range `0.0`–`2.0` (default `1.0`). Gemini 3 recommends 1.0; lower values risk looping or degraded output. Forwarded only on the Gemini path (xAI / DeepSeek do not take a temperature knob).
 - `DISCORD_GUILD_ID`, `MAIN_TEXT_CHANNEL_ID`, `MAIN_VOICE_CHANNEL_ID` — ints
 - `WOLFBOT_DB_PATH` — SQLite path (default `./wolfbot.db`)
 - `LOG_LEVEL` — default `INFO`

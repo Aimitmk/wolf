@@ -2481,8 +2481,10 @@ async def test_deepseek_decider_omits_reasoning_effort_when_thinking_disabled() 
 async def test_gemini_decider_sends_response_json_schema_and_thinking_level() -> None:
     """Gemini path: `response_mime_type=application/json` + `response_json_schema`,
     `thinking_level` forwarded via `ThinkingConfig`, system prompt as
-    `system_instruction`, user context as `contents`. Sampling controls and
-    DeepSeek-only knobs (`extra_body`, `reasoning_effort`) must NOT be sent."""
+    `system_instruction`, user context as `contents`. Sampling controls do NOT
+    appear as top-level kwargs (Gemini puts `temperature` on `config` instead;
+    the `config.temperature` flow is exercised by a sibling test). DeepSeek-only
+    knobs (`extra_body`, `reasoning_effort`) must NOT be sent at all."""
     from wolfbot.services.llm_service import RESPONSE_SCHEMA, GeminiLLMActionDecider
 
     fake = _FakeGenAIClient(_canned_action_json())
@@ -2509,6 +2511,26 @@ async def test_gemini_decider_sends_response_json_schema_and_thinking_level() ->
         assert forbidden not in call
     assert "extra_body" not in call
     assert "reasoning_effort" not in call
+
+
+async def test_gemini_decider_forwards_temperature_to_generate_content_config() -> None:
+    """Gemini path: a `temperature` constructor argument must reach
+    `GenerateContentConfig.temperature`. This is the only Gemini sampling
+    control wolfbot exposes — xAI / DeepSeek deliberately don't get one."""
+    from wolfbot.services.llm_service import GeminiLLMActionDecider
+
+    fake = _FakeGenAIClient(_canned_action_json())
+    decider = GeminiLLMActionDecider(
+        client=fake,
+        model="gemini-3-flash-preview",
+        thinking_level="high",
+        temperature=0.7,
+        timeout=15.0,
+    )
+    await decider.decide("sys", "ctx")
+
+    config = fake.aio.models.calls[0]["config"]
+    assert config.temperature == 0.7
 
 
 def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2602,3 +2624,38 @@ def test_make_gemini_decider_constructs_vertex_ai_client(
     assert decider.model == "gemini-3-flash-preview"
     assert decider.thinking_level == "high"
     assert decider.timeout == 15.0
+
+
+def test_make_llm_decider_gemini_branch_passes_temperature_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end factory wiring: `settings.GEMINI_TEMPERATURE` must reach the
+    constructed `GeminiLLMActionDecider.temperature`. The xAI and DeepSeek
+    branches still don't accept a sampling-control knob (no symmetrical test
+    needed — they have no temperature parameter to assert)."""
+    from pydantic import SecretStr
+
+    from wolfbot.config import Settings
+    from wolfbot.services.llm_service import GeminiLLMActionDecider, make_llm_decider
+
+    class _StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", _StubClient)
+
+    s = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        DISCORD_TOKEN=SecretStr("t"),
+        DISCORD_GUILD_ID=1,
+        MAIN_TEXT_CHANNEL_ID=2,
+        MAIN_VOICE_CHANNEL_ID=3,
+        LLM_PROVIDER="gemini",
+        GEMINI_VERTEX_PROJECT="my-project",
+        GEMINI_TEMPERATURE=0.3,
+    )
+    decider = make_llm_decider(s)
+    assert isinstance(decider, GeminiLLMActionDecider)
+    assert decider.temperature == 0.3

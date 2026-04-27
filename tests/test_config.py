@@ -133,3 +133,84 @@ def test_gemini_empty_vertex_project_rejected() -> None:
             LLM_PROVIDER="gemini",
             GEMINI_VERTEX_PROJECT="",
         )
+
+
+def test_gemini_temperature_default_is_one_point_zero() -> None:
+    """Gemini 3 recommends temperature=1.0; lower values risk looping or
+    degraded output. The Settings default must match that recommendation."""
+    s = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        LLM_PROVIDER="gemini",
+        GEMINI_VERTEX_PROJECT="p",
+    )
+    assert s.GEMINI_TEMPERATURE == 1.0
+
+
+@pytest.mark.parametrize("value", [0.0, 2.0])
+def test_gemini_temperature_accepts_boundary_values(value: float) -> None:
+    """Both endpoints of the documented Gemini 3 range must construct
+    cleanly — `ge=0.0` and `le=2.0` are inclusive."""
+    s = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        LLM_PROVIDER="gemini",
+        GEMINI_VERTEX_PROJECT="p",
+        GEMINI_TEMPERATURE=value,
+    )
+    assert value == s.GEMINI_TEMPERATURE
+
+
+@pytest.mark.parametrize("value", [-0.1, 2.1])
+def test_gemini_temperature_rejects_out_of_range(value: float) -> None:
+    """Out-of-range values must raise ValidationError at boot — better than
+    deferring to the SDK at first request time."""
+    with pytest.raises(ValidationError):
+        Settings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            LLM_PROVIDER="gemini",
+            GEMINI_VERTEX_PROJECT="p",
+            GEMINI_TEMPERATURE=value,
+        )
+
+
+def test_gemini_temperature_rejects_non_numeric() -> None:
+    """A non-numeric string from .env must raise ValidationError via
+    pydantic's float coercion, not silently coerce or fall back to default."""
+    with pytest.raises(ValidationError):
+        Settings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            LLM_PROVIDER="gemini",
+            GEMINI_VERTEX_PROJECT="p",
+            GEMINI_TEMPERATURE="abc",
+        )
+
+
+def test_gemini_temperature_rejects_empty_string() -> None:
+    """Empty string in .env must raise ValidationError. Pydantic does not
+    silently fall back to the default for explicit empty strings — the
+    operator misconfiguration should fail loudly at boot."""
+    with pytest.raises(ValidationError):
+        Settings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            LLM_PROVIDER="gemini",
+            GEMINI_VERTEX_PROJECT="p",
+            GEMINI_TEMPERATURE="",
+        )
+
+
+def test_xai_provider_can_still_read_gemini_temperature_field() -> None:
+    """`GEMINI_TEMPERATURE` is just a typed field on Settings — it must
+    construct cleanly even when the active provider is xAI. The factory
+    is responsible for only passing it on the Gemini branch."""
+    s = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        XAI_API_KEY=SecretStr("k"),
+        GEMINI_TEMPERATURE=0.5,
+    )
+    assert s.LLM_PROVIDER == "xai"
+    assert s.GEMINI_TEMPERATURE == 0.5

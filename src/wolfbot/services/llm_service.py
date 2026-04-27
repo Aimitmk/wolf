@@ -259,11 +259,13 @@ class GeminiLLMActionDecider:
         client: object,
         model: str,
         thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
+        temperature: float = 1.0,
         timeout: float = 30.0,
     ) -> None:
         self.client = client
         self.model = model
         self.thinking_level = thinking_level
+        self.temperature = temperature
         self.timeout = timeout
 
     @retry(
@@ -282,6 +284,7 @@ class GeminiLLMActionDecider:
                 system_instruction=system_prompt,
                 response_mime_type="application/json",
                 response_json_schema=RESPONSE_SCHEMA["schema"],
+                temperature=self.temperature,
                 thinking_config=types.ThinkingConfig(
                     # SDK normalizes the string into ThinkingLevel at runtime;
                     # the type annotation is enum-only, so silence the check.
@@ -1133,6 +1136,7 @@ def make_gemini_decider(
     location: str,
     model: str,
     thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
+    temperature: float = 1.0,
     timeout: float = 30.0,
 ) -> GeminiLLMActionDecider:
     """Build a Vertex AI Gemini-backed decider. Imports google-genai lazily.
@@ -1155,6 +1159,7 @@ def make_gemini_decider(
         client=client,
         model=model,
         thinking_level=thinking_level,
+        temperature=temperature,
         timeout=timeout,
     )
 
@@ -1189,6 +1194,7 @@ def make_llm_decider(settings: Settings, timeout: float = 30.0) -> LLMActionDeci
             location=settings.GEMINI_VERTEX_LOCATION,
             model=settings.GEMINI_MODEL,
             thinking_level=settings.GEMINI_THINKING_LEVEL,
+            temperature=settings.GEMINI_TEMPERATURE,
             timeout=timeout,
         )
     raise ValueError(f"unknown LLM_PROVIDER: {settings.LLM_PROVIDER!r}")
