@@ -429,7 +429,6 @@ class GroqWhisperAudioAnalyzer:
         "他の文字は含めないでください。\n\n"
         "{\n"
         '  "summary": "1文の要約(30文字以内)",\n'
-        '  "confidence": 0.95,\n'
         '  "co_claim": null,\n'
         '  "vote_target_seat": null,\n'
         '  "stance": {},\n'
@@ -437,7 +436,6 @@ class GroqWhisperAudioAnalyzer:
         "}\n\n"
         "フィールド説明:\n"
         "- summary: 発言内容の1文要約\n"
-        "- confidence: 入力テキストから読み取れる主張の明確さ(0.0〜1.0)\n"
         f"- co_claim: 役職CO(自称)があれば {format_co_claim_options()}、なければ null\n"
         f"- vote_target_seat: 処刑対象として名指しした席番号({_seat_range_label()})、なければ null\n"
         "- stance: 言及した席への態度 {\"席番号\": \"positive\"/\"negative\"/\"neutral\"}\n"
@@ -498,7 +496,9 @@ class GroqWhisperAudioAnalyzer:
             sample_width=self.pcm_sample_width,
         )
 
-        transcript = await self._whisper(wav_audio, language, effective_timeout)
+        transcript, asr_confidence = await self._whisper(
+            wav_audio, language, effective_timeout
+        )
         if not transcript:
             return SttResult(
                 text="",
@@ -532,25 +532,37 @@ class GroqWhisperAudioAnalyzer:
             import json as _json
 
             summary_str = _json.dumps(summary_dict, ensure_ascii=False)
-        try:
-            confidence = float(analysis.get("confidence", 0.9))
-        except (TypeError, ValueError):
-            confidence = 0.9
 
         return SttResult(
             text=transcript,
-            confidence=confidence,
+            # Use Whisper's ASR confidence (derived from
+            # ``no_speech_prob``), NOT the analyzer's "claim clarity"
+            # field — the latter legitimately returns 0.0 for greetings
+            # and short reactions, which would silently fail the
+            # ``confidence_threshold`` gate in ``VoiceIngestService``
+            # and drop valid speech events. The analyzer's confidence
+            # was a legacy field from the multimodal Gemini path where
+            # both signals collapsed into one number.
+            confidence=asr_confidence,
             duration_ms=duration_ms,
             summary=summary_str,
             co_declaration=co_decl,
             addressed_name=addressed_name,
         )
 
-    async def _whisper(self, audio: bytes, language: str, timeout: float) -> str:
+    async def _whisper(
+        self, audio: bytes, language: str, timeout: float
+    ) -> tuple[str, float]:
         """Step 1: POST audio to Groq's whisper transcription endpoint.
 
-        Uses ``response_format=verbose_json`` so we get a ``text`` field
-        plus per-segment confidence (we collapse to a single transcript).
+        Returns ``(transcript, asr_confidence)`` where ``asr_confidence``
+        is derived from ``verbose_json``'s per-segment ``no_speech_prob``
+        (a Whisper internal signal: probability that the segment is
+        actually silence/noise rather than speech). Aggregating over
+        segments gives a per-utterance ASR-side confidence that's
+        independent of the downstream analyzer LLM. ``no_speech_prob``
+        is in [0, 1]; we report ``1 - max(no_speech_prob)`` so a single
+        bad segment lowers confidence appropriately.
         """
         import httpx
 
@@ -566,13 +578,17 @@ class GroqWhisperAudioAnalyzer:
         files: dict[str, tuple[str, bytes, str] | tuple[None, str]] = {
             "file": ("segment.wav", audio, "audio/wav"),
             "model": (None, self.groq_model),
-            "response_format": (None, "json"),
+            # ``verbose_json`` adds ``segments`` with ``no_speech_prob``;
+            # plain ``json`` only carries ``text``. The size overhead is
+            # ~1 KB per call, negligible vs the audio upload itself.
+            "response_format": (None, "verbose_json"),
         }
         if lang_code:
             files["language"] = (None, lang_code)
 
         timer = CallTimer()
         transcript = ""
+        confidence = 0.0
         err: str | None = None
         # Capture the upstream error body so a recurring 400/4xx is
         # diagnosable from the trace alone (status code by itself didn't
@@ -588,6 +604,20 @@ class GroqWhisperAudioAnalyzer:
                     raise SttProviderError(err)
                 resp_json = resp.json()
                 transcript = (resp_json.get("text") or "").strip()
+                segments = resp_json.get("segments") or []
+                # ``no_speech_prob`` may be missing on some segments
+                # (e.g. when the response shape varies per Groq build);
+                # fall back to a permissive 1.0 if the field is absent.
+                if segments:
+                    worst_no_speech = max(
+                        float(s.get("no_speech_prob") or 0.0) for s in segments
+                    )
+                    confidence = max(0.0, min(1.0, 1.0 - worst_no_speech))
+                else:
+                    # No segments in the response (very short audio, or a
+                    # response shape we don't recognize) — fall back to
+                    # treating any returned transcript as confident.
+                    confidence = 1.0 if transcript else 0.0
                 # Groq returns an `x_groq.id` etc. but no usage field for
                 # whisper; leave tokens=None like the openai SDK does.
         except SttProviderError:
@@ -612,9 +642,13 @@ class GroqWhisperAudioAnalyzer:
                 latency_ms=timer.elapsed_ms,
                 error=err,
                 tokens=tokens,
-                extra={"audio_bytes": len(audio), "step": "transcribe"},
+                extra={
+                    "audio_bytes": len(audio),
+                    "step": "transcribe",
+                    "asr_confidence": round(confidence, 3) if err is None else None,
+                },
             )
-        return transcript
+        return transcript, confidence
 
     async def _analyze(self, transcript: str, timeout: float) -> dict:  # type: ignore[type-arg]
         """Step 2: ask the analyzer LLM to extract structured fields.

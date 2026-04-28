@@ -114,19 +114,28 @@ def _analyzer_json(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _whisper_verbose_json(text: str, no_speech_prob: float = 0.05) -> dict[str, Any]:
+    """Shape Groq's ``verbose_json`` response: top-level ``text`` plus a
+    single ``segments`` entry carrying ``no_speech_prob``. The transcribe
+    code path computes ASR confidence as ``1 - max(no_speech_prob)``."""
+    return {
+        "text": text,
+        "segments": [{"text": text, "no_speech_prob": no_speech_prob}],
+    }
+
+
 async def test_full_pipeline_success_propagates_structured_fields(
     trace_dir: Path, patch_httpx: Any
 ) -> None:
     patch_httpx({
         "https://api.groq.com/": {
             "status": 200,
-            "json": {"text": "席3が怪しいから投票する"},
+            "json": _whisper_verbose_json("席3が怪しいから投票する", no_speech_prob=0.05),
         },
         "https://api.x.ai/": {
             "status": 200,
             "json": _analyzer_json({
                 "summary": "席3への投票表明",
-                "confidence": 0.92,
                 "co_claim": None,
                 "vote_target_seat": 3,
                 "stance": {"3": "negative"},
@@ -147,7 +156,8 @@ async def test_full_pipeline_success_propagates_structured_fields(
         result = await analyzer.transcribe(audio=_make_wav(), language="ja-JP", timeout_s=10.0)
 
     assert result.text == "席3が怪しいから投票する"
-    assert result.confidence == pytest.approx(0.92)
+    # confidence = 1 - 0.05 = 0.95, surfaced from Whisper not the analyzer.
+    assert result.confidence == pytest.approx(0.95)
     assert result.summary == "席3への投票表明"
     assert result.co_declaration is None
     assert result.addressed_name is None
@@ -163,9 +173,93 @@ async def test_full_pipeline_success_propagates_structured_fields(
     assert transcribe_row["model"] == "whisper-large-v3-turbo"
     assert transcribe_row["error"] is None
     assert "席3" in transcribe_row["response"]
+    assert transcribe_row["metadata"]["asr_confidence"] == pytest.approx(0.95)
     assert analyze_row["provider"] == "xai"
     assert analyze_row["model"] == "grok-4-1-fast-non-reasoning"
     assert analyze_row["tokens"] == {"prompt": 80, "completion": 30, "total": 110}
+
+
+async def test_low_claim_confidence_does_not_drop_speech(patch_httpx: Any) -> None:
+    """Regression: the analyzer used to return ``confidence: 0.0`` for
+    greetings and short utterances ("おやすみなさい"); we previously
+    surfaced that as ``SttResult.confidence``, which made
+    ``VoiceIngestService`` drop the segment as ``stt_low_confidence``
+    and the user's voice never reached the arbiter. ASR confidence
+    must come from Whisper's signal, not the analyzer's claim-clarity
+    judgement."""
+    patch_httpx({
+        "https://api.groq.com/": {
+            "status": 200,
+            "json": _whisper_verbose_json("おやすみなさい", no_speech_prob=0.02),
+        },
+        # Analyzer returns no useful structured fields for a greeting,
+        # but that must not gate the speech event.
+        "https://api.x.ai/": {
+            "status": 200,
+            "json": _analyzer_json({
+                "summary": "就寝の挨拶",
+                "co_claim": None,
+                "vote_target_seat": None,
+                "stance": {},
+                "addressed_name": None,
+            }),
+        },
+    })
+    a = GroqWhisperAudioAnalyzer(
+        groq_api_key="g", groq_model="m",
+        analyzer_api_key="x", analyzer_model="grok",
+    )
+    r = await a.transcribe(audio=_make_wav(), language="ja-JP", timeout_s=5)
+    assert r.text == "おやすみなさい"
+    # 1 - 0.02 = 0.98; safely above any reasonable confidence_threshold.
+    assert r.confidence > 0.9
+
+
+async def test_high_no_speech_prob_lowers_confidence(patch_httpx: Any) -> None:
+    """When Whisper itself thinks the audio is mostly silence/noise,
+    confidence must drop so ``VoiceIngestService`` can filter via its
+    threshold. This is the legitimate use case for the gate — silence
+    bursts mis-detected as speech."""
+    patch_httpx({
+        "https://api.groq.com/": {
+            "status": 200,
+            "json": _whisper_verbose_json("ふぁ", no_speech_prob=0.85),
+        },
+        "https://api.x.ai/": {
+            "status": 200,
+            "json": _analyzer_json({}),
+        },
+    })
+    a = GroqWhisperAudioAnalyzer(
+        groq_api_key="g", groq_model="m",
+        analyzer_api_key="x", analyzer_model="grok",
+    )
+    r = await a.transcribe(audio=_make_wav(), language="ja-JP", timeout_s=5)
+    # 1 - 0.85 = 0.15
+    assert r.confidence == pytest.approx(0.15)
+
+
+async def test_missing_segments_falls_back_to_full_confidence(patch_httpx: Any) -> None:
+    """If Groq's response omits ``segments`` (very short audio, future
+    response-shape change), we trust the transcript and report 1.0 —
+    losing data quietly is worse than over-trusting on rare edge cases."""
+    patch_httpx({
+        "https://api.groq.com/": {
+            "status": 200,
+            "json": {"text": "やぁ"},  # no segments key
+        },
+        "https://api.x.ai/": {
+            "status": 200,
+            "json": _analyzer_json({}),
+        },
+    })
+    a = GroqWhisperAudioAnalyzer(
+        groq_api_key="g", groq_model="m",
+        analyzer_api_key="x", analyzer_model="grok",
+    )
+    r = await a.transcribe(audio=_make_wav(), language="ja-JP", timeout_s=5)
+    assert r.text == "やぁ"
+    assert r.confidence == pytest.approx(1.0)
 
 
 async def test_co_declaration_normalizes_to_known_roles(patch_httpx: Any) -> None:
@@ -356,7 +450,7 @@ async def test_analyzer_5xx_soft_fails_keeps_transcript(
     patch_httpx({
         "https://api.groq.com/": {
             "status": 200,
-            "json": {"text": "占いCO 席7白"},
+            "json": _whisper_verbose_json("占いCO 席7白", no_speech_prob=0.1),
         },
         "https://api.x.ai/": {"status": 503, "text": "upstream"},
     })
@@ -370,7 +464,10 @@ async def test_analyzer_5xx_soft_fails_keeps_transcript(
         r = await a.transcribe(audio=_make_wav(), language="ja-JP", timeout_s=5)
 
     assert r.text == "占いCO 席7白"
-    assert r.confidence == pytest.approx(0.9)  # default fallback
+    # ASR confidence comes from Whisper (1 - 0.1 = 0.9), not from the
+    # analyzer — analyzer outage doesn't change the transcription's
+    # confidence.
+    assert r.confidence == pytest.approx(0.9)
     assert r.summary is None
     assert r.co_declaration is None
 
