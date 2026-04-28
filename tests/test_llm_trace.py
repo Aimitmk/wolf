@@ -9,6 +9,7 @@ import pytest
 
 from wolfbot.services.llm_trace import (
     log_llm_call,
+    parse_day_from_phase_id,
     parse_game_id_from_phase_id,
     trace_context,
 )
@@ -267,6 +268,17 @@ def test_parse_game_id_from_phase_id() -> None:
     assert parse_game_id_from_phase_id(None) is None
     assert parse_game_id_from_phase_id("") is None
     assert parse_game_id_from_phase_id("noseparator") is None
+
+
+def test_parse_day_from_phase_id() -> None:
+    assert parse_day_from_phase_id("g_abc::day1::DAY_DISCUSSION::1") == 1
+    assert parse_day_from_phase_id("g_abc::day12::NIGHT::3") == 12
+    assert parse_day_from_phase_id("g_abc::day0::NIGHT_0::1") == 0
+    assert parse_day_from_phase_id(None) is None
+    assert parse_day_from_phase_id("") is None
+    assert parse_day_from_phase_id("g_abc") is None
+    assert parse_day_from_phase_id("g_abc::notaday::DAY_DISCUSSION::1") is None
+    assert parse_day_from_phase_id("g_abc::dayX::DAY_DISCUSSION::1") is None
 
 
 async def test_concurrent_writes_interleave_at_line_boundaries(

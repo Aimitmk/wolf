@@ -248,6 +248,47 @@ async def test_export_game_inlines_jsonl_trace(
     assert trace[1]["file_stem"] == "gameplay"
 
 
+async def test_export_game_filters_player_speech_logs(
+    fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
+) -> None:
+    """PLAYER_SPEECH log rows duplicate speech_events rows; the export omits them.
+
+    DiscussionService.record() inserts both at write time so the live LLM
+    context-builder keeps reading PLAYER_SPEECH from logs_public, but the
+    viewer should only see one canonical speech entry per utterance.
+    """
+    repo, db_path = fixture_repo
+    await _seed_minimal_game(repo)
+
+    # Add a PLAYER_SPEECH log row that duplicates a npc_generated speech_event.
+    await repo.insert_log_public(
+        LogEntry(
+            game_id=GAME_ID,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            kind="PLAYER_SPEECH",
+            actor_seat=2,
+            visibility="PUBLIC",
+            text="seat 2's npc speech",
+            created_at=1_700_000_200,
+        )
+    )
+
+    out = await export_game(
+        game_id=GAME_ID,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=tmp_path / "out",
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    all_log_kinds = {
+        log["kind"]
+        for phase in payload["phases"]
+        for log in phase["public_logs"]
+    }
+    assert "PLAYER_SPEECH" not in all_log_kinds
+
+
 async def test_export_game_raises_for_unknown_game(
     fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
 ) -> None:

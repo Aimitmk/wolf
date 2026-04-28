@@ -112,10 +112,18 @@ async def _build_payload(
             "SELECT * FROM seats WHERE game_id = ? ORDER BY seat_no",
             (game_id,),
         )]
+        # PLAYER_SPEECH log rows duplicate the canonical speech_events rows
+        # (DiscussionService.record() inserts both at write time so live LLM
+        # context-builder prompts can keep reading from logs_public). For
+        # replay we only need the speech_events row — it carries source +
+        # speaker_seat + summary, which the viewer attributes to the player.
+        # Excluding the duplicates here keeps the timeline clean and avoids
+        # the "NPC text shown twice (PLAYER_SPEECH log + speech_event)" issue.
         public_log_rows = [dict(r) for r in await _fetch_all(
             db,
             "SELECT day, phase, kind, actor_seat, text, created_at "
-            "FROM logs_public WHERE game_id = ? ORDER BY id ASC",
+            "FROM logs_public WHERE game_id = ? AND kind != 'PLAYER_SPEECH' "
+            "ORDER BY id ASC",
             (game_id,),
         )]
         vote_rows = [dict(r) for r in await _fetch_all(
@@ -350,7 +358,17 @@ def _load_trace(trace_root: Path, game_id: str) -> list[TraceEntry]:
     games). One bad line is logged and skipped — not fatal. A schema-
     violating line (missing required field, wrong type) is also logged
     and skipped rather than failing the whole export.
+
+    Backfill: pre-fix voice_stt / NPC trace lines were written with
+    ``day=null`` (the call sites passed only ``phase=phase_id`` to
+    ``trace_context``). The viewer's ``matchTraceForSpeech`` requires
+    ``t.day === phase.day`` to attach a trace to a speech event, so
+    null-day lines never surfaced the LLM prompt UI. We recover the day
+    here by parsing ``dayN`` out of the canonical phase_id format
+    ``"{gid}::dayN::PHASE::seq"`` whenever ``day`` is missing.
     """
+    from wolfbot.services.llm_trace import parse_day_from_phase_id
+
     game_dir = trace_root / game_id
     if not game_dir.is_dir():
         return []
@@ -370,6 +388,10 @@ def _load_trace(trace_root: Path, game_id: str) -> list[TraceEntry]:
                     )
                     continue
                 obj.setdefault("file_stem", stem)
+                if obj.get("day") is None:
+                    recovered = parse_day_from_phase_id(obj.get("phase"))
+                    if recovered is not None:
+                        obj["day"] = recovered
                 try:
                     entries.append(TraceEntry.model_validate(obj))
                 except ValidationError:

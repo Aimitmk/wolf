@@ -17,7 +17,7 @@ export type SpeechSource = "text" | "voice_stt" | "npc_generated";
 
 export type CoDeclaration = "seer" | "medium" | "knight" | null;
 
-export type TraceRole = "gameplay" | "npc_speech" | "voice_stt";
+export type TraceRole = "gameplay" | "npc_speech" | "voice_stt" | "text_analysis";
 
 export interface Seat {
   seat_no: number;

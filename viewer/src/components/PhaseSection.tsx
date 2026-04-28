@@ -143,16 +143,62 @@ function matchTraceForSpeech(
   trace: TraceEntry[],
 ): TraceEntry | null {
   if (sp.speaker_seat == null) return null;
-  // Heuristic: pick the trace entry whose actor mentions the same seat # and
-  // whose phase matches and that hasn't been claimed yet by a closer event.
+  // Per-source matcher. Each speech source maps to a specific trace role
+  // because the LLM call shape differs:
+  //   npc_generated → role=npc_speech, response is a JSON envelope whose
+  //                   `text` field equals the spoken utterance.
+  //   voice_stt     → role=voice_stt, the analyzer step has the
+  //                   transcription as user_prompt and JSON analysis as
+  //                   response. Match by user_prompt+seat+segment.
+  //   text          → role=text_analysis, user_prompt IS the typed message.
+  const phaseMatches = (t: TraceEntry) =>
+    t.day === phase.day &&
+    (t.phase === phase.phase || t.phase?.includes(phase.phase));
+  const needle = sp.text.slice(0, 20);
+
+  if (sp.source === "npc_generated") {
+    return (
+      trace.find(
+        (t) =>
+          t.role === "npc_speech" &&
+          phaseMatches(t) &&
+          actorSeat(t) === sp.speaker_seat &&
+          responseContains(t, needle),
+      ) ?? null
+    );
+  }
+  if (sp.source === "voice_stt") {
+    // The voice path emits two trace lines per segment (transcribe + analyze).
+    // Prefer the analyze step because it carries both the transcript and the
+    // structured fields the user wants to inspect.
+    const analyze =
+      trace.find(
+        (t) =>
+          t.role === "voice_stt" &&
+          phaseMatches(t) &&
+          actorSeat(t) === sp.speaker_seat &&
+          t.metadata?.step === "analyze" &&
+          userPromptContains(t, needle),
+      ) ?? null;
+    if (analyze !== null) return analyze;
+    return (
+      trace.find(
+        (t) =>
+          t.role === "voice_stt" &&
+          phaseMatches(t) &&
+          actorSeat(t) === sp.speaker_seat &&
+          userPromptContains(t, needle),
+      ) ?? null
+    );
+  }
+  // source === "text"
   return (
     trace.find(
       (t) =>
-        t.role !== "voice_stt" &&
-        t.day === phase.day &&
-        (t.phase === phase.phase || t.phase?.includes(phase.phase)) &&
+        t.role === "text_analysis" &&
+        phaseMatches(t) &&
         actorSeat(t) === sp.speaker_seat &&
-        responseContains(t, sp.text.slice(0, 20)),
+        userPromptContains(t, needle),
     ) ?? null
   );
 }
@@ -203,6 +249,10 @@ function actorSeat(t: TraceEntry): number | null {
 
 function responseContains(t: TraceEntry, needle: string): boolean {
   return t.response != null && t.response.includes(needle);
+}
+
+function userPromptContains(t: TraceEntry, needle: string): boolean {
+  return typeof t.user_prompt === "string" && t.user_prompt.includes(needle);
 }
 
 function EventRow({

@@ -229,6 +229,7 @@ class OpenAICompatibleNpcGenerator:
             CallTimer,
             extract_openai_tokens,
             log_llm_call,
+            parse_day_from_phase_id,
             parse_game_id_from_phase_id,
             trace_context,
         )
@@ -279,6 +280,7 @@ class OpenAICompatibleNpcGenerator:
         with trace_context(
             game_id=parse_game_id_from_phase_id(request.phase_id),
             phase=request.phase_id,
+            day=parse_day_from_phase_id(request.phase_id),
             actor=actor,
             metadata={
                 "request_id": request.request_id,

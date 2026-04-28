@@ -231,7 +231,10 @@ class VoiceIngestService:
         *,
         audio_end_ms: int,
     ) -> None:
-        from wolfbot.services.llm_trace import trace_context
+        from wolfbot.services.llm_trace import (
+            parse_day_from_phase_id,
+            trace_context,
+        )
 
         actor = (
             f"speaker_user_id={seg.speaker_user_id} seat={seg.seat_no} "
@@ -240,6 +243,7 @@ class VoiceIngestService:
         with trace_context(
             game_id=game_id,
             phase=phase_id,
+            day=parse_day_from_phase_id(phase_id),
             actor=actor,
             metadata={
                 "segment_id": seg.segment_id,

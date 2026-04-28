@@ -47,7 +47,7 @@ SpeechSource = Literal["text", "voice_stt", "npc_generated"]
 # Re-export the canonical wire/storage form from domain/enums so the
 # viewer schema stays aligned with runtime validators in lockstep.
 CoDeclaration = _CoDeclaration
-TraceRole = Literal["gameplay", "npc_speech", "voice_stt"]
+TraceRole = Literal["gameplay", "npc_speech", "voice_stt", "text_analysis"]
 Victory = Literal["village", "wolf"]
 
 

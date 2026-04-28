@@ -134,6 +134,12 @@ class GeminiTextAnalyzer:
     async def analyze(self, *, text: str, timeout_s: float) -> TextAnalysis:
         import httpx
 
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            extract_gemini_rest_tokens,
+            log_llm_call,
+        )
+
         effective_timeout = min(timeout_s, self.timeout_s)
         body = {
             "contents": [
@@ -153,11 +159,26 @@ class GeminiTextAnalyzer:
             f"{self.api_base}/models/{self.model}:generateContent"
             f"?key={self.api_key}"
         )
+        timer = CallTimer()
+        raw_text = ""
+        tokens: dict[str, int | None] | None = None
+        err: str | None = None
         try:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 resp = await client.post(url, json=body)
                 if resp.status_code != 200:
-                    raise TextAnalyzerError(f"gemini_http_{resp.status_code}")
+                    err = f"gemini_http_{resp.status_code}"
+                    await log_llm_call(
+                        role="text_analysis",
+                        provider="gemini",
+                        model=self.model,
+                        system_prompt=self._SYSTEM_PROMPT,
+                        user_prompt=text,
+                        response=None,
+                        latency_ms=timer.elapsed_ms,
+                        error=err,
+                    )
+                    raise TextAnalyzerError(err)
                 resp_json = resp.json()
                 raw_text = (
                     resp_json.get("candidates", [{}])[0]
@@ -165,17 +186,61 @@ class GeminiTextAnalyzer:
                     .get("parts", [{}])[0]
                     .get("text", "")
                 )
+                tokens = extract_gemini_rest_tokens(resp_json)
                 parsed = self._parse_response(raw_text)
         except TextAnalyzerError:
             raise
         except httpx.TimeoutException as exc:
-            raise TextAnalyzerError("gemini_timeout") from exc
+            err = "gemini_timeout"
+            await log_llm_call(
+                role="text_analysis",
+                provider="gemini",
+                model=self.model,
+                system_prompt=self._SYSTEM_PROMPT,
+                user_prompt=text,
+                response=None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+            )
+            raise TextAnalyzerError(err) from exc
         except httpx.ConnectError as exc:
-            raise TextAnalyzerError("gemini_connection_refused") from exc
+            err = "gemini_connection_refused"
+            await log_llm_call(
+                role="text_analysis",
+                provider="gemini",
+                model=self.model,
+                system_prompt=self._SYSTEM_PROMPT,
+                user_prompt=text,
+                response=None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+            )
+            raise TextAnalyzerError(err) from exc
         except Exception as exc:
-            raise TextAnalyzerError(
-                f"gemini_unexpected_{type(exc).__name__}"
-            ) from exc
+            err = f"gemini_unexpected_{type(exc).__name__}"
+            await log_llm_call(
+                role="text_analysis",
+                provider="gemini",
+                model=self.model,
+                system_prompt=self._SYSTEM_PROMPT,
+                user_prompt=text,
+                response=None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+            )
+            raise TextAnalyzerError(err) from exc
+
+        await log_llm_call(
+            role="text_analysis",
+            provider="gemini",
+            model=self.model,
+            system_prompt=self._SYSTEM_PROMPT,
+            user_prompt=text,
+            response=raw_text,
+            latency_ms=timer.elapsed_ms,
+            error=None,
+            tokens=tokens,
+        )
 
         co_raw = parsed.get("co_claim")
         co_declaration = co_raw if co_raw in CO_CLAIM_VALUES else None

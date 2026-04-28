@@ -717,10 +717,22 @@ class WolfCog(commands.Cog):
                     addressed_seat_no: int | None = None
                     co_declaration: str | None = None
                     if self._text_analyzer is not None:
+                        from wolfbot.services.llm_trace import trace_context
+
                         try:
-                            analysis = await self._text_analyzer.analyze(
-                                text=message.content, timeout_s=8.0
-                            )
+                            with trace_context(
+                                game_id=game.id,
+                                phase=phase_id,
+                                day=game.day_number,
+                                actor=(
+                                    f"author_user_id={message.author.id} "
+                                    f"seat={author_seat}"
+                                ),
+                                metadata={"channel_id": channel_id},
+                            ):
+                                analysis = await self._text_analyzer.analyze(
+                                    text=message.content, timeout_s=8.0
+                                )
                         except Exception:
                             log.exception(
                                 "text_analyzer_failed game=%s seat=%s",

@@ -459,7 +459,8 @@
           "enum": [
             "gameplay",
             "npc_speech",
-            "voice_stt"
+            "voice_stt",
+            "text_analysis"
           ],
           "title": "Role",
           "type": "string"

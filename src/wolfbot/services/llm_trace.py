@@ -95,6 +95,28 @@ def parse_game_id_from_phase_id(phase_id: str | None) -> str | None:
     return head if sep else None
 
 
+def parse_day_from_phase_id(phase_id: str | None) -> int | None:
+    """Extract day number from canonical phase_id ``"{gid}::dayN::PHASE::seq"``.
+
+    Returns ``None`` when the phase_id is missing the ``dayN`` segment or
+    the segment is not parseable. Used by call sites that only have a
+    phase_id string available so trace entries carry the same ``day``
+    field the gameplay-LLM path emits.
+    """
+    if not phase_id:
+        return None
+    parts = phase_id.split("::")
+    if len(parts) < 2:
+        return None
+    seg = parts[1]
+    if not seg.startswith("day"):
+        return None
+    try:
+        return int(seg[3:])
+    except ValueError:
+        return None
+
+
 @contextmanager
 def trace_context(
     *,
@@ -271,6 +293,7 @@ __all__ = [
     "extract_gemini_vertex_tokens",
     "extract_openai_tokens",
     "log_llm_call",
+    "parse_day_from_phase_id",
     "parse_game_id_from_phase_id",
     "trace_base_dir",
     "trace_context",
