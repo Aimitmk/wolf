@@ -30,6 +30,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from wolfbot.domain.enums import CO_CLAIM_VALUES
 from wolfbot.domain.ws_messages import (
     Heartbeat,
     SpeechEventPayload,
@@ -306,9 +307,11 @@ class VoiceIngestService:
             )
             return
 
-        co_decl = result.co_declaration if result.co_declaration in (
-            "seer", "medium", "knight",
-        ) else None
+        co_decl = (
+            result.co_declaration
+            if result.co_declaration in CO_CLAIM_VALUES
+            else None
+        )
         await self.master_client.send_speech_event_payload(
             SpeechEventPayload(
                 ts=self._now_ms(),

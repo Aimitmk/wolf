@@ -40,7 +40,13 @@ from tenacity import (
 )
 
 from wolfbot.domain.discussion import CoClaim, make_phase_id
-from wolfbot.domain.enums import Phase, Role, SubmissionType
+from wolfbot.domain.enums import (
+    CO_CLAIM_VALUES,
+    CoDeclaration,
+    Phase,
+    Role,
+    SubmissionType,
+)
 from wolfbot.domain.models import Game, LogEntry, Player, Seat, Vote
 from wolfbot.domain.rules import (
     legal_attack_targets,
@@ -123,7 +129,7 @@ class LLMAction(BaseModel):
     target_name: str | None = None
     reason_summary: str = ""
     confidence: float = 0.5
-    co_declaration: Literal["seer", "medium", "knight"] | None = None
+    co_declaration: CoDeclaration | None = None
 
 
 RESPONSE_SCHEMA: dict[str, object] = {
@@ -151,7 +157,7 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "co_declaration": {
                 "type": ["string", "null"],
-                "enum": ["seer", "medium", "knight", None],
+                "enum": [*CO_CLAIM_VALUES, None],
             },
         },
     },

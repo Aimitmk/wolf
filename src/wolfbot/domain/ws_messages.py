@@ -20,6 +20,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from wolfbot.domain.enums import CoDeclaration
+
 
 class BaseEnvelope(BaseModel):
     """Cross-cutting fields present on every message."""
@@ -145,7 +147,7 @@ class SpeakResult(BaseEnvelope):
     intent: str | None = None
     estimated_duration_ms: int | None = None
     failure_reason: str | None = None
-    co_declaration: Literal["seer", "medium", "knight"] | None = Field(
+    co_declaration: CoDeclaration | None = Field(
         default=None,
         description=(
             "Structured CO self-declaration tag set by the NPC's speech "
@@ -237,7 +239,7 @@ class SpeechEventPayload(BaseEnvelope):
     audio_start_ms: int
     audio_end_ms: int
     summary: str | None = None
-    co_declaration: Literal["seer", "medium", "knight"] | None = Field(
+    co_declaration: CoDeclaration | None = Field(
         default=None,
         description=(
             "Structured CO self-declaration extracted by Gemini's audio "

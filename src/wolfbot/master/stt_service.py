@@ -21,7 +21,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from wolfbot.domain.enums import (
+    CO_CLAIM_VALUES,
+    VILLAGE_SIZE,
+    format_co_claim_options,
+)
+
 log = logging.getLogger(__name__)
+
+
+def _seat_range_label() -> str:
+    """1-based inclusive seat range derived from :data:`VILLAGE_SIZE`."""
+    return f"1〜{VILLAGE_SIZE}"
 
 
 @dataclass(frozen=True)
@@ -185,8 +196,8 @@ class GeminiAudioAnalyzer:
         "- transcript: 音声の書き起こし全文(日本語)\n"
         "- summary: 発言内容の1文要約\n"
         "- confidence: 書き起こし精度の自己評価(0.0〜1.0)\n"
-        "- co_claim: 役職CO(自称)があれば \"seer\"/\"medium\"/\"knight\"、なければ null\n"
-        "- vote_target_seat: 処刑対象として名指しした席番号(1〜9)、なければ null\n"
+        f"- co_claim: 役職CO(自称)があれば {format_co_claim_options()}、なければ null\n"
+        f"- vote_target_seat: 処刑対象として名指しした席番号({_seat_range_label()})、なければ null\n"
         "- stance: 言及した席への態度 {\"席番号\": \"positive\"/\"negative\"/\"neutral\"}\n"
         "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
         "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。\n"
@@ -289,7 +300,7 @@ class GeminiAudioAnalyzer:
 
                 co_raw = parsed.get("co_claim")
                 co_declaration = (
-                    co_raw if co_raw in ("seer", "medium", "knight") else None
+                    co_raw if co_raw in CO_CLAIM_VALUES else None
                 )
 
                 addressed_raw = parsed.get("addressed_name")
@@ -359,10 +370,291 @@ class GeminiAudioAnalyzer:
             return {"transcript": text, "confidence": 0.3}
 
 
+class GroqWhisperAudioAnalyzer:
+    """Two-step STT: Groq Whisper (transcribe) → analyzer LLM (extract).
+
+    Groq's free tier on ``whisper-large-v3-turbo`` is generous and the
+    transport is OpenAI-compatible (``audio/transcriptions`` multipart),
+    so this slots in next to the existing Gemini analyzer without
+    changing :class:`VoiceIngestService`. The structured fields the
+    discussion path expects (``co_claim``, ``vote_target_seat``,
+    ``addressed_name``, summary) are filled by a second call to a tiny
+    OpenAI-compatible analyzer (xAI Grok in production) — the same
+    contract the multimodal Gemini call returns in one hop.
+
+    Both steps are traced under ``role=voice_stt`` so the exporter and
+    viewer keep working without a schema change. The two trace lines are
+    distinguished by ``metadata.step`` (``transcribe`` vs ``analyze``).
+
+    Failure semantics: Whisper failure raises ``SttProviderError`` with
+    a precise reason (timeout / 4xx / 5xx). Analyzer failure is
+    soft-handled — we still surface the transcript with empty structured
+    fields, because the discussion path can re-derive CO via legacy
+    substring matching on the text. This keeps the human-speech signal
+    flowing even when the analyzer LLM is briefly down.
+    """
+
+    _ANALYZER_PROMPT: str = (
+        "あなたは人狼ゲームの発話内容を分析するエンジンです。\n"
+        "以下の書き起こし(日本語)を読んで、以下のJSONのみを返してください。\n"
+        "他の文字は含めないでください。\n\n"
+        "{\n"
+        '  "summary": "1文の要約(30文字以内)",\n'
+        '  "confidence": 0.95,\n'
+        '  "co_claim": null,\n'
+        '  "vote_target_seat": null,\n'
+        '  "stance": {},\n'
+        '  "addressed_name": null\n'
+        "}\n\n"
+        "フィールド説明:\n"
+        "- summary: 発言内容の1文要約\n"
+        "- confidence: 入力テキストから読み取れる主張の明確さ(0.0〜1.0)\n"
+        f"- co_claim: 役職CO(自称)があれば {format_co_claim_options()}、なければ null\n"
+        f"- vote_target_seat: 処刑対象として名指しした席番号({_seat_range_label()})、なければ null\n"
+        "- stance: 言及した席への態度 {\"席番号\": \"positive\"/\"negative\"/\"neutral\"}\n"
+        "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
+        "「みんな」「全員」など全体への呼びかけは null。"
+    )
+
+    def __init__(
+        self,
+        *,
+        groq_api_key: str,
+        groq_model: str = "whisper-large-v3-turbo",
+        groq_base_url: str = "https://api.groq.com/openai/v1",
+        analyzer_api_key: str,
+        analyzer_model: str,
+        analyzer_base_url: str = "https://api.x.ai/v1",
+        timeout_s: float = 15.0,
+    ) -> None:
+        self.groq_api_key = groq_api_key
+        self.groq_model = groq_model
+        self.groq_base_url = groq_base_url.rstrip("/")
+        self.analyzer_api_key = analyzer_api_key
+        self.analyzer_model = analyzer_model
+        self.analyzer_base_url = analyzer_base_url.rstrip("/")
+        self.timeout_s = timeout_s
+
+    async def transcribe(
+        self,
+        *,
+        audio: bytes,
+        language: str,
+        timeout_s: float,
+    ) -> SttResult:
+        effective_timeout = min(timeout_s, self.timeout_s)
+        # Estimate duration from raw 16kHz 16-bit mono PCM (matches Gemini path).
+        data_bytes = max(0, len(audio) - 44)
+        duration_ms = int(data_bytes / (16_000 * 2) * 1000)
+
+        transcript = await self._whisper(audio, language, effective_timeout)
+        if not transcript:
+            return SttResult(
+                text="",
+                confidence=0.0,
+                duration_ms=duration_ms,
+                summary=None,
+                co_declaration=None,
+                addressed_name=None,
+            )
+
+        analysis = await self._analyze(transcript, effective_timeout)
+        co_raw = analysis.get("co_claim")
+        co_decl = co_raw if co_raw in CO_CLAIM_VALUES else None
+        addressed = analysis.get("addressed_name")
+        addressed_name = (
+            addressed.strip() or None
+            if isinstance(addressed, str)
+            else None
+        )
+        summary_dict = {
+            k: v
+            for k, v in analysis.items()
+            if k not in ("summary", "confidence")
+            and v is not None
+            and v != {}
+        }
+        summary_str: str | None = None
+        if "summary" in analysis and isinstance(analysis["summary"], str):
+            summary_str = analysis["summary"]
+        elif summary_dict:
+            import json as _json
+
+            summary_str = _json.dumps(summary_dict, ensure_ascii=False)
+        try:
+            confidence = float(analysis.get("confidence", 0.9))
+        except (TypeError, ValueError):
+            confidence = 0.9
+
+        return SttResult(
+            text=transcript,
+            confidence=confidence,
+            duration_ms=duration_ms,
+            summary=summary_str,
+            co_declaration=co_decl,
+            addressed_name=addressed_name,
+        )
+
+    async def _whisper(self, audio: bytes, language: str, timeout: float) -> str:
+        """Step 1: POST audio to Groq's whisper transcription endpoint.
+
+        Uses ``response_format=verbose_json`` so we get a ``text`` field
+        plus per-segment confidence (we collapse to a single transcript).
+        """
+        import httpx
+
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            log_llm_call,
+        )
+
+        url = f"{self.groq_base_url}/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {self.groq_api_key}"}
+        # Whisper accepts BCP-47 like "ja"; map "ja-JP" → "ja".
+        lang_code = language.split("-")[0] if language else None
+        files: dict[str, tuple[str, bytes, str] | tuple[None, str]] = {
+            "file": ("segment.wav", audio, "audio/wav"),
+            "model": (None, self.groq_model),
+            "response_format": (None, "json"),
+        }
+        if lang_code:
+            files["language"] = (None, lang_code)
+
+        timer = CallTimer()
+        transcript = ""
+        err: str | None = None
+        tokens: dict[str, int | None] | None = None
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, headers=headers, files=files)
+                if resp.status_code != 200:
+                    err = f"groq_http_{resp.status_code}"
+                    raise SttProviderError(err)
+                resp_json = resp.json()
+                transcript = (resp_json.get("text") or "").strip()
+                # Groq returns an `x_groq.id` etc. but no usage field for
+                # whisper; leave tokens=None like the openai SDK does.
+        except SttProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            err = "groq_timeout"
+            raise SttProviderError(err) from exc
+        except httpx.ConnectError as exc:
+            err = "groq_connection_refused"
+            raise SttProviderError(err) from exc
+        except Exception as exc:
+            err = f"groq_unexpected_{type(exc).__name__}"
+            raise SttProviderError(err) from exc
+        finally:
+            await log_llm_call(
+                role="voice_stt",
+                provider="groq",
+                model=self.groq_model,
+                system_prompt=None,
+                user_prompt=f"[audio bytes={len(audio)} mime=audio/wav lang={lang_code}]",
+                response=transcript or None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                tokens=tokens,
+                extra={"audio_bytes": len(audio), "step": "transcribe"},
+            )
+        return transcript
+
+    async def _analyze(self, transcript: str, timeout: float) -> dict:  # type: ignore[type-arg]
+        """Step 2: ask the analyzer LLM to extract structured fields.
+
+        Soft-fail: any error returns ``{}`` so the discussion path still
+        sees the transcript via legacy substring CO matching. The trace
+        line still records the error so operators can spot a chronic
+        analyzer outage.
+        """
+        import json
+
+        import httpx
+
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            extract_openai_tokens,
+            log_llm_call,
+        )
+
+        url = f"{self.analyzer_base_url}/chat/completions"
+        body = {
+            "model": self.analyzer_model,
+            "messages": [
+                {"role": "system", "content": self._ANALYZER_PROMPT},
+                {"role": "user", "content": transcript},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self.analyzer_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        timer = CallTimer()
+        raw = ""
+        err: str | None = None
+        tokens: dict[str, int | None] | None = None
+        parsed: dict = {}  # type: ignore[type-arg]
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, headers=headers, json=body)
+                if resp.status_code != 200:
+                    err = f"analyzer_http_{resp.status_code}"
+                    return {}
+                resp_json = resp.json()
+                # Extract OpenAI-shaped usage if present.
+                from types import SimpleNamespace
+
+                usage_raw = resp_json.get("usage") or {}
+                usage_ns = SimpleNamespace(
+                    prompt_tokens=usage_raw.get("prompt_tokens"),
+                    completion_tokens=usage_raw.get("completion_tokens"),
+                    total_tokens=usage_raw.get("total_tokens"),
+                )
+                tokens = extract_openai_tokens(SimpleNamespace(usage=usage_ns))
+                raw = (
+                    resp_json.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    or ""
+                )
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    err = "analyzer_json_parse_failed"
+                    parsed = {}
+                return parsed
+        except httpx.TimeoutException:
+            err = "analyzer_timeout"
+            return {}
+        except httpx.ConnectError:
+            err = "analyzer_connection_refused"
+            return {}
+        except Exception as exc:
+            err = f"analyzer_unexpected_{type(exc).__name__}"
+            return {}
+        finally:
+            await log_llm_call(
+                role="voice_stt",
+                provider="xai",
+                model=self.analyzer_model,
+                system_prompt=self._ANALYZER_PROMPT,
+                user_prompt=transcript,
+                response=raw or None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                tokens=tokens,
+                extra={"step": "analyze"},
+            )
+
+
 __all__ = [
     "FakeSttService",
     "GeminiAudioAnalyzer",
     "GeminiSttService",
+    "GroqWhisperAudioAnalyzer",
     "SttProviderError",
     "SttResult",
     "SttService",

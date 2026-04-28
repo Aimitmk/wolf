@@ -26,6 +26,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from wolfbot.domain.enums import CoDeclaration as _CoDeclaration
+
 # A frozen, closed shape — extra fields cause validation errors so a
 # typo or a stale field caught here rather than silently dropped.
 _StrictConfig = ConfigDict(frozen=True, extra="forbid")
@@ -42,7 +44,9 @@ DiscussionMode = Literal["rounds", "reactive_voice"]
 # the internal `phase_baseline` sentinel (filtered out by the exporter —
 # it's a private state-rebuild marker, not a viewable utterance).
 SpeechSource = Literal["text", "voice_stt", "npc_generated"]
-CoDeclaration = Literal["seer", "medium", "knight"]
+# Re-export the canonical wire/storage form from domain/enums so the
+# viewer schema stays aligned with runtime validators in lockstep.
+CoDeclaration = _CoDeclaration
 TraceRole = Literal["gameplay", "npc_speech", "voice_stt"]
 Victory = Literal["village", "wolf"]
 

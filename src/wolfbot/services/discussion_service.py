@@ -42,7 +42,7 @@ from wolfbot.domain.discussion import (
     SpeechSource,
     make_phase_id,
 )
-from wolfbot.domain.enums import Phase
+from wolfbot.domain.enums import CO_CLAIM_VALUES, Phase
 from wolfbot.domain.models import LogEntry
 
 log = logging.getLogger(__name__)
@@ -627,7 +627,7 @@ def rebuild_public_state_from_events(
     return state
 
 
-_VALID_CO_ROLES: frozenset[str] = frozenset({"seer", "medium", "knight"})
+_VALID_CO_ROLES: frozenset[str] = frozenset(CO_CLAIM_VALUES)
 
 _CO_MARKERS: tuple[tuple[str, str], ...] = (
     ("seer", "占いCO"),

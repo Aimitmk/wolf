@@ -17,6 +17,7 @@ from wolfbot.domain.enums import (
     Phase,
     Role,
     SubmissionType,
+    format_co_claim_options,
 )
 from wolfbot.domain.models import Game, Player, Seat
 from wolfbot.llm.persona_base import Persona
@@ -938,7 +939,7 @@ def task_daytime_speech(
         "口に出すときは状況や感情として描写する"
         "(例: 「あの白判定、無理に庇ってる気がして信用できない」「昨夜守ったのは◯◯です」"
         "「あと処刑できる回数を考えると…」)。"
-        "役職 CO したい場合は `co_declaration` を `\"seer\" / \"medium\" / \"knight\"` のいずれかに設定し、"
+        f"役職 CO したい場合は `co_declaration` を `{format_co_claim_options(separator=' / ')}` のいずれかに設定し、"
         "`public_message` 側は「実は私、占い師なんだ」のように自然に名乗ってから能力結果を続ける。"
         "`co_declaration` を設定しないなら `null`。"
     )

@@ -71,7 +71,21 @@ class MasterSettings(BaseSettings):
     MASTER_WS_LISTEN: str = "127.0.0.1:8800"
     MASTER_NPC_PSK: SecretStr | None = None
 
-    # ── Voice LLM ─────────────────────────────────────────────────────
+    # ── Voice STT provider switch ─────────────────────────────────────
+    # ``gemini`` (default, legacy) — single multimodal call to Gemini
+    # Flash that does transcription + structured analysis in one hop.
+    # AI Studio's free-tier RPM is tight enough that a typical game
+    # exhausts it almost immediately (observed 2026-04-28: every
+    # segment 429'd).
+    #
+    # ``groq`` — two-step pipeline: Groq Whisper transcribes audio;
+    # the analyzer LLM (xAI Grok by default, reusing
+    # ``GAMEPLAY_LLM_*``) extracts CO claim, vote target,
+    # ``addressed_name``, summary from the transcript. Whisper-large-v3
+    # on Groq is ~$0.04-0.111/audio-hour with much higher RPM headroom.
+    VOICE_STT_PROVIDER: Literal["gemini", "groq"] = "gemini"
+
+    # ── Voice LLM (Gemini path) ───────────────────────────────────────
     # The multimodal LLM that *understands human voice* in VC — single
     # API call returns transcription + summary + CO detection + vote
     # target extraction.  This is a separate role from the Gameplay LLM
@@ -79,6 +93,19 @@ class MasterSettings(BaseSettings):
     # API; not the OpenAI-compatible chat-completions surface).
     VOICE_LLM_API_KEY: SecretStr | None = None
     VOICE_LLM_MODEL: str = "gemini-2.0-flash-lite"
+
+    # ── Groq Whisper STT (groq path) ──────────────────────────────────
+    # Required when ``VOICE_STT_PROVIDER=groq``. The analyzer step
+    # piggy-backs on ``GAMEPLAY_LLM_*`` (same xAI key + model), so no
+    # separate analyzer config is needed in the typical setup.
+    #
+    # ``GROQ_STT_MODEL`` defaults to ``whisper-large-v3-turbo`` — the
+    # cheapest multilingual Whisper variant on Groq that still handles
+    # Japanese well; switch to ``whisper-large-v3`` for max accuracy at
+    # ~3x the cost.
+    GROQ_STT_API_KEY: SecretStr | None = None
+    GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
+    GROQ_STT_BASE_URL: str = "https://api.groq.com/openai/v1"
 
     # ── Master TTS narration (reactive_voice only) ────────────────────
     # When `LLM_DISCUSSION_MODE=reactive_voice` and Master is in VC,
@@ -108,6 +135,27 @@ class MasterSettings(BaseSettings):
             raise ValueError(
                 "GAMEPLAY_LLM_PROVIDER=gemini requires "
                 "GAMEPLAY_LLM_VERTEX_PROJECT to be set"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_voice_stt_provider_key(self) -> MasterSettings:
+        if self.VOICE_STT_PROVIDER == "groq" and self.GROQ_STT_API_KEY is None:
+            raise ValueError(
+                "VOICE_STT_PROVIDER=groq requires GROQ_STT_API_KEY to be set"
+            )
+        # The Groq path's analyzer step reuses GAMEPLAY_LLM_*. The xAI/DeepSeek
+        # case is already covered above; the Gemini case isn't fit for the
+        # OpenAI-compatible analyzer call shape, so block that combo loud and
+        # early rather than failing per-segment at runtime.
+        if (
+            self.VOICE_STT_PROVIDER == "groq"
+            and self.GAMEPLAY_LLM_PROVIDER == "gemini"
+        ):
+            raise ValueError(
+                "VOICE_STT_PROVIDER=groq's analyzer step reuses GAMEPLAY_LLM_* "
+                "but requires an OpenAI-compatible provider (xai or deepseek), "
+                f"not {self.GAMEPLAY_LLM_PROVIDER}"
             )
         return self
 

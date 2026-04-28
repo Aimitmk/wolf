@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
+from wolfbot.domain.enums import CO_CLAIM_VALUES, CoDeclaration
 from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest, SpeakResult
 
 log = logging.getLogger(__name__)
@@ -111,8 +112,8 @@ class NpcSpeechService:
         text = speech.text.strip()
         if len(text) > request.max_chars:
             text = text[: request.max_chars]
-        co_declaration: Literal["seer", "medium", "knight"] | None = None
-        if speech.co_declaration in ("seer", "medium", "knight"):
+        co_declaration: CoDeclaration | None = None
+        if speech.co_declaration in CO_CLAIM_VALUES:
             co_declaration = speech.co_declaration  # type: ignore[assignment]
         return SpeakResult(
             ts=now_ms,

@@ -38,6 +38,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
+from wolfbot.domain.enums import CO_CLAIM_VALUES
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
 from wolfbot.llm.persona_base import Persona
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
@@ -64,7 +65,7 @@ _RESPONSE_SCHEMA: dict[str, object] = {
             },
             "co_declaration": {
                 "type": ["string", "null"],
-                "enum": ["seer", "medium", "knight", None],
+                "enum": [*CO_CLAIM_VALUES, None],
             },
         },
     },
@@ -350,7 +351,7 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         tuple(str(x) for x in raw_ids) if isinstance(raw_ids, list) else ()
     )
     co_raw = data.get("co_declaration")
-    co_declaration = co_raw if co_raw in ("seer", "medium", "knight") else None
+    co_declaration = co_raw if co_raw in CO_CLAIM_VALUES else None
     # Rough estimate: ~150ms per character for TTS
     estimated_ms = max(500, len(text) * 150)
 

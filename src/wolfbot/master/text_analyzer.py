@@ -32,6 +32,8 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from wolfbot.domain.enums import CO_CLAIM_VALUES, format_co_claim_options
+
 log = logging.getLogger(__name__)
 
 
@@ -109,7 +111,7 @@ class GeminiTextAnalyzer:
         "}\n"
         "```\n\n"
         "フィールド説明:\n"
-        "- co_claim: 役職CO(自称)があれば \"seer\"/\"medium\"/\"knight\"、なければ null\n"
+        f"- co_claim: 役職CO(自称)があれば {format_co_claim_options()}、なければ null\n"
         "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
         "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。"
         "発言内で他プレイヤーに言及するだけ(例: 『セツの判定が気になる』)は呼びかけではないので null。"
@@ -176,9 +178,7 @@ class GeminiTextAnalyzer:
             ) from exc
 
         co_raw = parsed.get("co_claim")
-        co_declaration = (
-            co_raw if co_raw in ("seer", "medium", "knight") else None
-        )
+        co_declaration = co_raw if co_raw in CO_CLAIM_VALUES else None
         addressed_raw = parsed.get("addressed_name")
         addressed_name: str | None = None
         if isinstance(addressed_raw, str):

@@ -28,9 +28,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from wolfbot.domain.discussion import CoClaim
+from wolfbot.domain.enums import CO_CLAIM_VALUES
 from wolfbot.domain.models import Player, Seat, Vote
 
-_INFO_ROLES: tuple[str, ...] = ("seer", "medium", "knight")
+_INFO_ROLES: tuple[str, ...] = CO_CLAIM_VALUES
 _ROLE_JA: Mapping[str, str] = {"seer": "占い師", "medium": "霊媒師", "knight": "騎士"}
 
 
