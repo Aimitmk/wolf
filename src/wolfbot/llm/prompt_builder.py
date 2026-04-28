@@ -659,7 +659,7 @@ _ROLE_STRATEGIES: dict[Role, str] = {
 }
 
 
-def _build_strategy_block(role: Role) -> str:
+def build_strategy_block(role: Role) -> str:
     """Return role-specific tips for the given role only.
 
     Caller must pass a non-None Role; `build_system_prompt` is invoked after
@@ -668,6 +668,12 @@ def _build_strategy_block(role: Role) -> str:
     between LLM seats.
     """
     return _ROLE_STRATEGIES[role]
+
+
+# Underscore alias retained for the historical "private" import path used
+# inside this module; new external callers (Master arbiter → SpeakRequest)
+# use the public `build_strategy_block` name.
+_build_strategy_block = build_strategy_block
 
 
 def _band(value: float, *, low: str, mid_low: str, mid: str, mid_high: str, high: str) -> str:
@@ -688,7 +694,7 @@ def _band(value: float, *, low: str, mid_low: str, mid: str, mid_high: str, high
     return high
 
 
-def _build_judgment_profile_block(persona: Persona) -> str:
+def build_judgment_profile_block(persona: Persona) -> str:
     """Render `JudgmentProfile` axes as labeled tendency bands.
 
     Each axis is mapped to a qualitative band so the LLM has a concrete
@@ -750,8 +756,12 @@ def _build_judgment_profile_block(persona: Persona) -> str:
     )
 
 
-def _build_speech_profile_block(persona: Persona) -> str:
+def build_speech_profile_block(persona: Persona) -> str:
     """Render the persona's structured speech profile as a bullet block.
+
+    Public function (renamed from the historical underscored name) so the
+    Master arbiter can render the same block for the reactive_voice NPC
+    prompt as rounds-mode uses.
 
     Dispatches on `narration_mode`: silent-gesture personas (kukrushka) get a
     structurally different block — no `一人称` line, gesture examples instead —
@@ -785,6 +795,13 @@ def _build_speech_profile_block(persona: Persona) -> str:
     )
 
 
+# Underscore aliases for callers (and tests) that imported the historical
+# private names. The reactive_voice NPC system-prompt builder calls the
+# public names directly.
+_build_speech_profile_block = build_speech_profile_block
+_build_judgment_profile_block = build_judgment_profile_block
+
+
 def build_system_prompt(
     persona: Persona,
     role: Role,
@@ -805,10 +822,10 @@ def build_system_prompt(
     return (
         template.replace("{game_rules_block}", _build_game_rules_block())
         .replace("{persona_block}", persona_block)
-        .replace("{judgment_profile_block}", _build_judgment_profile_block(persona))
-        .replace("{speech_profile_block}", _build_speech_profile_block(persona))
+        .replace("{judgment_profile_block}", build_judgment_profile_block(persona))
+        .replace("{speech_profile_block}", build_speech_profile_block(persona))
         .replace("{role_block}", role_block)
-        .replace("{strategy_block}", _build_strategy_block(role))
+        .replace("{strategy_block}", build_strategy_block(role))
         .replace("{phase_block}", phase_block)
         .replace("{task_block}", task_text)
     )

@@ -188,6 +188,94 @@ async def test_human_speaking_blocks_dispatch(repo: SqliteRepo) -> None:
     assert req is not None and reason is None
 
 
+async def test_dispatch_attaches_context_to_logic_packet_and_speak_request(
+    repo: SqliteRepo,
+) -> None:
+    """SpeakArbiter loads recent speeches, alive/dead lists, and the seat's
+    role+strategy and forwards them on the WS payload so the NPC's prompt
+    builder has the same context that rounds-mode build_user_context does.
+    """
+    from wolfbot.domain.discussion import (
+        SpeakerKind,
+        SpeechEvent,
+        make_phase_id,
+    )
+    from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest
+    from wolfbot.services.discussion_service import (
+        new_event_id,
+    )
+    from wolfbot.services.discussion_service import (
+        now_ms as discussion_now_ms,
+    )
+
+    game, _seats = await _seed_game(repo)
+    registry = InMemoryNpcRegistry()
+    npc_buf: list[str] = []
+    registry.register(
+        npc_id="npc_p2",
+        discord_bot_user_id="bot2",
+        supported_voices=(),
+        version="1",
+        send=_captured_send(npc_buf),
+        now_ms=1000,
+        persona_key="setsu",
+    )
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+
+    phase_id = make_phase_id(game.id, 1, Phase.DAY_DISCUSSION)
+    await discussion.record(
+        make_phase_baseline(
+            game_id=game.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2],
+        )
+    )
+    await discussion.record(
+        SpeechEvent(
+            event_id=new_event_id(),
+            game_id=game.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            source=SpeechSource.TEXT,
+            speaker_kind=SpeakerKind.HUMAN,
+            speaker_seat=1,
+            text="占いの結果が気になる",
+            created_at_ms=discussion_now_ms(),
+        )
+    )
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion, now_ms=lambda: 1500
+    )
+    state = _seed_state(game.id)
+    request, reason = await arb.dispatch_request(
+        state=state, candidate_npc_id="npc_p2", seat_no=2, game_id=game.id
+    )
+    assert reason is None and request is not None
+
+    packet = LogicPacket.model_validate_json(npc_buf[0])
+    speak = SpeakRequest.model_validate_json(npc_buf[1])
+
+    # Recent speech surfaces with the speaker's display name attached.
+    assert len(packet.recent_speeches) == 1
+    assert packet.recent_speeches[0].seat_no == 1
+    assert packet.recent_speeches[0].display_name == "Alice"
+    assert packet.recent_speeches[0].source == "text"
+    assert "占いの結果が気になる" in packet.recent_speeches[0].text
+
+    # Role + role_strategy of seat 2 (SEER per _seed_game) is forwarded.
+    assert speak.role == "SEER"
+    assert speak.role_strategy is not None and len(speak.role_strategy) > 0
+
+    # Both seats alive at this point — alive_seats has both, dead_seats empty.
+    assert speak.alive_seats == ((1, "Alice"), (2, "セツ"))
+    assert speak.dead_seats == ()
+
+
 async def test_speak_result_accepted_emits_authorized_and_writes_speech_event(
     repo: SqliteRepo,
 ) -> None:

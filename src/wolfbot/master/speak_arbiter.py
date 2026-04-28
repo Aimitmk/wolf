@@ -28,6 +28,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal, cast
 
 from wolfbot.domain.discussion import (
     PublicDiscussionState,
@@ -35,16 +36,18 @@ from wolfbot.domain.discussion import (
     SpeechSource,
     make_phase_id,
 )
-from wolfbot.domain.enums import Phase
+from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.ws_messages import (
     PlaybackAuthorized,
     PlaybackFailed,
     PlaybackFinished,
+    RecentSpeech,
     SpeakRequest,
     SpeakResult,
     TtsFailed,
     TtsFinished,
 )
+from wolfbot.llm.prompt_builder import build_strategy_block
 from wolfbot.master.logic_service import build_logic_packet
 from wolfbot.master.npc_registry import NpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
@@ -57,6 +60,12 @@ from wolfbot.services.discussion_service import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# Last N speeches included in the LogicPacket. Mirrors the rounds-mode
+# prompt builder which surfaces the trailing 40 PLAYER_SPEECH log lines;
+# 20 is plenty for an 80-char reactive reply and keeps WS frames small.
+_RECENT_SPEECH_CAP = 20
 
 
 @dataclass
@@ -208,6 +217,15 @@ class SpeakArbiter:
             )
             return (None, "npc_offline")
 
+        # Resolve seat data: recent_speeches (with display names attached),
+        # alive/dead seat lists, and the candidate's role+strategy. All
+        # best-effort — if a load fails we fall back to empty/null and
+        # still dispatch (the prompt degrades gracefully to the historical
+        # minimal shape).
+        recent_speeches, alive_seats, dead_seats, role_name, role_strategy = (
+            await self._collect_request_context(state, seat_no)
+        )
+
         # Build LogicPacket (sent first so the NPC has context for the
         # subsequent speak_request).
         packet = build_logic_packet(
@@ -215,6 +233,7 @@ class SpeakArbiter:
             recipient_npc_id=candidate_npc_id,
             expires_at_ms=now + self.config.request_ttl_ms,
             now_ms=now,
+            recent_speeches=recent_speeches,
         )
         try:
             await entry.send(packet.model_dump_json())
@@ -235,6 +254,10 @@ class SpeakArbiter:
             max_duration_ms=self.config.playback_deadline_ms,
             priority=0,
             expires_at_ms=now + self.config.request_ttl_ms,
+            role=role_name,
+            role_strategy=role_strategy,
+            alive_seats=alive_seats,
+            dead_seats=dead_seats,
         )
 
         await self.repo.insert_npc_speak_request(
@@ -279,6 +302,100 @@ class SpeakArbiter:
             expires_at_ms=request.expires_at_ms,
         )
         return (request, None)
+
+    # --------------------------------------------------- request context loader
+
+    async def _collect_request_context(
+        self,
+        state: PublicDiscussionState,
+        seat_no: int,
+    ) -> tuple[
+        tuple[RecentSpeech, ...],
+        tuple[tuple[int, str], ...],
+        tuple[tuple[int, str], ...],
+        str | None,
+        str | None,
+    ]:
+        """Load the data the NPC prompt needs but the arbiter doesn't already have.
+
+        Returns ``(recent_speeches, alive_seats, dead_seats, role_name,
+        role_strategy)``. Each piece is independently best-effort: a failed
+        DB read for one slot logs and falls back to an empty value while
+        the others still populate. The intent is that a transient repo
+        glitch must NOT block dispatching — the NPC then sees the older
+        minimal prompt shape rather than no prompt at all.
+        """
+        recent: tuple[RecentSpeech, ...] = ()
+        try:
+            events = await self.discussion.load_phase(state.game_id, state.phase_id)
+            seats = await self.repo.load_seats(state.game_id)
+            seat_name_by_no = {s.seat_no: s.display_name for s in seats}
+            recent_list: list[RecentSpeech] = []
+            for ev in events:
+                if ev.source == SpeechSource.PHASE_BASELINE:
+                    continue
+                if ev.speaker_seat is None or not ev.text:
+                    continue
+                name = seat_name_by_no.get(ev.speaker_seat, f"席{ev.speaker_seat}")
+                # Trim very long speeches; the NPC only needs the gist.
+                snippet = ev.text.strip().replace("\n", " ")
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "…"
+                # `SpeechSource.value` is one of the four runtime values, but
+                # ``phase_baseline`` is filtered above so the literal narrows
+                # to the three viewer-facing values that `RecentSpeech.source`
+                # accepts.
+                source_value = cast(
+                    Literal["text", "voice_stt", "npc_generated"],
+                    ev.source.value,
+                )
+                recent_list.append(
+                    RecentSpeech(
+                        seat_no=ev.speaker_seat,
+                        display_name=name,
+                        source=source_value,
+                        text=snippet,
+                    )
+                )
+            # Cap to last N so the prompt stays compact even on long phases.
+            recent = tuple(recent_list[-_RECENT_SPEECH_CAP:])
+        except Exception:
+            log.exception("recent_speeches_load_failed phase_id=%s", state.phase_id)
+
+        alive_seats: tuple[tuple[int, str], ...] = ()
+        dead_seats: tuple[tuple[int, str], ...] = ()
+        role_name: str | None = None
+        try:
+            seats = await self.repo.load_seats(state.game_id)
+            players = await self.repo.load_players(state.game_id)
+            seat_name_by_no = {s.seat_no: s.display_name for s in seats}
+            alive_list: list[tuple[int, str]] = []
+            dead_list: list[tuple[int, str]] = []
+            for p in players:
+                name = seat_name_by_no.get(p.seat_no, f"席{p.seat_no}")
+                if p.alive:
+                    alive_list.append((p.seat_no, name))
+                else:
+                    dead_list.append((p.seat_no, name))
+                if p.seat_no == seat_no and p.role is not None:
+                    role_name = p.role.value
+            alive_seats = tuple(sorted(alive_list))
+            dead_seats = tuple(sorted(dead_list))
+        except Exception:
+            log.exception(
+                "seat_role_load_failed game_id=%s seat=%s",
+                state.game_id, seat_no,
+            )
+
+        role_strategy: str | None = None
+        if role_name is not None:
+            try:
+                role_strategy = build_strategy_block(Role(role_name))
+            except Exception:
+                log.exception("role_strategy_build_failed role=%s", role_name)
+                role_strategy = None
+
+        return recent, alive_seats, dead_seats, role_name, role_strategy
 
     # ------------------------------------------------------------- handle result
 

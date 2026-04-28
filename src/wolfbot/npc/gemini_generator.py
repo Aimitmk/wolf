@@ -94,7 +94,12 @@ class GeminiNpcGenerator:
                 "each NPC bot must declare its persona at startup."
             )
         persona = NPC_PERSONAS_BY_KEY[self._persona_key]
-        system = _build_system(persona, max_chars=request.max_chars)
+        system = _build_system(
+            persona,
+            max_chars=request.max_chars,
+            role=request.role,
+            role_strategy=request.role_strategy,
+        )
         user = _build_user(logic, request)
 
         client = genai.Client(

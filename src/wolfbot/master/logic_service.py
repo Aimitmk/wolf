@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Iterable
 
 from wolfbot.domain.discussion import PublicDiscussionState
-from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket
+from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, RecentSpeech
 
 
 def _new_packet_id() -> str:
@@ -39,6 +39,7 @@ def build_logic_packet(
     now_ms: int,
     pressure: dict[int, float] | None = None,
     additional_candidates: Iterable[LogicCandidate] = (),
+    recent_speeches: Iterable[RecentSpeech] = (),
 ) -> LogicPacket:
     """Construct a `LogicPacket` for `recipient_npc_id`.
 
@@ -91,6 +92,7 @@ def build_logic_packet(
         logic_candidates=tuple(candidates),
         pressure=pressure or {},
         expires_at_ms=expires_at_ms,
+        recent_speeches=tuple(recent_speeches),
     )
 
 

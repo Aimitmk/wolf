@@ -111,6 +111,23 @@ class LogicCandidate(BaseModel):
     counter: tuple[str, ...] = ()
 
 
+class RecentSpeech(BaseModel):
+    """Compact rendering of a past public utterance for NPC context.
+
+    Built from `SpeechEvent` rows by the SpeakArbiter and sent to the NPC
+    bot as part of `LogicPacket.recent_speeches` so the NPC's prompt can
+    surface recent dialogue (the parity gap with rounds-mode prompts that
+    fed `PLAYER_SPEECH` log lines into `build_user_context`).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    seat_no: int
+    display_name: str
+    source: Literal["text", "voice_stt", "npc_generated"]
+    text: str
+
+
 class LogicPacket(BaseEnvelope):
     type: Literal["logic_packet"] = "logic_packet"
     packet_id: str
@@ -120,6 +137,14 @@ class LogicPacket(BaseEnvelope):
     logic_candidates: tuple[LogicCandidate, ...] = ()
     pressure: dict[int, float] = Field(default_factory=dict)
     expires_at_ms: int
+    recent_speeches: tuple[RecentSpeech, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Recent public utterances in the current phase, oldest-first. "
+            "Defaults to empty so older Master builds talking to newer NPC "
+            "bots stay schema-compatible."
+        ),
+    )
 
 
 class SpeakRequest(BaseEnvelope):
@@ -134,6 +159,37 @@ class SpeakRequest(BaseEnvelope):
     max_duration_ms: int = 8000
     priority: int = 0
     expires_at_ms: int
+    role: str | None = Field(
+        default=None,
+        description=(
+            "Role of the seat this NPC is bound to (VILLAGER / WEREWOLF / ...). "
+            "Sent so the NPC's system prompt can surface role-specific "
+            "strategy text. Optional for back-compat with older Master builds."
+        ),
+    )
+    role_strategy: str | None = Field(
+        default=None,
+        description=(
+            "Pre-rendered role-specific strategy markdown produced by Master's "
+            "rounds-mode `build_strategy_block(role)`. Sent verbatim so the "
+            "NPC bot doesn't need to import gameplay-LLM strategy data."
+        ),
+    )
+    alive_seats: tuple[tuple[int, str], ...] = Field(
+        default_factory=tuple,
+        description=(
+            "(seat_no, display_name) pairs for every still-alive seat. Lets "
+            "the NPC's prompt list 'who is alive' without an extra round-trip. "
+            "Empty for back-compat with older Master builds."
+        ),
+    )
+    dead_seats: tuple[tuple[int, str], ...] = Field(
+        default_factory=tuple,
+        description=(
+            "(seat_no, display_name) pairs for dead seats. Same back-compat "
+            "story as `alive_seats`."
+        ),
+    )
 
 
 class SpeakResult(BaseEnvelope):

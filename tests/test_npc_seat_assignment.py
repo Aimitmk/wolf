@@ -249,6 +249,98 @@ def test_format_candidate_with_all_fields() -> None:
     assert "反論X" in out
 
 
+def test_build_system_prompt_includes_full_persona_and_optional_role() -> None:
+    """The reactive_voice NPC system prompt mirrors rounds-mode by rendering
+    the full speech_profile + judgment_profile for the persona, and surfaces
+    the role + role_strategy when Master sends them on the SpeakRequest.
+    """
+    persona = PERSONAS_BY_KEY["setsu"]
+
+    # Without role/role_strategy: still has full persona blocks.
+    sys_no_role = _build_system(persona, max_chars=80)
+    sp = persona.speech_profile
+    assert sp.address_style in sys_no_role
+    assert "判断のクセ" in sys_no_role
+    # Bands rendered from judgment_profile axes:
+    assert "攻撃性" in sys_no_role and "流れへの追従度" in sys_no_role
+    assert "あなたの役職" not in sys_no_role
+    assert "戦術ヒント" not in sys_no_role
+
+    # With role + strategy.
+    sys_with_role = _build_system(
+        persona,
+        max_chars=80,
+        role="SEER",
+        role_strategy="占い師の戦術メモ\n- 結果は出す",
+    )
+    assert "SEER" in sys_with_role
+    assert "占い師の戦術メモ" in sys_with_role
+
+
+def test_build_system_prompt_silent_gesture_persona() -> None:
+    """Kukrushka's `narration_mode=silent_gesture` must round-trip through
+    the NPC system prompt — previously dropped because the historical
+    `_build_system` only handled the standard speech profile fields.
+    """
+    persona = PERSONAS_BY_KEY["kukrushka"]
+    sys_msg = _build_system(persona, max_chars=80)
+    # The silent_gesture branch in build_speech_profile_block emits this
+    # exact label; if it's missing the NPC will speak normally.
+    assert "ほぼ無言" in sys_msg or "叙述モード" in sys_msg
+
+
+def test_build_user_prompt_renders_recent_speeches_and_seats() -> None:
+    """Recent speeches + alive/dead seats from the SpeakRequest land in
+    the user prompt with the speaker's display name attached."""
+    from wolfbot.domain.ws_messages import RecentSpeech
+
+    logic = LogicPacket(
+        ts=1,
+        trace_id="t",
+        packet_id="lp",
+        phase_id="ph",
+        recipient_npc_id="npc_1",
+        public_state_summary="alive=[1,2,3]",
+        recent_speeches=(
+            RecentSpeech(
+                seat_no=1,
+                display_name="Alice",
+                source="text",
+                text="占いの結果が気になる",
+            ),
+            RecentSpeech(
+                seat_no=3,
+                display_name="🌙セツ",
+                source="npc_generated",
+                text="まだ静かですね",
+            ),
+        ),
+        expires_at_ms=9999,
+    )
+    request = SpeakRequest(
+        ts=1,
+        trace_id="t",
+        request_id="sr",
+        npc_id="npc_1",
+        phase_id="ph",
+        seat_no=2,
+        logic_packet_id="lp",
+        suggested_intent="speak",
+        max_chars=80,
+        expires_at_ms=5000,
+        alive_seats=((1, "Alice"), (2, "Bob"), (3, "🌙セツ")),
+        dead_seats=((4, "故人"),),
+    )
+    user_msg = _build_user(logic, request)
+    assert "## 直近の発言" in user_msg
+    assert "席1 Alice" in user_msg and "占いの結果が気になる" in user_msg
+    assert "席3 🌙セツ" in user_msg and "まだ静かですね" in user_msg
+    assert "[テキスト]" in user_msg and "[NPC発話]" in user_msg
+    assert "## 生存者" in user_msg
+    assert "席1 Alice、席2 Bob、席3 🌙セツ" in user_msg
+    assert "## 死亡者" in user_msg and "席4 故人" in user_msg
+
+
 def test_build_user_prompt_no_candidates_no_pressure() -> None:
     logic = LogicPacket(
         ts=1,

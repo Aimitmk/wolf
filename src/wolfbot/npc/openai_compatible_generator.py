@@ -41,6 +41,10 @@ from typing import Literal
 from wolfbot.domain.enums import CO_CLAIM_VALUES
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
 from wolfbot.llm.persona_base import Persona
+from wolfbot.llm.prompt_builder import (
+    build_judgment_profile_block,
+    build_speech_profile_block,
+)
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 from wolfbot.npc.speech_service import NpcGeneratedSpeech
 
@@ -72,20 +76,40 @@ _RESPONSE_SCHEMA: dict[str, object] = {
 }
 
 
-def _build_system(persona: Persona, max_chars: int) -> str:
-    sp = persona.speech_profile
-    speech_block = (
-        f"一人称: {sp.first_person}\n"
-        f"語尾/文体: {sp.sentence_style}\n"
-        f"間の取り方: {sp.pause_style}\n"
-    )
-    if sp.signature_phrases:
-        speech_block += f"特徴語(低頻度): {'、'.join(sp.signature_phrases)}\n"
+def _build_system(
+    persona: Persona,
+    max_chars: int,
+    *,
+    role: str | None = None,
+    role_strategy: str | None = None,
+) -> str:
+    """Build the NPC's system prompt.
+
+    Mirrors rounds-mode `build_system_prompt` for the persona-shaping blocks
+    (`build_speech_profile_block`, `build_judgment_profile_block`) so the
+    reactive_voice NPC carries the same character data — `narration_mode`,
+    `address_style`, `forbidden_overuse`, the 5 judgment axes, etc. —
+    instead of the small subset the historical NPC prompt sent.
+
+    `role` + `role_strategy` are optional: when Master sends them on the
+    SpeakRequest, the NPC sees its role and the role-specific strategy
+    block. Older Master builds that don't send them produce a prompt that
+    silently omits the role section (back-compat).
+    """
+    role_block = ""
+    if role:
+        role_block = f"## あなたの役職\nあなたの役職は『{role}』です。役職に見える情報だけを根拠にしてください。\n\n"
+    strategy_block = ""
+    if role_strategy:
+        strategy_block = f"## 役職別の戦術ヒント\n{role_strategy}\n\n"
     return (
         "あなたは人狼ゲームに参加中のプレイヤーです。\n"
         f"キャラクター名: {persona.display_name}\n"
-        f"性格: {persona.style_guide}\n"
-        f"## 話法\n{speech_block}\n"
+        f"性格: {persona.style_guide}\n\n"
+        f"## 話法\n{build_speech_profile_block(persona)}\n\n"
+        f"## 判断のクセ\n{build_judgment_profile_block(persona)}\n\n"
+        f"{role_block}"
+        f"{strategy_block}"
         "## ルール\n"
         "- 日本語のみ。メタ発言禁止。AIであることに言及しない。\n"
         f"- `text` は {max_chars} 文字以内の短い発言。\n"
@@ -110,11 +134,29 @@ def _build_system(persona: Persona, max_chars: int) -> str:
 def _build_user(logic: LogicPacket, request: SpeakRequest) -> str:
     lines = [
         f"フェイズ: {request.phase_id}",
+        f"あなたの席: 席{request.seat_no}",
         f"提案意図: {request.suggested_intent}",
         "",
         "## 場の状況",
         logic.public_state_summary or "(情報なし)",
     ]
+    if request.alive_seats:
+        alive_str = "、".join(
+            f"席{seat_no} {name}" for seat_no, name in request.alive_seats
+        )
+        lines.append("")
+        lines.append(f"## 生存者\n{alive_str}")
+    if request.dead_seats:
+        dead_str = "、".join(
+            f"席{seat_no} {name}" for seat_no, name in request.dead_seats
+        )
+        lines.append(f"## 死亡者\n{dead_str}")
+    if logic.recent_speeches:
+        lines.append("")
+        lines.append("## 直近の発言 (古い順)")
+        for sp in logic.recent_speeches:
+            tag = _SOURCE_TAG.get(sp.source, sp.source)
+            lines.append(f"- 席{sp.seat_no} {sp.display_name} [{tag}]: {sp.text}")
     if logic.logic_candidates:
         lines.append("")
         lines.append("## 論点候補")
@@ -128,6 +170,16 @@ def _build_user(logic: LogicPacket, request: SpeakRequest) -> str:
     lines.append("")
     lines.append("上記を踏まえ、キャラクターとして自然な短い発言を生成してください。")
     return "\n".join(lines)
+
+
+# Friendly Japanese tags for the recent-speech source bracket. The NPC sees
+# "[テキスト]" for typed messages, "[音声]" for STT output, "[NPC発話]" for
+# other NPC bots — matches how human players naturally distinguish them.
+_SOURCE_TAG: dict[str, str] = {
+    "text": "テキスト",
+    "voice_stt": "音声",
+    "npc_generated": "NPC発話",
+}
 
 
 def _format_candidate(c: LogicCandidate) -> str:
@@ -240,7 +292,12 @@ class OpenAICompatibleNpcGenerator:
                 "each NPC bot must declare its persona at startup."
             )
         persona = NPC_PERSONAS_BY_KEY[self._persona_key]
-        system = _build_system(persona, max_chars=request.max_chars)
+        system = _build_system(
+            persona,
+            max_chars=request.max_chars,
+            role=request.role,
+            role_strategy=request.role_strategy,
+        )
         if self.config.mode == "json_object":
             system += _DEEPSEEK_JSON_CONTRACT_SUFFIX
         user = _build_user(logic, request)
