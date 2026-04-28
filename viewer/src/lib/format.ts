@@ -46,6 +46,9 @@ const NIGHT_ACTION_JA: Record<string, string> = {
   ATTACK: "襲撃",
   DIVINE: "占い",
   GUARD: "護衛",
+  SEER_DIVINE: "占い",
+  WOLF_ATTACK: "襲撃",
+  KNIGHT_GUARD: "護衛",
   DIVINE_NIGHT0_RANDOM_WHITE: "初日ランダム白",
 };
 
@@ -77,6 +80,20 @@ export function formatJstTime(ms: number): string {
   }).format(d);
 }
 
+/** ``YYYY-MM-DD HH:mm`` in JST. Used by the games-list table. */
+export function formatJstDate(ms: number): string {
+  const d = new Date(ms);
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+}
+
 export function formatTokens(n: number | null | undefined): string {
   if (n == null) return "—";
   return n.toLocaleString("en-US");
@@ -85,6 +102,19 @@ export function formatTokens(n: number | null | undefined): string {
 export function formatLatency(ms: number): string {
   if (ms < 1000) return `${ms} ms`;
   return `${(ms / 1000).toFixed(2)} s`;
+}
+
+/** Compact human duration (e.g. "12:34" or "1h 02m" for longer games). */
+export function formatDuration(ms: number | null): string {
+  if (ms == null) return "進行中";
+  const totalSeconds = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  if (h > 0) {
+    return `${h}h ${m.toString().padStart(2, "0")}m`;
+  }
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 const SOURCE_JA: Record<string, string> = {
