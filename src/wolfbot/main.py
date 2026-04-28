@@ -103,9 +103,23 @@ async def _run() -> None:
     # voice-ingest seat/phase caches (populated when integrated ingest is active)
     _vc_seat_map: dict[str, int] = {}
     _vc_phase_cache: list[tuple[str, str] | None] = [None]
+    # Alive seats as ``(seat_no, display_name)`` so the analyzer LLM
+    # can resolve mistranscribed names to a canonical participant.
+    _vc_roster: list[tuple[int, str]] = []
 
     async def _refresh_voice_ingest_cache(game_id: str) -> None:
-        """Update seat map and phase cache for the integrated voice-ingest."""
+        """Update seat map and phase cache for the integrated voice-ingest.
+
+        ``_vc_roster`` holds the alive seats in ``(seat_no, display_name)``
+        form for the analyzer LLM's name-resolution prompt. The
+        ``display_name`` here is the **live VC nickname** as Discord
+        renders it for that participant - i.e. what the human speaker
+        actually sees on their VC overlay - not the stored
+        ``Seat.display_name`` (which for NPC seats is the persona's
+        canonical handle and may differ from the Discord bot's
+        guild-side nickname). Falls back to the stored value when the
+        member is uncached or the bot user_id isn't known yet.
+        """
         game = await repo.load_game(game_id)
         if game is None or game.ended_at is not None:
             _vc_phase_cache[0] = None
@@ -115,10 +129,41 @@ async def _run() -> None:
         _vc_phase_cache[0] = (game.id, phase_id)
         seats = await repo.load_seats(game_id)
         players = await repo.load_players(game_id)
+        alive_seats = {p.seat_no for p in players if p.alive}
         _vc_seat_map.clear()
         for s in seats:
-            if s.discord_user_id and any(p.seat_no == s.seat_no and p.alive for p in players):
+            if s.discord_user_id and s.seat_no in alive_seats:
                 _vc_seat_map[s.discord_user_id] = s.seat_no
+
+        # Resolve each seat's live VC display name. NPC seats have
+        # ``discord_user_id=NULL`` in the seats table, so cross-
+        # reference NpcRegistry to pick up the bot's actual user id
+        # (each NPC bot logs in as its own Discord user).
+        try:
+            guild = bot.get_guild(int(game.guild_id)) if game.guild_id else None
+        except (TypeError, ValueError):
+            guild = None
+        npc_user_by_seat: dict[int, str] = {}
+        if _npc_registry_ref:
+            registry = _npc_registry_ref[0]
+            for entry in registry.assigned_to_game(game.id):
+                if entry.assigned_seat is not None:
+                    npc_user_by_seat[entry.assigned_seat] = entry.discord_bot_user_id
+
+        _vc_roster.clear()
+        for s in sorted(seats, key=lambda x: x.seat_no):
+            if s.seat_no not in alive_seats:
+                continue
+            user_id_str = s.discord_user_id or npc_user_by_seat.get(s.seat_no)
+            live_name: str | None = None
+            if guild is not None and user_id_str:
+                try:
+                    member = guild.get_member(int(user_id_str))
+                except (TypeError, ValueError):
+                    member = None
+                if member is not None:
+                    live_name = member.display_name
+            _vc_roster.append((s.seat_no, live_name or s.display_name))
 
     # ---- Master VC join lifecycle ---------------------------------------
     # Single VC connection; one Master = one guild = at most one active
@@ -1103,6 +1148,15 @@ async def _run() -> None:
             def _phase_lookup() -> tuple[str, str] | None:
                 return _vc_phase_cache[0]
 
+            def _roster_lookup() -> list[tuple[int, str]]:
+                """Snapshot of alive seats for grounding the STT analyzer.
+
+                Read out of the ``_vc_roster`` cache populated by
+                ``_refresh_voice_ingest_cache`` so we don't hit the DB
+                on every speech segment.
+                """
+                return list(_vc_roster)
+
             voice_ingest = VoiceIngestService(
                 registry_view=_RegistryViewAdapter(),
                 master_client=direct_client,
@@ -1113,6 +1167,7 @@ async def _run() -> None:
                     pre_stt_min_rms=settings.VOICE_PRE_STT_MIN_RMS,
                     pre_stt_min_duration_ms=settings.VOICE_PRE_STT_MIN_DURATION_MS,
                 ),
+                roster_lookup=_roster_lookup,
             )
             if settings.VOICE_STT_PROVIDER == "groq":
                 log.info(

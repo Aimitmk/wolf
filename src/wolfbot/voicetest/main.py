@@ -27,6 +27,7 @@ import contextlib
 import logging
 import os
 import signal
+from collections.abc import Callable, Sequence
 
 import discord
 from discord.ext import voice_recv
@@ -42,7 +43,7 @@ from wolfbot.domain.ws_messages import (
     VadSpeechStarted,
 )
 from wolfbot.master.audio_sink import WolfbotAudioSink
-from wolfbot.master.stt_service import SttResult
+from wolfbot.master.stt_service import RosterEntry, SttResult
 from wolfbot.master.voice_ingest_service import (
     VoiceIngestConfig,
     VoiceIngestService,
@@ -168,7 +169,9 @@ class _NoOpSttService:
         audio: bytes,
         language: str,
         timeout_s: float,
+        roster: Sequence[RosterEntry] | None = None,
     ) -> SttResult:
+        del roster  # Voicetest no-op STT has no analyzer to ground.
         bytes_per_sec = 48_000 * 2 * 2  # matches VoiceIngestConfig defaults
         duration_ms = int(len(audio) / bytes_per_sec * 1000) if bytes_per_sec else 0
         return SttResult(
@@ -184,6 +187,39 @@ def _seat_lookup(_uid: str) -> int | None:
 
 def _phase_lookup() -> tuple[str, str] | None:
     return (_FAKE_GAME_ID, _FAKE_PHASE_ID)
+
+
+def _make_live_vc_roster_lookup(
+    bot: discord.Client, voice_channel_id: int
+) -> Callable[[], list[tuple[int, str]]]:
+    """Build a roster lookup that pulls live VC display names.
+
+    The voicetest bot is in the same voice channel as the human
+    speaker plus any NPC bots, so the channel's member list is the
+    ground truth for "what names does the speaker actually see /
+    hear in this room". Mirrors the production resolver in
+    ``main.py`` which falls back to ``Seat.display_name`` only when
+    the live member is uncached - operators reported NPC bots
+    sometimes appear in VC under a different nickname than the
+    persona's stored ``display_name`` (e.g. operator renamed the
+    bot in server settings), and the analyzer needs to ground on
+    the *spoken* name, not the internal canonical handle.
+    """
+
+    def lookup() -> list[tuple[int, str]]:
+        ch = bot.get_channel(voice_channel_id)
+        if not isinstance(ch, discord.VoiceChannel):
+            return []
+        # ``ch.members`` is the cached list of guild members
+        # currently connected to this voice channel. Sort by id so
+        # the seat numbering stays stable across calls.
+        members = sorted(ch.members, key=lambda m: m.id)
+        roster: list[tuple[int, str]] = []
+        for i, member in enumerate(members, start=1):
+            roster.append((i, member.display_name))
+        return roster
+
+    return lookup
 
 
 def _build_production_stt(settings: VoicetestSettings):  # type: ignore[no-untyped-def]
@@ -412,6 +448,9 @@ async def _run() -> None:
         seat_lookup=_seat_lookup,
         phase_lookup=_phase_lookup,
         config=ingest_config,
+        roster_lookup=_make_live_vc_roster_lookup(
+            bot, settings.VOICETEST_VOICE_CHANNEL_ID
+        ),
     )
 
     stop = asyncio.Event()
@@ -458,6 +497,21 @@ async def _run() -> None:
             settings.VOICETEST_VOICE_CHANNEL_ID,
             settings.WOLFBOT_VOICE_DEBUG_DIR,
         )
+
+        # Snapshot the roster the analyzer will see and log it once
+        # so the operator can confirm at a glance which display
+        # names will end up in the system prompt for this session.
+        roster_now = voice_ingest.roster_lookup() if voice_ingest.roster_lookup else []
+        if roster_now:
+            log.info(
+                "voicetest_roster_snapshot %s",
+                ", ".join(f"席{seat}: {name}" for seat, name in roster_now),
+            )
+        else:
+            log.warning(
+                "voicetest_roster_empty - analyzer will fall back to "
+                "the un-grounded prompt (no VC members visible yet)"
+            )
 
     @bot.event
     async def on_ready() -> None:

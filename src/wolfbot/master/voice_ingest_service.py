@@ -39,6 +39,7 @@ from wolfbot.domain.ws_messages import (
     VadSpeechStarted,
 )
 from wolfbot.master.stt_service import (
+    RosterEntry,
     SttProviderError,
     SttResult,
     SttService,
@@ -147,6 +148,7 @@ class VoiceIngestService:
         phase_lookup: Callable[[], tuple[str, str] | None],
         config: VoiceIngestConfig | None = None,
         now_ms: Callable[[], int] = _now_ms,
+        roster_lookup: Callable[[], list[RosterEntry]] | None = None,
     ) -> None:
         self.registry_view = registry_view
         self.master_client = master_client
@@ -154,6 +156,12 @@ class VoiceIngestService:
         self.seat_lookup = seat_lookup
         # phase_lookup returns (game_id, phase_id) for the current discussion phase, or None.
         self.phase_lookup = phase_lookup
+        # roster_lookup returns the current alive seat list as
+        # (seat_no, display_name) so the analyzer LLM can resolve
+        # mistranscribed names to a canonical participant. Optional
+        # because tests / voicetest in no-op mode have nothing useful
+        # to ground against.
+        self.roster_lookup = roster_lookup
         self.config = config or VoiceIngestConfig()
         self._now_ms = now_ms
         self._open_segments: dict[str, _OpenSegment] = {}
@@ -386,11 +394,27 @@ class VoiceIngestService:
                 )
                 return
 
+        roster: list[RosterEntry] | None = None
+        if self.roster_lookup is not None:
+            try:
+                roster = list(self.roster_lookup())
+            except Exception:
+                # Roster fetch is a soft dependency on game state;
+                # never let it abort the STT call. Log and proceed
+                # with the legacy un-grounded prompt.
+                log.warning(
+                    "voice_roster_lookup_failed game=%s segment=%s",
+                    game_id,
+                    seg.segment_id,
+                    exc_info=True,
+                )
+
         try:
             result: SttResult = await self.stt.transcribe(
                 audio=pcm_snapshot,
                 language=self.config.stt_language,
                 timeout_s=self.config.stt_timeout_s,
+                roster=roster,
             )
         except SttProviderError as exc:
             self.stt_provider_error_count += 1
@@ -497,6 +521,7 @@ class VoiceIngestService:
                 summary=result.summary,
                 co_declaration=co_decl,  # type: ignore[arg-type]
                 addressed_name=result.addressed_name,
+                addressed_seat_no=result.addressed_seat_no,
             )
         )
 

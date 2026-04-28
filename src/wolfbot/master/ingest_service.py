@@ -232,8 +232,23 @@ class MasterIngestService:
             alive_seat_nos=alive_seat_nos,
         )
 
+        # Prefer the analyzer's pre-resolved seat number when its
+        # prompt was grounded with a roster - that path bypasses the
+        # legacy ``resolve_seat_by_name`` string match, which only
+        # compares against ``Seat.display_name`` (=persona handle)
+        # and silently drops the address when the live VC nickname
+        # diverges. Validate the seat is actually alive in this
+        # phase before trusting it; fall back to the name-resolution
+        # path otherwise so a buggy / hallucinated seat number
+        # doesn't poison the routing.
         addressed_seat_no: int | None = None
-        if payload.addressed_name:
+        alive_set = set(alive_seat_nos)
+        if (
+            payload.addressed_seat_no is not None
+            and payload.addressed_seat_no in alive_set
+        ):
+            addressed_seat_no = payload.addressed_seat_no
+        elif payload.addressed_name:
             try:
                 addressed_seat_no = await self.phase_lookup.resolve_addressed_seat(
                     payload.game_id, payload.addressed_name
@@ -245,9 +260,9 @@ class MasterIngestService:
                     payload.addressed_name,
                 )
                 addressed_seat_no = None
-            # Self-address never needs a routed reply.
-            if addressed_seat_no is not None and addressed_seat_no == payload.seat_no:
-                addressed_seat_no = None
+        # Self-address never needs a routed reply.
+        if addressed_seat_no is not None and addressed_seat_no == payload.seat_no:
+            addressed_seat_no = None
 
         event = SpeechEvent(
             event_id=new_event_id(),

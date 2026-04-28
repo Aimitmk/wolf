@@ -204,6 +204,89 @@ async def test_ingest_voice_sets_addressed_seat_from_payload(
     assert any(r.event_id == event.event_id and r.addressed_seat_no == 2 for r in rows)
 
 
+async def test_ingest_voice_prefers_payload_seat_no_over_name_resolution(
+    repo: SqliteRepo,
+) -> None:
+    """When the analyzer's prompt was grounded with a roster, the
+    ``addressed_seat_no`` it pre-resolves must override the legacy
+    string-based ``resolve_seat_by_name`` lookup. This is the only
+    code path that handles a renamed-bot scenario where the live VC
+    nickname doesn't match the persona's stored ``Seat.display_name``.
+
+    Test setup: seat 2 has display_name "🌙セツ" in the DB. The payload
+    carries ``addressed_name="Lucky"`` (a name that would never resolve
+    via the legacy path) but ``addressed_seat_no=2``. The resulting
+    ``SpeechEvent.addressed_seat_no`` must be 2.
+    """
+    g, seats = await _make_seated_game(repo)
+    registry = InMemoryNpcRegistry()
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    lookup = _SeatedPhaseLookup(seats=seats, alive=[1, 2, 3])
+    svc = MasterIngestService(
+        registry=registry, discussion=discussion, phase_lookup=lookup
+    )
+    payload = SpeechEventPayload(
+        ts=1,
+        trace_id="t",
+        game_id=g.id,
+        phase_id=make_phase_id(g.id, 1, Phase.DAY_DISCUSSION),
+        seat_no=1,
+        speaker_discord_user_id="u1",
+        segment_id="s1",
+        text="Luckyさん、どう思う？",
+        confidence=0.92,
+        duration_ms=600,
+        audio_start_ms=0,
+        audio_end_ms=600,
+        addressed_name="Lucky",
+        addressed_seat_no=2,
+    )
+    event, reason = await svc.ingest_voice(payload)
+    assert reason is None
+    assert event is not None
+    assert event.addressed_seat_no == 2
+
+
+async def test_ingest_voice_falls_back_to_name_when_seat_no_dead(
+    repo: SqliteRepo,
+) -> None:
+    """A hallucinated / stale ``addressed_seat_no`` pointing at a dead
+    seat must be rejected and the resolver must fall back to the
+    name-based path."""
+    g, seats = await _make_seated_game(repo)
+    registry = InMemoryNpcRegistry()
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    # Seat 2 is dead in this scenario; analyzer hallucinates
+    # ``addressed_seat_no=2`` anyway.
+    lookup = _SeatedPhaseLookup(seats=seats, alive=[1, 3])
+    svc = MasterIngestService(
+        registry=registry, discussion=discussion, phase_lookup=lookup
+    )
+    payload = SpeechEventPayload(
+        ts=1,
+        trace_id="t",
+        game_id=g.id,
+        phase_id=make_phase_id(g.id, 1, Phase.DAY_DISCUSSION),
+        seat_no=1,
+        speaker_discord_user_id="u1",
+        segment_id="s1",
+        text="ジナさんどう？",
+        confidence=0.92,
+        duration_ms=600,
+        audio_start_ms=0,
+        audio_end_ms=600,
+        addressed_name="ジナ",
+        addressed_seat_no=2,  # dead — should be ignored
+    )
+    event, reason = await svc.ingest_voice(payload)
+    assert reason is None
+    assert event is not None
+    # Falls back to name resolution → resolves "ジナ" to seat 3.
+    assert event.addressed_seat_no == 3
+
+
 async def test_ingest_voice_self_address_is_dropped(repo: SqliteRepo) -> None:
     """A speaker calling their own name must not produce a routed address."""
     g, seats = await _make_seated_game(repo)

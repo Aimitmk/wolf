@@ -17,7 +17,7 @@ swapped in via configuration.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -27,12 +27,84 @@ from wolfbot.domain.enums import (
     format_co_claim_options,
 )
 
+# (seat_no, display_name) pair used to ground the analyzer's
+# ``addressed_name`` extraction in the actual VC roster. Passing this
+# at transcribe time lets the LLM resolve STT misspellings (e.g.
+# Whisper's "ラッキーオ" for the spoken "ラキオ") to one of the real
+# seats instead of returning the literal mistranscription that the
+# downstream resolver can't match.
+RosterEntry = tuple[int, str]
+
 log = logging.getLogger(__name__)
 
 
 def _seat_range_label() -> str:
     """1-based inclusive seat range derived from :data:`VILLAGE_SIZE`."""
     return f"1〜{VILLAGE_SIZE}"
+
+
+def _coerce_seat_no(value: Any) -> int | None:
+    """Coerce an analyzer-emitted seat number to ``int`` in [1, VILLAGE_SIZE].
+
+    Accepts both ``int`` and string-of-digits because some models hand
+    back numeric strings even when the JSON schema asks for an int.
+    Returns ``None`` for any out-of-range / non-numeric input rather
+    than raising — the analyzer is best-effort and the downstream
+    name-resolver still has the literal ``addressed_name`` to fall
+    back on.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        seat = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        seat = int(value.strip())
+    else:
+        return None
+    return seat if 1 <= seat <= VILLAGE_SIZE else None
+
+
+_ADDRESSED_SEAT_FIELD_INSTRUCTION = (
+    "**addressed_seat_no**: addressed_name と同じ人物の席番号(整数 1〜9)、"
+    "または null。**downstream は addressed_name の文字一致より先に "
+    "addressed_seat_no を採用する**ので、roster 上の人物に確信があるなら "
+    "必ず席番号を埋める。確信が無いとき / 全体宛 / 該当無しは null。\n"
+)
+
+
+def _format_roster_block(roster: Sequence[RosterEntry] | None) -> str:
+    """Render the participant roster as a prompt block.
+
+    Empty when ``roster`` is None or empty so the static prompt
+    sections look identical for callers that don't supply a roster
+    (tests, voicetest in no-op mode). When non-empty, lists every
+    seat with its ``display_name`` and instructs the analyzer LLM
+    to resolve ``addressed_name`` / ``vote_target_seat`` to one of
+    these canonical entries even when the upstream STT mangles the
+    spelling - the typical "Whisper rendered 'ラキオ' as 'ラッキーオ'"
+    failure mode this guard exists to fix.
+    """
+    if not roster:
+        return ""
+    lines = "\n".join(f"  - 席{seat}: {name}" for seat, name in roster)
+    return (
+        "\n現在の参加者(席番号 → display_name):\n"
+        f"{lines}\n"
+        "**addressed_name の表記揺れ正規化**: addressed_name は必ず上の "
+        "display_name のいずれか(emoji含む完全一致)を返す、または null。"
+        "STT の書き起こしは表記揺れすることがあるので以下を吸収して最も近い人物に対応付ける:\n"
+        "- 音韻的に近い表記(例: 「ラッキーオ」「ラキ」「らきお」 → 「🦋ラキオ」)、"
+        "濁音/半濁音/促音/長音/ヤ行イ行差/カタカナ⇔ひらがなを許容\n"
+        "- さん/くん/ちゃん/様/氏 等の敬称は剝がして照合\n"
+        "- 「3番」「席3」のような席番号呼びかけは、その席の display_name に解決\n"
+        "- 「みんな」「全員」「みなさん」「お前ら」など全体宛は null\n"
+        "- 候補が決められない場合も null(無理に当てない)\n"
+        "**vote_target_seat も同じ参加者リストに従い、上の席番号のいずれか**を返す、"
+        "または null。\n"
+        + _ADDRESSED_SEAT_FIELD_INSTRUCTION
+    )
 
 
 def pcm_to_wav(
@@ -96,6 +168,15 @@ class SttResult:
     summary: str | None = None
     co_declaration: str | None = None
     addressed_name: str | None = None
+    # Seat number the analyzer resolved ``addressed_name`` to, when
+    # the prompt was grounded with a roster. Bypasses the downstream
+    # ``resolve_seat_by_name`` string match - critical when the live
+    # VC display name (which the speaker hears and the analyzer is
+    # told about) differs from ``Seat.display_name`` in the DB
+    # (which is the persona's canonical handle and the only thing
+    # the legacy resolver knows). ``None`` when no roster was given
+    # or the analyzer couldn't pick a seat.
+    addressed_seat_no: int | None = None
     raw_analysis: dict[str, Any] | None = None
 
 
@@ -117,6 +198,13 @@ class SttService(Protocol):
 
     Implementations MUST be cancellable and MUST NOT block the asyncio loop
     on the network call (use `asyncio.to_thread` or an async HTTP client).
+
+    ``roster`` is an optional list of ``(seat_no, display_name)`` pairs
+    grounding the analyzer LLM's ``addressed_name`` /
+    ``vote_target_seat`` extraction. When supplied, the analyzer maps
+    misspelled / phonetically-near transcriptions back to a canonical
+    seat. Implementations should fall back to their static prompt
+    when ``roster`` is None or empty.
     """
 
     async def transcribe(
@@ -125,6 +213,7 @@ class SttService(Protocol):
         audio: bytes,
         language: str,
         timeout_s: float,
+        roster: Sequence[RosterEntry] | None = None,
     ) -> SttResult: ...
 
 
@@ -132,6 +221,9 @@ class FakeSttService:
     """In-memory STT for tests.
 
     Either return a scripted sequence of results or raise scripted errors.
+    Records the most-recently-passed ``roster`` so tests asserting on
+    prompt-conditioning behavior can verify it without intercepting
+    HTTP traffic.
     """
 
     def __init__(
@@ -142,6 +234,7 @@ class FakeSttService:
         self._scripted: list[SttResult | Exception] = list(scripted or [])
         self._default: SttResult | None = default
         self.call_count = 0
+        self.last_roster: Sequence[RosterEntry] | None = None
 
     async def transcribe(
         self,
@@ -149,8 +242,10 @@ class FakeSttService:
         audio: bytes,
         language: str,
         timeout_s: float,
+        roster: Sequence[RosterEntry] | None = None,
     ) -> SttResult:
         self.call_count += 1
+        self.last_roster = roster
         if self._scripted:
             head = self._scripted.pop(0)
             if isinstance(head, Exception):
@@ -189,9 +284,15 @@ class GeminiSttService:
         audio: bytes,
         language: str,
         timeout_s: float,
+        roster: Sequence[RosterEntry] | None = None,
     ) -> SttResult:
         if self._transcribe_fn is None:
             raise SttProviderError("stt_provider_not_configured")
+        # ``GeminiSttService`` is a thin transcribe-only delegate; it
+        # has no analyzer prompt to inject the roster into. Tests that
+        # care about roster propagation use ``GeminiAudioAnalyzer``
+        # instead. Accept the param for Protocol conformance.
+        del roster
         return await self._transcribe_fn(audio, language, self.model, timeout_s)
 
 
@@ -215,7 +316,7 @@ class GeminiAudioAnalyzer:
     input tokens). Does NOT import ``httpx`` at module level.
     """
 
-    _SYSTEM_PROMPT: str = (
+    _SYSTEM_PROMPT_BASE: str = (
         "あなたは人狼ゲームの音声ログ分析エンジンです。\n"
         "渡された音声(日本語)を書き起こし、以下のJSON形式で返してください。\n"
         "JSONのみ返答し、他のテキストは含めないでください。\n\n"
@@ -227,7 +328,8 @@ class GeminiAudioAnalyzer:
         '  "co_claim": null,\n'
         '  "vote_target_seat": null,\n'
         '  "stance": {},\n'
-        '  "addressed_name": null\n'
+        '  "addressed_name": null,\n'
+        '  "addressed_seat_no": null\n'
         "}\n"
         "```\n\n"
         "フィールド説明:\n"
@@ -239,8 +341,16 @@ class GeminiAudioAnalyzer:
         "- stance: 言及した席への態度 {\"席番号\": \"positive\"/\"negative\"/\"neutral\"}\n"
         "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
         "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。\n"
+        "- addressed_seat_no: 上の addressed_name と同じ人物の席番号(整数)、または null。roster が与えられているときは必ず埋める。\n"
         "\n音声が不明瞭な場合は confidence を低くし、transcript は聞き取れた範囲で。"
     )
+
+    @classmethod
+    def _build_system_prompt(
+        cls, roster: Sequence[RosterEntry] | None
+    ) -> str:
+        """Static base + (optional) roster grounding block."""
+        return cls._SYSTEM_PROMPT_BASE + _format_roster_block(roster)
 
     def __init__(
         self,
@@ -261,6 +371,7 @@ class GeminiAudioAnalyzer:
         audio: bytes,
         language: str,
         timeout_s: float,
+        roster: Sequence[RosterEntry] | None = None,
     ) -> SttResult:
         import base64
         import json
@@ -275,6 +386,7 @@ class GeminiAudioAnalyzer:
 
         audio_b64 = base64.b64encode(audio).decode("ascii")
         effective_timeout = min(timeout_s, self.timeout_s)
+        system_prompt = self._build_system_prompt(roster)
 
         body = {
             "contents": [
@@ -287,7 +399,7 @@ class GeminiAudioAnalyzer:
                             }
                         },
                         {
-                            "text": self._SYSTEM_PROMPT,
+                            "text": system_prompt,
                         },
                     ]
                 }
@@ -346,6 +458,7 @@ class GeminiAudioAnalyzer:
                 if isinstance(addressed_raw, str):
                     stripped = addressed_raw.strip()
                     addressed_name = stripped or None
+                addressed_seat_no = _coerce_seat_no(parsed.get("addressed_seat_no"))
 
                 # Estimate duration from audio size (assume 16kHz 16-bit mono WAV)
                 data_bytes = max(0, len(audio) - 44)
@@ -358,6 +471,7 @@ class GeminiAudioAnalyzer:
                     summary=summary_str,
                     co_declaration=co_declaration,
                     addressed_name=addressed_name,
+                    addressed_seat_no=addressed_seat_no,
                     raw_analysis=parsed or None,
                 )
 
@@ -377,7 +491,7 @@ class GeminiAudioAnalyzer:
                 role="voice_stt",
                 provider="gemini",
                 model=self.model,
-                system_prompt=self._SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 user_prompt=f"[audio bytes={len(audio)} mime=audio/wav]",
                 response=raw_text or None,
                 latency_ms=timer.elapsed_ms,
@@ -433,7 +547,7 @@ class GroqWhisperAudioAnalyzer:
     flowing even when the analyzer LLM is briefly down.
     """
 
-    _ANALYZER_PROMPT: str = (
+    _ANALYZER_PROMPT_BASE: str = (
         "あなたは人狼ゲームの発話内容を分析するエンジンです。\n"
         "以下の書き起こし(日本語)を読んで、以下のJSONのみを返してください。\n"
         "他の文字は含めないでください。\n\n"
@@ -442,7 +556,8 @@ class GroqWhisperAudioAnalyzer:
         '  "co_claim": null,\n'
         '  "vote_target_seat": null,\n'
         '  "stance": {},\n'
-        '  "addressed_name": null\n'
+        '  "addressed_name": null,\n'
+        '  "addressed_seat_no": null\n'
         "}\n\n"
         "フィールド説明:\n"
         "- summary: 発言内容の1文要約\n"
@@ -450,8 +565,15 @@ class GroqWhisperAudioAnalyzer:
         f"- vote_target_seat: 処刑対象として名指しした席番号({_seat_range_label()})、なければ null\n"
         "- stance: 言及した席への態度 {\"席番号\": \"positive\"/\"negative\"/\"neutral\"}\n"
         "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
-        "「みんな」「全員」など全体への呼びかけは null。"
+        "「みんな」「全員」など全体への呼びかけは null。\n"
+        "- addressed_seat_no: 上の addressed_name と同じ人物の席番号(整数)、または null。roster が与えられているときは必ず埋める。"
     )
+
+    @classmethod
+    def _build_analyzer_prompt(
+        cls, roster: Sequence[RosterEntry] | None
+    ) -> str:
+        return cls._ANALYZER_PROMPT_BASE + _format_roster_block(roster)
 
     def __init__(
         self,
@@ -488,6 +610,7 @@ class GroqWhisperAudioAnalyzer:
         audio: bytes,
         language: str,
         timeout_s: float,
+        roster: Sequence[RosterEntry] | None = None,
     ) -> SttResult:
         effective_timeout = min(timeout_s, self.timeout_s)
         bytes_per_sec = (
@@ -519,7 +642,7 @@ class GroqWhisperAudioAnalyzer:
                 addressed_name=None,
             )
 
-        analysis = await self._analyze(transcript, effective_timeout)
+        analysis = await self._analyze(transcript, effective_timeout, roster=roster)
         co_raw = analysis.get("co_claim")
         co_decl = co_raw if co_raw in CO_CLAIM_VALUES else None
         addressed = analysis.get("addressed_name")
@@ -558,6 +681,7 @@ class GroqWhisperAudioAnalyzer:
             summary=summary_str,
             co_declaration=co_decl,
             addressed_name=addressed_name,
+            addressed_seat_no=_coerce_seat_no(analysis.get("addressed_seat_no")),
             raw_analysis=analysis or None,
         )
 
@@ -661,7 +785,13 @@ class GroqWhisperAudioAnalyzer:
             )
         return transcript, confidence
 
-    async def _analyze(self, transcript: str, timeout: float) -> dict:  # type: ignore[type-arg]
+    async def _analyze(
+        self,
+        transcript: str,
+        timeout: float,
+        *,
+        roster: Sequence[RosterEntry] | None = None,
+    ) -> dict:  # type: ignore[type-arg]
         """Step 2: ask the analyzer LLM to extract structured fields.
 
         Soft-fail: any error returns ``{}`` so the discussion path still
@@ -680,10 +810,11 @@ class GroqWhisperAudioAnalyzer:
         )
 
         url = f"{self.analyzer_base_url}/chat/completions"
+        analyzer_prompt = self._build_analyzer_prompt(roster)
         body = {
             "model": self.analyzer_model,
             "messages": [
-                {"role": "system", "content": self._ANALYZER_PROMPT},
+                {"role": "system", "content": analyzer_prompt},
                 {"role": "user", "content": transcript},
             ],
             "response_format": {"type": "json_object"},
@@ -741,7 +872,7 @@ class GroqWhisperAudioAnalyzer:
                 role="voice_stt",
                 provider="xai",
                 model=self.analyzer_model,
-                system_prompt=self._ANALYZER_PROMPT,
+                system_prompt=analyzer_prompt,
                 user_prompt=transcript,
                 response=raw or None,
                 latency_ms=timer.elapsed_ms,
@@ -756,6 +887,7 @@ __all__ = [
     "GeminiAudioAnalyzer",
     "GeminiSttService",
     "GroqWhisperAudioAnalyzer",
+    "RosterEntry",
     "SttProviderError",
     "SttResult",
     "SttService",

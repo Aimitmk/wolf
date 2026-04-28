@@ -258,6 +258,58 @@ async def test_pre_stt_silence_gate_passes_loud_speech() -> None:
     assert svc.pre_stt_silence_gated_count == 0
 
 
+async def test_roster_lookup_is_forwarded_to_stt_transcribe() -> None:
+    """When ``roster_lookup`` is supplied, its output must reach the
+    ``SttService.transcribe`` call so the analyzer LLM can ground
+    ``addressed_name`` on real seat names. ``FakeSttService`` records
+    the most recent ``roster`` for the assertion."""
+
+    view = InMemoryNpcRegistryView()
+    client = FakeMasterIngestionClient()
+    stt = FakeSttService(default=SttResult(text="hi", confidence=0.9, duration_ms=1))
+    captured_roster: list[tuple[int, str]] = [(3, "🦋ラキオ"), (4, "🌙セツ")]
+    svc = VoiceIngestService(
+        registry_view=view,
+        master_client=client,
+        stt=stt,
+        seat_lookup=_seat_lookup,
+        phase_lookup=_phase_lookup_active,
+        roster_lookup=lambda: captured_roster,
+        now_ms=lambda: 1,
+    )
+    await svc.begin_segment(speaker_user_id="u3")
+    await svc.handle_voice_packet(speaker_user_id="u3", pcm=b"\x00" * 16)
+    await svc.end_segment(speaker_user_id="u3")
+    assert stt.last_roster == captured_roster
+
+
+async def test_roster_lookup_failure_does_not_break_stt_call() -> None:
+    """A roster_lookup that raises must not abort STT — the call
+    should fall back to a None roster (legacy un-grounded prompt)."""
+
+    view = InMemoryNpcRegistryView()
+    client = FakeMasterIngestionClient()
+    stt = FakeSttService(default=SttResult(text="hi", confidence=0.9, duration_ms=1))
+
+    def boom() -> list[tuple[int, str]]:
+        raise RuntimeError("game state not loaded")
+
+    svc = VoiceIngestService(
+        registry_view=view,
+        master_client=client,
+        stt=stt,
+        seat_lookup=_seat_lookup,
+        phase_lookup=_phase_lookup_active,
+        roster_lookup=boom,
+        now_ms=lambda: 1,
+    )
+    await svc.begin_segment(speaker_user_id="u3")
+    await svc.end_segment(speaker_user_id="u3")
+    assert stt.call_count == 1
+    assert stt.last_roster is None
+    assert len(client.speech_payloads) == 1
+
+
 async def test_pre_stt_silence_gate_disabled_by_default() -> None:
     """Default ``VoiceIngestConfig`` keeps the gate off so existing
     tests / callers that pass tiny buffers still reach STT."""

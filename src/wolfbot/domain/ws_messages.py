@@ -538,6 +538,18 @@ class SpeechEventPayload(BaseEnvelope):
             "the analyzer didn't detect a named address."
         ),
     )
+    addressed_seat_no: int | None = Field(
+        default=None,
+        description=(
+            "Seat number the analyzer pre-resolved ``addressed_name`` to "
+            "when its prompt was grounded with a roster. Master prefers "
+            "this over running ``resolve_seat_by_name(addressed_name, ...)`` "
+            "which only matches against the persona-canonical "
+            "``Seat.display_name`` and fails when the bot's live VC "
+            "nickname diverges from the persona handle. None when the "
+            "analyzer wasn't grounded or couldn't pick a seat."
+        ),
+    )
 
 
 class SttFailed(BaseEnvelope):
