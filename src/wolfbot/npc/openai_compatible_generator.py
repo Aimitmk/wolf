@@ -131,7 +131,11 @@ def _build_system(
     )
 
 
-def _build_user(logic: LogicPacket, request: SpeakRequest) -> str:
+def _build_user(
+    logic: LogicPacket,
+    request: SpeakRequest,
+    state: object | None = None,
+) -> str:
     lines = [
         f"フェイズ: {request.phase_id}",
         f"あなたの席: 席{request.seat_no}",
@@ -140,17 +144,74 @@ def _build_user(logic: LogicPacket, request: SpeakRequest) -> str:
         "## 場の状況",
         logic.public_state_summary or "(情報なし)",
     ]
-    if request.alive_seats:
+    # Phase-D: prefer the bot's own NpcGameState mirror over the stale
+    # SpeakRequest fields. The state carries role + alive/dead + private
+    # results + wolf chat that the speech LLM needs to be in character.
+    alive_seats = (
+        getattr(state, "alive_seats", None)
+        or list(request.alive_seats)
+    )
+    dead_seats = (
+        getattr(state, "dead_seats", None)
+        or list(request.dead_seats)
+    )
+    if alive_seats:
         alive_str = "、".join(
-            f"席{seat_no} {name}" for seat_no, name in request.alive_seats
+            f"席{seat_no} {name}" for seat_no, name in alive_seats
         )
         lines.append("")
         lines.append(f"## 生存者\n{alive_str}")
-    if request.dead_seats:
+    if dead_seats:
         dead_str = "、".join(
-            f"席{seat_no} {name}" for seat_no, name in request.dead_seats
+            f"席{seat_no} {name}" for seat_no, name in dead_seats
         )
         lines.append(f"## 死亡者\n{dead_str}")
+    # Private state — only present when Phase-D snapshot was received.
+    if state is not None:
+        partner_wolves = getattr(state, "partner_wolves", []) or []
+        if partner_wolves:
+            partners = "、".join(f"席{s} {n}" for s, n in partner_wolves)
+            lines.append(f"## 仲間の人狼 (非公開)\n{partners}")
+        seer_results = getattr(state, "seer_results", []) or []
+        if seer_results:
+            lines.append("## 自分の占い結果 (非公開)")
+            for sr in seer_results:
+                verdict = "黒 (人狼)" if sr.is_wolf else "白 (人狼ではない)"
+                lines.append(
+                    f"  day{sr.day}: 席{sr.target_seat} {sr.target_name} → {verdict}"
+                )
+        medium_results = getattr(state, "medium_results", []) or []
+        if medium_results:
+            lines.append("## 自分の霊媒結果 (非公開)")
+            for mr in medium_results:
+                if mr.is_wolf is None:
+                    verdict = "結果なし (処刑なし)"
+                elif mr.is_wolf:
+                    verdict = "人狼"
+                else:
+                    verdict = "人狼ではない"
+                lines.append(
+                    f"  day{mr.day}: 席{mr.target_seat} {mr.target_name} → {verdict}"
+                )
+        guard_history = getattr(state, "guard_history", []) or []
+        if guard_history:
+            lines.append("## 自分の護衛履歴 (非公開)")
+            for g in guard_history:
+                outcome = (
+                    "(平和な朝)" if g.peaceful_morning
+                    else "(襲撃発生)" if g.peaceful_morning is False
+                    else "(結果未確定)"
+                )
+                lines.append(
+                    f"  day{g.day}: 席{g.target_seat} {g.target_name} を護衛 {outcome}"
+                )
+        wolf_chat_history = getattr(state, "wolf_chat_history", []) or []
+        if wolf_chat_history:
+            lines.append("## 人狼チャット履歴 (狼/狂人にのみ見える)")
+            for wc in wolf_chat_history[-15:]:
+                lines.append(
+                    f"  day{wc.day} 席{wc.speaker_seat} {wc.speaker_name}: {wc.text}"
+                )
     if logic.recent_speeches:
         lines.append("")
         lines.append("## 直近の発言 (古い順)")
@@ -274,6 +335,7 @@ class OpenAICompatibleNpcGenerator:
         *,
         logic: LogicPacket,
         request: SpeakRequest,
+        state: object | None = None,
     ) -> NpcGeneratedSpeech | None:
         from openai import AsyncOpenAI
 
@@ -292,15 +354,19 @@ class OpenAICompatibleNpcGenerator:
                 "each NPC bot must declare its persona at startup."
             )
         persona = NPC_PERSONAS_BY_KEY[self._persona_key]
+        # Phase-D: prefer state.role over request.role; SpeakRequest's
+        # role field is now a fallback for back-compat with older Master
+        # builds that haven't started sending PrivateStateSnapshot.
+        role_value = getattr(state, "role", None) or request.role
         system = _build_system(
             persona,
             max_chars=request.max_chars,
-            role=request.role,
+            role=role_value,
             role_strategy=request.role_strategy,
         )
         if self.config.mode == "json_object":
             system += _DEEPSEEK_JSON_CONTRACT_SUFFIX
-        user = _build_user(logic, request)
+        user = _build_user(logic, request, state)
 
         client = AsyncOpenAI(
             api_key=self._api_key,

@@ -341,6 +341,89 @@ def test_build_user_prompt_renders_recent_speeches_and_seats() -> None:
     assert "## 死亡者" in user_msg and "席4 故人" in user_msg
 
 
+def test_build_user_prompt_uses_npc_state_over_request_fields() -> None:
+    """Phase-D: when an `NpcGameState` is supplied, the speech user prompt
+    pulls alive/dead/private info from it rather than the SpeakRequest.
+    The state's role-specific results, partner wolves, and wolf chat
+    history all surface in the prompt."""
+    from wolfbot.domain.ws_messages import (
+        GuardEntry,
+        MediumResult,
+        SeerResult,
+        WolfChatLine,
+    )
+    from wolfbot.npc.game_state import NpcGameState
+
+    logic = LogicPacket(
+        ts=1, trace_id="t", packet_id="lp", phase_id="ph",
+        recipient_npc_id="npc_1",
+        public_state_summary="(no digest)",
+        recent_speeches=(),
+        expires_at_ms=9999,
+    )
+    request = SpeakRequest(
+        ts=1, trace_id="t", request_id="sr", npc_id="npc_1",
+        phase_id="ph", seat_no=2, logic_packet_id="lp",
+        suggested_intent="speak", max_chars=80, expires_at_ms=5000,
+        # Stale fields a Master might still be sending — state should
+        # override these.
+        alive_seats=((9, "stale_alive"),),
+        dead_seats=(),
+    )
+    state = NpcGameState(
+        game_id="g1", seat_no=2, persona_key="setsu", role="WEREWOLF",
+        day_number=1,
+        alive_seats=[(1, "Alice"), (2, "セツ"), (5, "Bob")],
+        dead_seats=[(3, "fallen")],
+        partner_wolves=[(5, "Bob")],
+        seer_results=[SeerResult(day=1, target_seat=1, target_name="Alice", is_wolf=False)],
+        medium_results=[
+            MediumResult(day=1, target_seat=3, target_name="fallen", is_wolf=False)
+        ],
+        guard_history=[
+            GuardEntry(day=1, target_seat=2, target_name="セツ", peaceful_morning=True)
+        ],
+        wolf_chat_history=[
+            WolfChatLine(day=1, speaker_seat=5, speaker_name="Bob", text="席1を狙う")
+        ],
+    )
+    out = _build_user(logic, request, state)
+    # Alive list comes from state, NOT from the stale request fields.
+    assert "席1 Alice" in out and "席2 セツ" in out and "席5 Bob" in out
+    assert "stale_alive" not in out
+    # Dead list comes from state.
+    assert "席3 fallen" in out
+    # Private blocks all surface.
+    assert "## 仲間の人狼" in out and "席5 Bob" in out
+    assert "## 自分の占い結果" in out
+    assert "## 自分の霊媒結果" in out
+    assert "## 自分の護衛履歴" in out and "(平和な朝)" in out
+    assert "## 人狼チャット履歴" in out and "席1を狙う" in out
+
+
+def test_build_user_prompt_falls_back_to_request_when_state_none() -> None:
+    """Without state, the prompt still works using SpeakRequest fields
+    (back-compat with older Master builds that don't push snapshots)."""
+    logic = LogicPacket(
+        ts=1, trace_id="t", packet_id="lp", phase_id="ph",
+        recipient_npc_id="npc_1",
+        public_state_summary="(d)", expires_at_ms=9999,
+    )
+    request = SpeakRequest(
+        ts=1, trace_id="t", request_id="sr", npc_id="npc_1",
+        phase_id="ph", seat_no=2, logic_packet_id="lp",
+        suggested_intent="speak", max_chars=80, expires_at_ms=5000,
+        alive_seats=((1, "Alice"), (2, "Bob")),
+        dead_seats=((3, "Dead"),),
+    )
+    out = _build_user(logic, request, None)
+    assert "席1 Alice" in out and "席2 Bob" in out
+    assert "席3 Dead" in out
+    # No private state when state is None.
+    assert "## 仲間の人狼" not in out
+    assert "## 自分の占い結果" not in out
+
+
 def test_build_user_prompt_no_candidates_no_pressure() -> None:
     logic = LogicPacket(
         ts=1,

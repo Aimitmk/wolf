@@ -278,6 +278,24 @@ class NpcClient:
     def _on_logic_packet(self, packet: LogicPacket) -> None:
         self._logic_cache[packet.packet_id] = packet
 
+    def _lookup_state_for_speech(
+        self, request: SpeakRequest
+    ) -> NpcGameState | None:
+        """Find the matching `NpcGameState` for the speak request.
+
+        SpeakRequest carries `phase_id` only; we recover the game id via
+        the canonical ``{gid}::dayN::PHASE::seq`` format and look the
+        state up in the in-memory mirror. Returns None when no snapshot
+        has been received yet — the generator falls back to the
+        SpeakRequest fields in that case.
+        """
+        from wolfbot.services.llm_trace import parse_game_id_from_phase_id
+
+        gid = parse_game_id_from_phase_id(request.phase_id)
+        if gid is None:
+            return None
+        return self.game_states.get(gid)
+
     async def _on_speak_request(self, request: SpeakRequest) -> None:
         logic = self._logic_cache.get(request.logic_packet_id)
         if logic is None:
@@ -294,7 +312,14 @@ class NpcClient:
                 pressure={},
                 expires_at_ms=request.expires_at_ms,
             )
-        result = await self.speech.respond(logic=logic, request=request, now_ms=self.now_ms())
+        # Phase-D: pass the per-game state mirror so the speech generator
+        # can read its own role + private results + alive/dead lists from
+        # the same source the vote/night handlers use, rather than from
+        # the SpeakRequest's now-deprecated role/role_strategy/seat fields.
+        state = self._lookup_state_for_speech(request)
+        result = await self.speech.respond(
+            logic=logic, request=request, now_ms=self.now_ms(), state=state,
+        )
         if result.status == "accepted" and result.text is not None:
             self._pending_playback[result.request_id] = _PendingForPlayback(
                 text=result.text, voice_id=self.config.voice_id

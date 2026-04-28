@@ -54,6 +54,7 @@ from wolfbot.domain.ws_messages import (
     VadSpeechEnded,
     VadSpeechStarted,
     VoteDecision,
+    WolfChatSend,
 )
 from wolfbot.master.npc_registry import NpcRegistry
 
@@ -187,6 +188,9 @@ class MasterHandlers:
     on_night_action_decision: (
         Callable[[NightActionDecision, ConnectionContext], Awaitable[None]] | None
     ) = None
+    on_wolf_chat_send: (
+        Callable[[WolfChatSend, ConnectionContext], Awaitable[None]] | None
+    ) = None
     now_ms: Callable[[], int] = field(default=_now_ms_default)
 
     def install(self, registry_: HandlerRegistry) -> None:
@@ -203,6 +207,7 @@ class MasterHandlers:
         registry_.add("stt_failed", self._handle_stt_failed)
         registry_.add("vote_decision", self._handle_vote_decision)
         registry_.add("night_action_decision", self._handle_night_action_decision)
+        registry_.add("wolf_chat_send", self._handle_wolf_chat_send)
 
     async def _handle_register(self, payload: dict[str, Any], ctx: ConnectionContext) -> None:
         msg = NpcRegister.model_validate(payload)
@@ -293,6 +298,13 @@ class MasterHandlers:
         msg = NightActionDecision.model_validate(payload)
         if self.on_night_action_decision is not None:
             await self.on_night_action_decision(msg, ctx)
+
+    async def _handle_wolf_chat_send(
+        self, payload: dict[str, Any], ctx: ConnectionContext
+    ) -> None:
+        msg = WolfChatSend.model_validate(payload)
+        if self.on_wolf_chat_send is not None:
+            await self.on_wolf_chat_send(msg, ctx)
 
 
 # ---------------------------------------------------------------- real WS server

@@ -16,6 +16,7 @@ from typing import Protocol, runtime_checkable
 
 from wolfbot.domain.enums import CO_CLAIM_VALUES, CoDeclaration
 from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest, SpeakResult
+from wolfbot.npc.game_state import NpcGameState
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class NpcGenerator(Protocol):
         *,
         logic: LogicPacket,
         request: SpeakRequest,
+        state: NpcGameState | None = None,
     ) -> NpcGeneratedSpeech | None: ...
 
 
@@ -52,16 +54,19 @@ class FakeNpcGenerator:
         self.call_count = 0
         self.received_logic: list[LogicPacket] = []
         self.received_requests: list[SpeakRequest] = []
+        self.received_state: list[NpcGameState | None] = []
 
     async def generate(
         self,
         *,
         logic: LogicPacket,
         request: SpeakRequest,
+        state: NpcGameState | None = None,
     ) -> NpcGeneratedSpeech | None:
         self.call_count += 1
         self.received_logic.append(logic)
         self.received_requests.append(request)
+        self.received_state.append(state)
         if self._scripted:
             return self._scripted.pop(0)
         return self._default
@@ -83,9 +88,12 @@ class NpcSpeechService:
         logic: LogicPacket,
         request: SpeakRequest,
         now_ms: int,
+        state: NpcGameState | None = None,
     ) -> SpeakResult:
         try:
-            speech = await self.generator.generate(logic=logic, request=request)
+            speech = await self.generator.generate(
+                logic=logic, request=request, state=state,
+            )
         except Exception:
             log.exception(
                 "npc_generate_failed npc_id=%s req=%s", request.npc_id, request.request_id

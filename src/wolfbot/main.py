@@ -594,12 +594,26 @@ async def _run() -> None:
         # decider and ask the NPC bot for its own seat's vote / night
         # action via WS.
         from wolfbot.master.decision_dispatcher import NpcDecisionDispatcher
+        from wolfbot.master.wolf_chat_broker import WolfChatBroker
 
         decision_dispatcher = NpcDecisionDispatcher(
             registry=npc_registry,
             now_ms=lambda: int(time.time() * 1000),
         )
         llm_adapter._npc_decision_dispatcher = decision_dispatcher
+
+        async def _post_to_wolves_channel(game_id: str, text: str) -> None:
+            game = await repo.load_game(game_id)
+            if game is None:
+                return
+            await discord_adapter.post_wolves_chat(game, text, kind="WOLF_CHAT")
+
+        wolf_chat_broker = WolfChatBroker(
+            registry=npc_registry,
+            repo=repo,
+            post_to_wolves_channel=_post_to_wolves_channel,
+            now_ms=lambda: int(time.time() * 1000),
+        )
 
         async def _reactive_voice_reenter(game_id: str) -> None:
             # On Master restart, reactive_voice games still in
@@ -927,6 +941,9 @@ async def _run() -> None:
         async def _on_night_action_decision(msg: Any, _ctx: Any) -> None:
             await decision_dispatcher.on_night_action_decision(msg)
 
+        async def _on_wolf_chat_send(msg: Any, _ctx: Any) -> None:
+            await wolf_chat_broker.handle_wolf_chat_send(msg)
+
         master_handlers = MasterHandlers(
             registry=npc_registry,
             on_speak_result=_on_speak_result,
@@ -940,6 +957,7 @@ async def _run() -> None:
             on_stt_failed=_on_stt_failed,
             on_vote_decision=_on_vote_decision,
             on_night_action_decision=_on_night_action_decision,
+            on_wolf_chat_send=_on_wolf_chat_send,
         )
 
         host, port_str = settings.MASTER_WS_LISTEN.rsplit(":", 1)

@@ -611,12 +611,129 @@ class LLMAdapter:
             llm_players = [p for p in llm_players if p.seat_no in restrict_to_seats]
         if not llm_players:
             return
-        task = asyncio.create_task(
-            self._run_night_actions(game, llm_players, players, seats, unresolved_seats),
-            name=f"llm-night-{game.id}-d{game.day_number}",
-        )
+        if (
+            game.discussion_mode == "reactive_voice"
+            and self._npc_decision_dispatcher is not None
+        ):
+            task = asyncio.create_task(
+                self._run_night_actions_via_npc_dispatcher(
+                    game, llm_players, players, seats, unresolved_seats
+                ),
+                name=f"npc-night-{game.id}-d{game.day_number}",
+            )
+        else:
+            task = asyncio.create_task(
+                self._run_night_actions(game, llm_players, players, seats, unresolved_seats),
+                name=f"llm-night-{game.id}-d{game.day_number}",
+            )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_night_actions_via_npc_dispatcher(
+        self,
+        game: Game,
+        llm_players: Sequence[Player],
+        all_players: Sequence[Player],
+        seats: Sequence[Seat],
+        unresolved_seats: frozenset[int] = frozenset(),
+    ) -> None:
+        """Reactive_voice night-action path: each role-actor seat dispatches
+        to its NPC bot. Wolf chat is intentionally skipped here — the
+        wolves coordinate through their `wolf_chat_history` mirror that
+        Master pushes via PrivateStateUpdate when wolves talk.
+        """
+        seats_by_no = {s.seat_no: s for s in seats}
+        prev = await self.repo.load_previous_guard(game.id)
+        prev_guard_seat = previous_guard_seat_for_night(prev, game.day_number)
+        # Stale-phase guard: bail if we already advanced past NIGHT.
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.ended_at is not None
+            or fresh.phase is not Phase.NIGHT
+            or fresh.day_number != game.day_number
+        ):
+            return
+        # Bucket players by night action kind so each kind dispatches as
+        # a single fan-out (matches the dispatcher API). Skip seats that
+        # already submitted unless they are unresolved (split wolves).
+        existing = await self.repo.load_night_actions(game.id, day=game.day_number)
+        already_by_seat: dict[int, set[SubmissionType]] = {}
+        for a in existing:
+            already_by_seat.setdefault(a.actor_seat, set()).add(a.kind)
+        buckets: dict[str, list[tuple[Player, SubmissionType, list[int]]]] = {
+            "wolf_attack": [],
+            "seer_divine": [],
+            "knight_guard": [],
+        }
+        kind_to_action: dict[SubmissionType, str] = {
+            SubmissionType.WOLF_ATTACK: "wolf_attack",
+            SubmissionType.SEER_DIVINE: "seer_divine",
+            SubmissionType.KNIGHT_GUARD: "knight_guard",
+        }
+        for player in llm_players:
+            kind, legal = self._role_to_kind(player, all_players, prev_guard_seat)
+            if kind is None or not legal:
+                continue
+            already = already_by_seat.get(player.seat_no, set())
+            if kind in already and player.seat_no not in unresolved_seats:
+                continue
+            action_label = kind_to_action.get(kind)
+            if action_label is None:
+                continue
+            buckets[action_label].append((player, kind, list(legal)))
+        dispatcher = self._npc_decision_dispatcher
+        for action_label, items in buckets.items():
+            if not items:
+                continue
+            actors = [p for p, _kind, _legal in items]
+            # Use the union of legal targets for the request payload — the
+            # NPC bot picks any of them. (Per-actor legal sets only differ
+            # when there are 3+ wolves, which the 9-player ruleset never
+            # has.) We still validate per-actor on the response side.
+            union_legal: set[int] = set()
+            per_actor_legal: dict[int, set[int]] = {}
+            per_actor_kind: dict[int, SubmissionType] = {}
+            for player, kind, legal in items:
+                per_actor_legal[player.seat_no] = set(legal)
+                per_actor_kind[player.seat_no] = kind
+                union_legal.update(legal)
+            digest = await self._build_public_digest(game, seats)
+            try:
+                results = await dispatcher.dispatch_night_actions(  # type: ignore[union-attr]
+                    game_id=game.id,
+                    day=game.day_number,
+                    action_kind=action_label,
+                    actors=actors,
+                    seats=seats,
+                    candidate_seats=sorted(union_legal),
+                    public_state_summary=digest,
+                )
+            except Exception:
+                log.exception(
+                    "npc_night_dispatch_failed game=%s day=%d kind=%s",
+                    game.id, game.day_number, action_label,
+                )
+                continue
+            for actor in actors:
+                target = results.get(actor.seat_no)
+                if target is not None and target not in per_actor_legal[actor.seat_no]:
+                    log.info(
+                        "npc_night_decision_illegal_target game=%s seat=%d kind=%s target=%s",
+                        game.id, actor.seat_no, action_label, target,
+                    )
+                    target = None
+                kind = per_actor_kind[actor.seat_no]
+                try:
+                    await self.gs.submit_night_action(
+                        game.id, actor.seat_no, kind, target, game.day_number,
+                    )
+                except Exception:
+                    log.exception(
+                        "npc_night_submit_failed game=%s seat=%d kind=%s",
+                        game.id, actor.seat_no, kind.value,
+                    )
+        _ = seats_by_no  # lint: keep parameter live for log readers
 
     async def _run_night_actions(
         self,
@@ -838,6 +955,45 @@ class LLMAdapter:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    async def _build_public_digest(self, game: Game, seats: Sequence[Seat]) -> str:
+        """Phase-D: render the Master-side public-info digest for an NPC
+        dispatch request. Best-effort — a missing DiscussionService or
+        an empty phase yields an empty string so the NPC sees the
+        historical no-digest behavior.
+        """
+        if self.discussion_service is None:
+            return ""
+        try:
+            from wolfbot.domain.discussion import (
+                make_phase_id as _make_phase_id,
+            )
+            from wolfbot.master.public_digest import build_public_digest
+            from wolfbot.services.discussion_service import (
+                apply_speech_event,
+            )
+
+            phase_id = _make_phase_id(game.id, game.day_number, game.phase)
+            events = list(
+                await self.discussion_service.load_phase(game.id, phase_id)
+            )
+            if not events:
+                return ""
+            state = None
+            for ev in events:
+                state = apply_speech_event(state, ev)
+            if state is None:
+                return ""
+            seat_names = {s.seat_no: s.display_name for s in seats}
+            return build_public_digest(
+                state=state, recent_events=events, seat_names=seat_names,
+            )
+        except Exception:
+            log.exception(
+                "public_digest_build_failed game=%s day=%d",
+                game.id, game.day_number,
+            )
+            return ""
+
     async def _run_votes_via_npc_dispatcher(
         self,
         game: Game,
@@ -901,6 +1057,7 @@ class LLMAdapter:
         for cs in per_voter_candidates.values():
             union_candidates.update(cs)
         dispatcher = self._npc_decision_dispatcher
+        digest = await self._build_public_digest(game, seats)
         try:
             results = await dispatcher.dispatch_votes(  # type: ignore[union-attr]
                 game_id=game.id,
@@ -909,6 +1066,7 @@ class LLMAdapter:
                 voters=voters_to_dispatch,
                 seats=seats,
                 candidate_seats=sorted(union_candidates),
+                public_state_summary=digest,
             )
         except Exception:
             log.exception(

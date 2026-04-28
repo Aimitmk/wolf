@@ -134,6 +134,7 @@ class MockNpcGenerator:
         *,
         logic: LogicPacket,
         request: SpeakRequest,
+        state: object | None = None,
     ) -> NpcGeneratedSpeech | None:
         self.call_count += 1
         script = self._active_script()

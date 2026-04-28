@@ -75,6 +75,7 @@ class GeminiNpcGenerator:
         *,
         logic: LogicPacket,
         request: SpeakRequest,
+        state: object | None = None,
     ) -> NpcGeneratedSpeech | None:
         from google import genai
         from google.genai import types
@@ -94,13 +95,15 @@ class GeminiNpcGenerator:
                 "each NPC bot must declare its persona at startup."
             )
         persona = NPC_PERSONAS_BY_KEY[self._persona_key]
+        # Phase-D: prefer state.role; fall back to SpeakRequest.role.
+        role_value = getattr(state, "role", None) or request.role
         system = _build_system(
             persona,
             max_chars=request.max_chars,
-            role=request.role,
+            role=role_value,
             role_strategy=request.role_strategy,
         )
-        user = _build_user(logic, request)
+        user = _build_user(logic, request, state)
 
         client = genai.Client(
             vertexai=True,
