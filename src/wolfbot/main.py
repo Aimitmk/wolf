@@ -150,6 +150,15 @@ async def _run() -> None:
             from discord.ext import voice_recv
 
             from wolfbot.master.audio_sink import WolfbotAudioSink
+            from wolfbot.master.voice_recv_resilience import (
+                apply_packet_router_resilience,
+            )
+
+            # Patch upstream so a single `OpusError("corrupted stream")` can
+            # no longer kill the RX thread — without this, one bad packet
+            # silences the entire reactive_voice pipeline for the rest of
+            # the game (no STT, no NPC dispatch).
+            apply_packet_router_resilience()
 
             try:
                 channel_id = int(game.main_vc_channel_id)
