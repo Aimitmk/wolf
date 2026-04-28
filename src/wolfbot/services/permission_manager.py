@@ -72,7 +72,9 @@ class PermissionManager:
             except (TypeError, ValueError):
                 vc_channel = None
             if vc_channel is not None:
-                await self._apply_vc_mute(vc_channel, seats, player_by_seat, guild)
+                await self._apply_vc_mute(
+                    vc_channel, seats, player_by_seat, game.phase, guild
+                )
 
         if game.heaven_channel_id:
             heaven = guild.get_channel(int(game.heaven_channel_id))
@@ -233,14 +235,24 @@ class PermissionManager:
         channel: Any,
         seats: Sequence[Seat],
         player_by_seat: dict[int, Player],
+        phase: Phase,
         guild: Any,
     ) -> None:
-        """Reconcile VC speak permission per seat: alive → speak, dead → muted.
+        """Reconcile VC speak permission per human seat.
+
+        Phase rule: humans may speak only when alive AND the phase is
+        DAY_DISCUSSION. Every other phase (NIGHT, vote, runoff, runoff
+        speech) keeps everyone muted so chatter doesn't bleed across
+        phase boundaries. Dead players are always muted.
 
         We use channel-level `set_permissions(speak=False, use_voice_activation=False)`
         rather than `member.edit(mute=True)` so the override is scoped to
-        this game's VC and gets cleared in `on_game_end`.
+        this game's VC and gets cleared in `on_game_end`. NPC bots and
+        Master have no row in `seats` with a `discord_user_id`, so they
+        are never touched here — their TTS playback would break under a
+        channel-scoped speak deny.
         """
+        discussion_active = phase is Phase.DAY_DISCUSSION
         for s in seats:
             if s.discord_user_id is None:
                 continue
@@ -249,11 +261,8 @@ class PermissionManager:
                 continue
             p = player_by_seat.get(s.seat_no)
             alive = True if p is None else bool(p.alive)
-            if alive:
-                # Defensive: if a previous death set speak=False and a
-                # later refresh sees them alive again (shouldn't happen
-                # in this game's lifecycle, but possible during dev /
-                # tests), restore speak.
+            can_speak = alive and discussion_active
+            if can_speak:
                 await self._set_perms(
                     channel,
                     member,

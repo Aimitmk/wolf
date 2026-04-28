@@ -33,6 +33,7 @@ from wolfbot.domain.ws_messages import (
     PlaybackRejected,
     SeatAssigned,
     SeatReleased,
+    SetMuteState,
     SpeakRequest,
     TtsFailed,
     TtsFinished,
@@ -91,6 +92,10 @@ class NpcClient:
     # leave. Optional so tests / pure-message-loop scenarios can omit them.
     on_vc_join: Callable[[], Awaitable[None]] | None = None
     on_vc_leave: Callable[[], Awaitable[None]] | None = None
+    # Self-mute hook: Master sends `set_mute_state` to flip the bot's own
+    # voice self-mute (mic icon) so dead seats / non-discussion phases are
+    # visually obvious. Optional so tests can omit it.
+    on_set_mute: Callable[[bool], Awaitable[None]] | None = None
 
     _logic_cache: dict[str, LogicPacket] = field(default_factory=dict)
     _pending_playback: dict[str, _PendingForPlayback] = field(default_factory=dict)
@@ -137,6 +142,8 @@ class NpcClient:
             await self._on_seat_assigned(SeatAssigned.model_validate(payload))
         elif t == "seat_released":
             await self._on_seat_released(SeatReleased.model_validate(payload))
+        elif t == "set_mute_state":
+            await self._on_set_mute_state(SetMuteState.model_validate(payload))
         elif t == "logic_packet":
             self._on_logic_packet(LogicPacket.model_validate(payload))
         elif t == "speak_request":
@@ -187,6 +194,24 @@ class NpcClient:
                     "npc_vc_join_failed npc_id=%s seat=%d",
                     msg.npc_id,
                     msg.seat_no,
+                )
+
+    async def _on_set_mute_state(self, msg: SetMuteState) -> None:
+        if msg.npc_id != self.config.npc_id:
+            return
+        log.info(
+            "npc_set_mute_state npc_id=%s self_mute=%s",
+            msg.npc_id,
+            msg.self_mute,
+        )
+        if self.on_set_mute is not None:
+            try:
+                await self.on_set_mute(msg.self_mute)
+            except Exception:
+                log.exception(
+                    "npc_set_mute_failed npc_id=%s self_mute=%s",
+                    msg.npc_id,
+                    msg.self_mute,
                 )
 
     async def _on_seat_released(self, msg: SeatReleased) -> None:

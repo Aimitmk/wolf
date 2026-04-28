@@ -79,6 +79,22 @@ class SeatReleased(BaseEnvelope):
     reason: str = "game_ended"
 
 
+class SetMuteState(BaseEnvelope):
+    """Master → NPC: set this bot's voice *self*-mute.
+
+    Self-mute (vs. server-mute via ``Member.edit(mute=...)``) sidesteps
+    both the MUTE_MEMBERS permission requirement and Discord's role
+    hierarchy rule that the moderator's role must be strictly above the
+    target. Each NPC owns its own voice state, so it can flip self-mute
+    via gateway opcode without any admin power. Used to visually flag
+    dead seats and non-discussion phases — viewers see a mic-muted icon
+    next to dead/idle bots."""
+
+    type: Literal["set_mute_state"] = "set_mute_state"
+    npc_id: str
+    self_mute: bool
+
+
 class Heartbeat(BaseEnvelope):
     type: Literal["heartbeat"] = "heartbeat"
     npc_id: str | None = None  # populated by NPC bots; None for voice-ingest
@@ -286,6 +302,7 @@ __all__ = [
     "RegistryUpdate",
     "SeatAssigned",
     "SeatReleased",
+    "SetMuteState",
     "SpeakRequest",
     "SpeakResult",
     "SpeechEventPayload",

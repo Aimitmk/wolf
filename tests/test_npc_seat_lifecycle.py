@@ -26,6 +26,7 @@ from wolfbot.domain.ws_messages import (
     NpcRegistered,
     SeatAssigned,
     SeatReleased,
+    SetMuteState,
 )
 from wolfbot.master.npc_registry import InMemoryNpcRegistry
 from wolfbot.npc.client import NpcClient, NpcClientConfig
@@ -147,6 +148,53 @@ async def test_npc_registered_with_assigned_seat_triggers_recovery_join() -> Non
     await client.process_message(msg.model_dump_json())
     assert probe.join_calls == 1
     assert client.assigned_seat == 3
+
+
+async def test_set_mute_state_invokes_on_set_mute_for_self() -> None:
+    """`set_mute_state` flips the bot's voice self-mute via the
+    `on_set_mute` callback. Mismatched npc_id is ignored."""
+    captured: list[bool] = []
+
+    async def on_set_mute(self_mute: bool) -> None:
+        captured.append(self_mute)
+
+    probe = _VcCallbackProbe()
+    client = _make_client(probe)
+    client.on_set_mute = on_set_mute
+
+    await client.process_message(
+        SetMuteState(
+            ts=1, trace_id="t", npc_id="npc_setsu", self_mute=True
+        ).model_dump_json()
+    )
+    await client.process_message(
+        SetMuteState(
+            ts=2, trace_id="t", npc_id="npc_setsu", self_mute=False
+        ).model_dump_json()
+    )
+    # Mismatched npc_id — must be a no-op.
+    await client.process_message(
+        SetMuteState(
+            ts=3, trace_id="t", npc_id="someone_else", self_mute=True
+        ).model_dump_json()
+    )
+    assert captured == [True, False]
+
+
+async def test_set_mute_state_callback_failure_does_not_propagate() -> None:
+    async def boom(_self_mute: bool) -> None:
+        raise RuntimeError("voice gateway unavailable")
+
+    probe = _VcCallbackProbe()
+    client = _make_client(probe)
+    client.on_set_mute = boom
+
+    # Must NOT raise.
+    await client.process_message(
+        SetMuteState(
+            ts=1, trace_id="t", npc_id="npc_setsu", self_mute=True
+        ).model_dump_json()
+    )
 
 
 async def test_seat_assigned_join_failure_does_not_propagate() -> None:

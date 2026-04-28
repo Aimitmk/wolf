@@ -105,12 +105,39 @@ async def _main() -> None:
                 )
                 return
             try:
-                vc_client_ref[0] = await vc_channel.connect()
-                log.info("npc_vc_joined channel=%s", settings.MAIN_VOICE_CHANNEL_ID)
+                # Connect already self-muted so the moment the bot lands in
+                # VC viewers see the mic-muted icon. Master flips it to
+                # `self_mute=False` via `set_mute_state` once the game
+                # enters DAY_DISCUSSION for an alive seat.
+                vc_client_ref[0] = await vc_channel.connect(self_mute=True)
+                log.info(
+                    "npc_vc_joined channel=%s self_mute=True",
+                    settings.MAIN_VOICE_CHANNEL_ID,
+                )
             except Exception:
                 log.exception(
                     "npc_vc_join_failed channel=%s", settings.MAIN_VOICE_CHANNEL_ID
                 )
+
+    async def _set_self_mute(self_mute: bool) -> None:
+        """Flip the bot's own voice self-mute via the gateway."""
+        async with vc_lock:
+            vc = vc_client_ref[0]
+            if vc is None or not vc.is_connected():
+                return
+            guild = bot.get_guild(settings.DISCORD_GUILD_ID)
+            if guild is None:
+                return
+            channel = vc.channel
+            if channel is None:
+                return
+            try:
+                await guild.change_voice_state(
+                    channel=channel, self_mute=self_mute, self_deaf=False
+                )
+                log.info("npc_self_mute_applied self_mute=%s", self_mute)
+            except Exception:
+                log.exception("npc_self_mute_failed self_mute=%s", self_mute)
 
     async def _ensure_vc_left() -> None:
         async with vc_lock:
@@ -229,6 +256,7 @@ async def _main() -> None:
         now_ms=_now_ms,
         on_vc_join=_ensure_vc_joined,
         on_vc_leave=_ensure_vc_left,
+        on_set_mute=_set_self_mute,
     )
 
     # Register with Master

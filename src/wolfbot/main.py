@@ -48,6 +48,8 @@ async def _run() -> None:
 
     registry = EngineRegistry()
     discord_adapter = DiscordBotAdapter(bot=bot, repo=repo, settings=settings)
+    # NpcRegistry is created right below; late-bind so `apply_permissions`
+    # can server-mute NPC bots on phase changes / death.
 
     # NPC registry is always created so /wolf start can consult it for
     # reactive_voice seat backfill. The WS server (which actually accepts
@@ -55,6 +57,7 @@ async def _run() -> None:
     from wolfbot.master.npc_registry import InMemoryNpcRegistry
 
     npc_registry = InMemoryNpcRegistry()
+    discord_adapter.set_npc_registry(npc_registry)
 
     speech_store = SqliteSpeechEventStore(repo._db)
 

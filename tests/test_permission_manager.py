@@ -259,8 +259,35 @@ async def test_apply_reconciles_vc_speak_for_dead_seats() -> None:
     vc_calls = dict(ch["vc"]._perm_calls)
     # Dead seat 4 → muted
     assert vc_calls[100 + 4]["speak"] is False
-    # Alive seats → speak permitted
+    # Alive seats during DAY_DISCUSSION → speak permitted
     assert vc_calls[100 + 1]["speak"] is True
+
+
+async def test_apply_mutes_alive_humans_outside_discussion() -> None:
+    """Humans must only speak during DAY_DISCUSSION. Vote / runoff /
+    night phases keep everyone muted so chatter doesn't bleed across
+    phase boundaries."""
+    for muted_phase in (
+        Phase.DAY_VOTE,
+        Phase.DAY_RUNOFF,
+        Phase.DAY_RUNOFF_SPEECH,
+        Phase.NIGHT,
+    ):
+        bot, _, ch, game = _setup_world()
+        game.phase = muted_phase
+        pm = PermissionManager(bot=bot)
+        seats = _nine_seats()
+        players = _players(ROLES)  # all alive
+
+        await pm.apply(game, seats, players)
+
+        vc_calls = dict(ch["vc"]._perm_calls)
+        # Every alive human seat is muted in non-discussion phases.
+        for seat_no in range(1, 10):
+            assert vc_calls[100 + seat_no]["speak"] is False, (
+                f"phase={muted_phase} seat={seat_no} should be muted"
+            )
+            assert vc_calls[100 + seat_no]["use_voice_activation"] is False
 
 
 async def test_on_game_end_clears_vc_overrides() -> None:

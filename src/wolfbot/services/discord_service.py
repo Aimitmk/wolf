@@ -146,6 +146,10 @@ class DiscordBotAdapter:
         # True to fully consume the post (suppress the main text-channel
         # output); False to fall through unchanged.
         self._narrator = public_post_narrator
+        # Late-bound: NPC registry (only set in reactive_voice mode) lets
+        # us look up bot user IDs to apply server-mute on non-discussion
+        # phases / death so dead NPCs visually show a red mute icon.
+        self._npc_registry: NpcRegistry | None = None
 
     def set_game_service(self, gs: GameService) -> None:
         self._gs_slot["gs"] = gs
@@ -154,6 +158,10 @@ class DiscordBotAdapter:
         """Late-bind the narrator. Used by main.py when the reactive_voice
         pipeline is wired after `DiscordBotAdapter` construction."""
         self._narrator = narrator
+
+    def set_npc_registry(self, npc_registry: NpcRegistry | None) -> None:
+        """Late-bind the NPC registry for bot-user server-mute reconciliation."""
+        self._npc_registry = npc_registry
 
     @property
     def gs(self) -> GameService:
@@ -167,6 +175,7 @@ class DiscordBotAdapter:
         self, game: Game, seats: Sequence[Seat], players: Sequence[Player]
     ) -> None:
         await self.perms.apply(game, seats, players)
+        await self._apply_npc_server_mute(game, players)
 
     async def kill_permissions(
         self, game: Game, seats: Sequence[Seat], seat_no: int, was_wolf: bool
@@ -175,9 +184,95 @@ class DiscordBotAdapter:
 
     async def reconcile(self, game: Game, seats: Sequence[Seat], players: Sequence[Player]) -> None:
         await self.perms.apply(game, seats, players)
+        await self._apply_npc_server_mute(game, players)
 
     async def on_game_end(self, game: Game, seats: Sequence[Seat]) -> None:
         await self.perms.on_game_end(game, seats)
+        # Clear server-mute on every NPC bot attached to this game so the
+        # next /wolf start finds them in a clean state. SeatReleased makes
+        # them disconnect, but Discord's server-mute flag persists across
+        # reconnects until cleared.
+        await self._clear_npc_server_mute(game)
+
+    async def _apply_npc_server_mute(
+        self, game: Game, players: Sequence[Player]
+    ) -> None:
+        """Tell each NPC bot to flip its *own* voice self-mute via WS.
+
+        We deliberately drive self-mute (not server-mute via
+        ``Member.edit(mute=...)``) because:
+          - server-mute requires MUTE_MEMBERS *and* the Master role to
+            sit strictly above every NPC bot's role in the guild
+            hierarchy — both fragile under typical multi-bot setups.
+          - self-mute is purely a per-client flag the bot owns; no
+            admin power needed.
+
+        Each NPC's :class:`NpcClient` handles ``set_mute_state`` and
+        calls ``Guild.change_voice_state(self_mute=...)`` on its own
+        voice connection. Visible result: the mic-muted icon next to
+        dead seats / non-discussion-phase bots.
+
+        Rule: a bot is unmuted only when its assigned seat is alive
+        AND the phase is DAY_DISCUSSION. Every other state mutes it.
+        """
+        if self._npc_registry is None:
+            return
+        from wolfbot.domain.ws_messages import SetMuteState
+
+        discussion_active = game.phase is Phase.DAY_DISCUSSION
+        player_by_seat = {p.seat_no: p for p in players}
+        now_ms = int(asyncio.get_running_loop().time() * 1000)
+        for entry in self._npc_registry.assigned_to_game(game.id):
+            seat_no = entry.assigned_seat
+            if seat_no is None or entry.send is None:
+                continue
+            player = player_by_seat.get(seat_no)
+            alive = True if player is None else bool(player.alive)
+            should_mute = not (alive and discussion_active)
+            try:
+                msg = SetMuteState(
+                    ts=now_ms,
+                    trace_id=f"mute-{game.id}-{seat_no}-{int(should_mute)}",
+                    npc_id=entry.npc_id,
+                    self_mute=should_mute,
+                )
+                await entry.send(msg.model_dump_json())
+            except Exception:
+                log.exception(
+                    "npc_set_mute_send_failed npc=%s seat=%d self_mute=%s",
+                    entry.npc_id,
+                    seat_no,
+                    should_mute,
+                )
+
+    async def _clear_npc_server_mute(self, game: Game) -> None:
+        """Send self_mute=False to every NPC attached to this game.
+
+        Best-effort cleanup at game end. SeatReleased makes them leave
+        VC anyway, but this keeps the protocol in a consistent state in
+        case a bot stays connected for a brief window before leaving.
+        """
+        if self._npc_registry is None:
+            return
+        from wolfbot.domain.ws_messages import SetMuteState
+
+        now_ms = int(asyncio.get_running_loop().time() * 1000)
+        for entry in self._npc_registry.assigned_to_game(game.id):
+            if entry.send is None:
+                continue
+            try:
+                msg = SetMuteState(
+                    ts=now_ms,
+                    trace_id=f"mute-clear-{game.id}-{entry.npc_id}",
+                    npc_id=entry.npc_id,
+                    self_mute=False,
+                )
+                await entry.send(msg.model_dump_json())
+            except Exception:
+                log.exception(
+                    "npc_set_mute_clear_failed npc=%s",
+                    entry.npc_id,
+                )
 
     # ------------------------------------------------------ channel posts
     async def _maybe_narrate(self, game: Game, kind: str, text: str) -> bool:
