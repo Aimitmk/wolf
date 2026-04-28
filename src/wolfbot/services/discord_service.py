@@ -504,7 +504,28 @@ class DiscordBotAdapter:
             log.exception("announce_recovery failed %s", game.id)
 
     # ------------------------------------------------------ helpers
-    def _main_text(self, game: Game) -> discord.TextChannel | None:
+    def _main_text(
+        self, game: Game
+    ) -> discord.TextChannel | discord.VoiceChannel | None:
+        """Resolve the channel where Master should post free-form text.
+
+        In ``reactive_voice`` mode Master must never leak text to the
+        guild's main text channel — every word out of Master is supposed
+        to land in either DM or the VC's attached text chat. We redirect
+        to the VC's text chat (Discord voice channels carry an attached
+        text chat at the same channel id since 2022; both ``VoiceChannel``
+        and ``TextChannel`` are ``Messageable``). In ``rounds`` mode the
+        legacy main-text behavior is preserved.
+        """
+        if game.discussion_mode == "reactive_voice" and game.main_vc_channel_id:
+            try:
+                vc_channel_id = int(game.main_vc_channel_id)
+            except (TypeError, ValueError):
+                vc_channel_id = None
+            if vc_channel_id is not None:
+                vc = self.bot.get_channel(vc_channel_id)
+                if isinstance(vc, discord.VoiceChannel | discord.TextChannel):
+                    return vc
         channel = self.bot.get_channel(int(game.main_text_channel_id))
         if isinstance(channel, discord.TextChannel):
             return channel
@@ -1148,6 +1169,12 @@ class WolfCog(commands.Cog):
                 "ホストまたは管理者のみ abort できます。", ephemeral=True
             )
             return
+        # `host_abort` fans SeatReleased to every online NPC (each one
+        # then runs `change_voice_state` against the gateway). With 9
+        # bots this routinely overshoots Discord's 3 s interaction
+        # deadline, surfacing as "アプリケーションが応答しませんでした".
+        # Defer first, then reply via followup.
+        await interaction.response.defer(thinking=True)
         ok = await self.gs.host_abort(game.id)
         if ok:
             engine = self.registry.detach(game.id)
@@ -1156,9 +1183,9 @@ class WolfCog(commands.Cog):
                     await engine.stop()
                 except Exception:
                     log.exception("engine.stop failed during abort %s", game.id)
-            await interaction.response.send_message("🛑 ゲームを強制終了しました。")
+            await interaction.followup.send("🛑 ゲームを強制終了しました。")
         else:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "終了できませんでした (既に終了している可能性があります)。",
                 ephemeral=True,
             )

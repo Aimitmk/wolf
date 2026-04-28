@@ -119,6 +119,29 @@ async def _main() -> None:
                     "npc_vc_join_failed channel=%s", settings.MAIN_VOICE_CHANNEL_ID
                 )
 
+    async def _post_to_vc_chat(text: str) -> None:
+        """Post `text` to the VC's attached text chat from this bot's
+        own account. Lets each NPC's spoken line appear in chat
+        attributed to its own avatar / persona, instead of all lines
+        coming from Master. Falls back silently if the channel can't
+        be resolved — voice playback still proceeds."""
+        guild = bot.get_guild(settings.DISCORD_GUILD_ID)
+        if guild is None:
+            return
+        channel = guild.get_channel(settings.MAIN_VOICE_CHANNEL_ID)
+        if not isinstance(
+            channel, discord.VoiceChannel | discord.TextChannel
+        ):
+            log.warning(
+                "npc_post_chat_no_channel id=%s",
+                settings.MAIN_VOICE_CHANNEL_ID,
+            )
+            return
+        try:
+            await channel.send(text)
+        except Exception:
+            log.exception("npc_post_chat_send_failed channel=%s", channel.id)
+
     async def _set_self_mute(self_mute: bool) -> None:
         """Flip the bot's own voice self-mute via the gateway."""
         async with vc_lock:
@@ -142,16 +165,33 @@ async def _main() -> None:
     async def _ensure_vc_left() -> None:
         async with vc_lock:
             vc = vc_client_ref[0]
-            if vc is None:
-                return
-            try:
-                if vc.is_connected():
-                    await vc.disconnect()
-                    log.info("npc_vc_left channel=%s", settings.MAIN_VOICE_CHANNEL_ID)
-            except Exception:
-                log.exception("npc_vc_leave_failed")
-            finally:
-                vc_client_ref[0] = None
+            if vc is not None:
+                try:
+                    if vc.is_connected():
+                        await vc.disconnect()
+                        log.info(
+                            "npc_vc_left channel=%s",
+                            settings.MAIN_VOICE_CHANNEL_ID,
+                        )
+                except Exception:
+                    log.exception("npc_vc_leave_failed")
+                finally:
+                    vc_client_ref[0] = None
+            # Belt-and-braces: even when this process never tracked a
+            # VoiceClient (e.g. master restart recovered a game in
+            # WAITING_HOST_DECISION, so seat_assigned was never sent and
+            # _ensure_vc_joined never ran), Discord may still show a
+            # ghost connection from a previous bot session that didn't
+            # fully tear down. Push a `change_voice_state(channel=None)`
+            # opcode so the bot is force-evicted from any voice channel
+            # the gateway still associates with this user.
+            guild = bot.get_guild(settings.DISCORD_GUILD_ID)
+            if guild is not None:
+                try:
+                    await guild.change_voice_state(channel=None)
+                    log.info("npc_vc_state_cleared")
+                except Exception:
+                    log.exception("npc_vc_state_clear_failed")
 
     # Start Discord in background
     discord_task = asyncio.create_task(
@@ -257,6 +297,7 @@ async def _main() -> None:
         on_vc_join=_ensure_vc_joined,
         on_vc_leave=_ensure_vc_left,
         on_set_mute=_set_self_mute,
+        on_post_chat=_post_to_vc_chat,
     )
 
     # Register with Master

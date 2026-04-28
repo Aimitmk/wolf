@@ -72,6 +72,15 @@ async def _run() -> None:
             game = await repo.load_game(game_id)
             if game is None:
                 return
+            # In reactive_voice mode each NPC bot posts its own utterance
+            # directly to VC chat from its own account (see
+            # `NpcClient.on_post_chat`), so a duplicate Master-side post
+            # would either repeat NPC lines or surface human STT
+            # transcripts that the user would rather not see twice. Skip
+            # PLAYER_SPEECH unconditionally for this mode; rounds mode
+            # still goes through the legacy adapter path.
+            if game.discussion_mode == "reactive_voice" and kind == "PLAYER_SPEECH":
+                return
             await discord_adapter.post_public(game, text, kind)
 
     discussion_service = DiscussionService(
@@ -300,34 +309,41 @@ async def _run() -> None:
         # Master joins the game's VC the first time the game enters a
         # public-speech phase. Idempotent so re-entries are no-ops.
         g_for_vc = await repo.load_game(game_id)
-        if g_for_vc is not None:
-            await _master_join_vc_for_game(g_for_vc)
-            # Seed the phase_baseline sentinel so SpeakArbiter's
-            # `rebuild_public_state` has an alive-seat baseline to fold
-            # against. In rounds mode this happens inside
-            # `submit_llm_discussion_rounds`, but reactive_voice skips
-            # that batch entirely — without seeding here, the arbiter
-            # silently no-ops on every dispatch attempt because the
-            # rebuilt state is None. begin_phase_if_absent is idempotent
-            # across re-entries / recovery.
-            if g_for_vc.discussion_mode == "reactive_voice":
-                players_for_baseline = await repo.load_players(game_id)
-                alive_seat_nos = sorted(
-                    p.seat_no for p in players_for_baseline if p.alive
+        # Bail when the game is already ended — this callback can run a
+        # few hundred ms after `/wolf abort` if a transition's
+        # `_dispatch_submissions` was in flight when abort fired. Without
+        # this guard Master rejoins VC right after abort just to drop
+        # the call again seconds later, surfacing as the "Master came
+        # back" flicker in the user's voice channel.
+        if g_for_vc is None or g_for_vc.ended_at is not None:
+            return
+        await _master_join_vc_for_game(g_for_vc)
+        # Seed the phase_baseline sentinel so SpeakArbiter's
+        # `rebuild_public_state` has an alive-seat baseline to fold
+        # against. In rounds mode this happens inside
+        # `submit_llm_discussion_rounds`, but reactive_voice skips
+        # that batch entirely — without seeding here, the arbiter
+        # silently no-ops on every dispatch attempt because the
+        # rebuilt state is None. begin_phase_if_absent is idempotent
+        # across re-entries / recovery.
+        if g_for_vc.discussion_mode == "reactive_voice":
+            players_for_baseline = await repo.load_players(game_id)
+            alive_seat_nos = sorted(
+                p.seat_no for p in players_for_baseline if p.alive
+            )
+            try:
+                await discussion_service.begin_phase_if_absent(
+                    game_id=game_id,
+                    day=g_for_vc.day_number,
+                    phase=g_for_vc.phase,
+                    alive_seat_nos=alive_seat_nos,
                 )
-                try:
-                    await discussion_service.begin_phase_if_absent(
-                        game_id=game_id,
-                        day=g_for_vc.day_number,
-                        phase=g_for_vc.phase,
-                        alive_seat_nos=alive_seat_nos,
-                    )
-                except Exception:
-                    log.exception(
-                        "phase_baseline_seed_failed game=%s phase=%s",
-                        game_id,
-                        g_for_vc.phase,
-                    )
+            except Exception:
+                log.exception(
+                    "phase_baseline_seed_failed game=%s phase=%s",
+                    game_id,
+                    g_for_vc.phase,
+                )
         # Assign online NPC bots to their game seats so the arbiter can
         # pick them. No-op when `/wolf start`'s pre-game callback already
         # claimed them.
@@ -336,19 +352,28 @@ async def _run() -> None:
             await _reactive_phase_cb[0].try_dispatch_next(game_id)
 
     async def _on_reactive_game_end(game_id: str) -> None:
-        """Release every NPC bot attached to this game so they leave VC.
+        """Release every NPC bot so they leave VC.
 
         Called from `GameService` at natural end + host abort. Sends a
-        `seat_released` to each, then clears the registry's assignment
-        fields so the bot is available for the next /wolf start.
+        `seat_released` to *every online NPC* — not just those whose
+        registry row still pins them to this game — so any bot that
+        ended up in VC (e.g. via a previous abort that left a stale WS
+        connection or a dropped assignment) is reliably evicted before
+        the next /wolf start. Idempotent on the NPC side.
         """
         if not _npc_registry_ref:
             return
         from wolfbot.domain.ws_messages import SeatReleased
 
         npc_reg = _npc_registry_ref[0]
-        attached = list(npc_reg.assigned_to_game(game_id))
-        for entry in attached:
+        # Union: bots assigned to *this* game + every online bot whose
+        # registry row carries no game assignment but might still be in
+        # VC. We don't filter strictly because abort must be a sweep, not
+        # a precision strike.
+        attached = {e.npc_id: e for e in npc_reg.assigned_to_game(game_id)}
+        for e in npc_reg.all_online():
+            attached.setdefault(e.npc_id, e)
+        for entry in attached.values():
             if entry.send is not None:
                 try:
                     msg = SeatReleased(
@@ -489,22 +514,20 @@ async def _run() -> None:
         )
 
         async def _post_to_vc_chat(game: Any, text: str) -> None:
-            """Post `text` to the VC's attached text chat. Falls back to
-            the main text channel if the VC channel can't be resolved.
+            """Post `text` to the VC's attached text chat.
 
-            Discord voice channels (since 2022) carry an attached text
-            chat reachable at the same channel id; both `VoiceChannel`
-            and `TextChannel` implement `Messageable`, so we narrow on
-            those two before sending."""
+            In reactive_voice mode Master is forbidden from leaking text
+            into the guild's main text channel — every word goes to DM
+            or VC. Discord voice channels (since 2022) carry an attached
+            text chat reachable at the same channel id; both
+            ``VoiceChannel`` and ``TextChannel`` are ``Messageable``. If
+            the VC channel can't be resolved we drop the message rather
+            than fall back to main text — silence beats a leak."""
             try:
                 channel_id: int | None = int(game.main_vc_channel_id)
             except (TypeError, ValueError):
                 channel_id = None
             channel = bot.get_channel(channel_id) if channel_id else None
-            if not isinstance(
-                channel, discord.TextChannel | discord.VoiceChannel
-            ):
-                channel = bot.get_channel(int(game.main_text_channel_id))
             if not isinstance(
                 channel, discord.TextChannel | discord.VoiceChannel
             ):
@@ -581,6 +604,13 @@ async def _run() -> None:
             template applies.
             """
             if game.discussion_mode != "reactive_voice":
+                return False
+            # Defensive: an in-flight transition's `post_public` can land
+            # *after* `/wolf abort` has already torn the game down. We
+            # must not lazy-join VC for a corpse game — that's exactly
+            # the "Master came back after abort" flicker.
+            fresh = await repo.load_game(game.id)
+            if fresh is None or fresh.ended_at is not None:
                 return False
             if master_vc_ref[0] is None:
                 # Lazy-join: SETUP_COMPLETE and the day-1 PHASE_CHANGE are

@@ -96,6 +96,11 @@ class NpcClient:
     # voice self-mute (mic icon) so dead seats / non-discussion phases are
     # visually obvious. Optional so tests can omit it.
     on_set_mute: Callable[[bool], Awaitable[None]] | None = None
+    # Self-post hook: when this NPC's TTS is authorized, post the spoken
+    # text to the VC's attached chat from this bot's own account so the
+    # speech is attributed (avatar + name) instead of being mirrored by
+    # Master after the fact. Called once per authorized utterance.
+    on_post_chat: Callable[[str], Awaitable[None]] | None = None
 
     _logic_cache: dict[str, LogicPacket] = field(default_factory=dict)
     _pending_playback: dict[str, _PendingForPlayback] = field(default_factory=dict)
@@ -299,6 +304,18 @@ class NpcClient:
                 audio_size_bytes=len(tts_result.audio),
             ).model_dump_json()
         )
+        # Post the spoken text to VC chat from this bot's own account
+        # so the message is attributed to the speaking persona — not to
+        # Master. Best-effort: a chat-post failure must not block the
+        # voice playback that follows.
+        if self.on_post_chat is not None:
+            try:
+                await self.on_post_chat(pending.text)
+            except Exception:
+                log.exception(
+                    "npc_post_chat_failed request=%s",
+                    auth.request_id,
+                )
         # Playback (gated — never plays without authorization).
         try:
             started, finished = await self.playback.play(

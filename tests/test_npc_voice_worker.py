@@ -379,6 +379,84 @@ def test_npc_bot_main_module_loads() -> None:
     assert hasattr(mod, "main")
 
 
+async def test_on_post_chat_invoked_with_spoken_text() -> None:
+    """When TTS is authorized, NpcClient must hand the spoken text to
+    `on_post_chat` so each NPC posts its own line to VC chat (instead
+    of Master mirroring everyone's speech)."""
+    gen = FakeNpcGenerator(
+        scripted=[
+            NpcGeneratedSpeech(
+                text="そうかもしれないね",
+                intent="speak",
+                used_logic_ids=(),
+                estimated_duration_ms=900,
+            )
+        ]
+    )
+    tts = FakeTtsService(scripted=[TtsResult(audio=b"audio", duration_ms=900)])
+    playback = FakeVoicePlayback(started_at_ms=10, finished_at_ms=910)
+    client, _captured = _make_client(generator=gen, tts=tts, playback=playback)
+
+    posted: list[str] = []
+
+    async def on_post_chat(text: str) -> None:
+        posted.append(text)
+
+    client.on_post_chat = on_post_chat
+
+    await client.process_message(_make_logic().model_dump_json())
+    await client.process_message(_make_request().model_dump_json())
+    await client.process_message(
+        PlaybackAuthorized(
+            ts=2,
+            trace_id="t",
+            request_id="sr1",
+            npc_id="npc_p2",
+            speech_event_id="ev1",
+            playback_deadline_ms=10_000,
+        ).model_dump_json()
+    )
+    assert posted == ["そうかもしれないね"]
+    # Playback still ran — chat post is best-effort, not gating.
+    assert playback.plays == [(b"audio", 48_000)]
+
+
+async def test_on_post_chat_failure_does_not_block_playback() -> None:
+    gen = FakeNpcGenerator(
+        scripted=[
+            NpcGeneratedSpeech(
+                text="えっと",
+                intent="speak",
+                used_logic_ids=(),
+                estimated_duration_ms=200,
+            )
+        ]
+    )
+    tts = FakeTtsService(scripted=[TtsResult(audio=b"a", duration_ms=200)])
+    playback = FakeVoicePlayback(started_at_ms=10, finished_at_ms=210)
+    client, _captured = _make_client(generator=gen, tts=tts, playback=playback)
+
+    async def boom(_text: str) -> None:
+        raise RuntimeError("vc chat unreachable")
+
+    client.on_post_chat = boom
+
+    await client.process_message(_make_logic().model_dump_json())
+    await client.process_message(_make_request().model_dump_json())
+    # Must NOT raise; playback proceeds.
+    await client.process_message(
+        PlaybackAuthorized(
+            ts=2,
+            trace_id="t",
+            request_id="sr1",
+            npc_id="npc_p2",
+            speech_event_id="ev1",
+            playback_deadline_ms=10_000,
+        ).model_dump_json()
+    )
+    assert playback.plays == [(b"a", 48_000)]
+
+
 async def test_tts_finished_includes_correct_duration() -> None:
     gen = FakeNpcGenerator(
         scripted=[
