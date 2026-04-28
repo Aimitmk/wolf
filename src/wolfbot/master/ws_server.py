@@ -39,6 +39,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from wolfbot.domain.ws_messages import (
     Heartbeat,
+    NightActionDecision,
     NpcRegister,
     NpcRegistered,
     PlaybackFailed,
@@ -52,6 +53,7 @@ from wolfbot.domain.ws_messages import (
     TtsFinished,
     VadSpeechEnded,
     VadSpeechStarted,
+    VoteDecision,
 )
 from wolfbot.master.npc_registry import NpcRegistry
 
@@ -179,6 +181,12 @@ class MasterHandlers:
     on_vad_started: Callable[[VadSpeechStarted, ConnectionContext], Awaitable[None]] | None = None
     on_vad_ended: Callable[[VadSpeechEnded, ConnectionContext], Awaitable[None]] | None = None
     on_stt_failed: Callable[[SttFailed, ConnectionContext], Awaitable[None]] | None = None
+    on_vote_decision: (
+        Callable[[VoteDecision, ConnectionContext], Awaitable[None]] | None
+    ) = None
+    on_night_action_decision: (
+        Callable[[NightActionDecision, ConnectionContext], Awaitable[None]] | None
+    ) = None
     now_ms: Callable[[], int] = field(default=_now_ms_default)
 
     def install(self, registry_: HandlerRegistry) -> None:
@@ -193,6 +201,8 @@ class MasterHandlers:
         registry_.add("vad_speech_started", self._handle_vad_started)
         registry_.add("vad_speech_ended", self._handle_vad_ended)
         registry_.add("stt_failed", self._handle_stt_failed)
+        registry_.add("vote_decision", self._handle_vote_decision)
+        registry_.add("night_action_decision", self._handle_night_action_decision)
 
     async def _handle_register(self, payload: dict[str, Any], ctx: ConnectionContext) -> None:
         msg = NpcRegister.model_validate(payload)
@@ -269,6 +279,20 @@ class MasterHandlers:
         msg = SttFailed.model_validate(payload)
         if self.on_stt_failed is not None:
             await self.on_stt_failed(msg, ctx)
+
+    async def _handle_vote_decision(
+        self, payload: dict[str, Any], ctx: ConnectionContext
+    ) -> None:
+        msg = VoteDecision.model_validate(payload)
+        if self.on_vote_decision is not None:
+            await self.on_vote_decision(msg, ctx)
+
+    async def _handle_night_action_decision(
+        self, payload: dict[str, Any], ctx: ConnectionContext
+    ) -> None:
+        msg = NightActionDecision.model_validate(payload)
+        if self.on_night_action_decision is not None:
+            await self.on_night_action_decision(msg, ctx)
 
 
 # ---------------------------------------------------------------- real WS server

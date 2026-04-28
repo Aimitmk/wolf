@@ -392,6 +392,103 @@ class OpenAICompatibleNpcGenerator:
         return _build_speech_from_json(data)
 
 
+    async def decide_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema: dict[str, object],
+    ) -> str:
+        """Phase-D: structured-output decision call (vote / night action).
+
+        Reuses this generator's provider config + auth so each persona's
+        `NPC_LLM_*` doubles as both speech and decision backend without
+        plumbing a separate client. The caller is `npc/decision_service.py`
+        — it builds the prompt and validates the parsed result.
+
+        Returns raw response text (a JSON string). On any provider error
+        the exception propagates up so the dispatcher can record a
+        timeout / abstain.
+        """
+        from openai import AsyncOpenAI
+
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            extract_openai_tokens,
+            log_llm_call,
+        )
+
+        client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self.config.base_url,
+        )
+        kwargs: dict[str, object] = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": self.config.temperature,
+            "timeout": self.config.timeout,
+        }
+        if self.config.mode == "json_schema":
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "decision",
+                    "strict": True,
+                    "schema": schema,
+                },
+            }
+        else:
+            kwargs["response_format"] = {"type": "json_object"}
+            kwargs["extra_body"] = {"thinking": {"type": self.config.thinking}}
+            if self.config.thinking == "enabled":
+                kwargs["reasoning_effort"] = self.config.reasoning_effort
+
+        provider_tag = "deepseek" if self.config.mode == "json_object" else "openai-compat"
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        tokens: dict[str, int | None] | None = None
+        try:
+            resp = await client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
+            content = resp.choices[0].message.content or "{}"
+            tokens = extract_openai_tokens(resp)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            log.exception(
+                "npc_decide_failed model=%s base_url=%s",
+                self.config.model, self.config.base_url,
+            )
+            await log_llm_call(
+                role="npc_decision",
+                provider=provider_tag,
+                model=self.config.model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response=None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                file_stem=f"npc_{self._persona_key}",
+            )
+            raise
+
+        await log_llm_call(
+            role="npc_decision",
+            provider=provider_tag,
+            model=self.config.model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=content,
+            latency_ms=timer.elapsed_ms,
+            error=None,
+            tokens=tokens,
+            file_stem=f"npc_{self._persona_key}",
+        )
+        return content
+
+
 def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | None:
     """Map a parsed structured-output dict to ``NpcGeneratedSpeech``.
 

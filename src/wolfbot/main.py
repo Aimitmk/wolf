@@ -589,6 +589,18 @@ async def _run() -> None:
         _reactive_phase_cb.append(arbiter)
         recovery._reactive_voice_sweep = arbiter.reactive_voice_recovery_sweep
 
+        # Phase-D: NPC bot dispatcher for vote / night-action decisions.
+        # Wired into LLMAdapter so reactive_voice games skip the gameplay
+        # decider and ask the NPC bot for its own seat's vote / night
+        # action via WS.
+        from wolfbot.master.decision_dispatcher import NpcDecisionDispatcher
+
+        decision_dispatcher = NpcDecisionDispatcher(
+            registry=npc_registry,
+            now_ms=lambda: int(time.time() * 1000),
+        )
+        llm_adapter._npc_decision_dispatcher = decision_dispatcher
+
         async def _reactive_voice_reenter(game_id: str) -> None:
             # On Master restart, reactive_voice games still in
             # DAY_DISCUSSION need their VC joined again before the
@@ -909,6 +921,12 @@ async def _run() -> None:
             # mark_pending_stt records the segment for finalization timeout.
             arbiter.mark_pending_stt(segment_id)
 
+        async def _on_vote_decision(msg: Any, _ctx: Any) -> None:
+            await decision_dispatcher.on_vote_decision(msg)
+
+        async def _on_night_action_decision(msg: Any, _ctx: Any) -> None:
+            await decision_dispatcher.on_night_action_decision(msg)
+
         master_handlers = MasterHandlers(
             registry=npc_registry,
             on_speak_result=_on_speak_result,
@@ -920,6 +938,8 @@ async def _run() -> None:
             on_vad_started=_on_vad_started,
             on_vad_ended=_on_vad_ended,
             on_stt_failed=_on_stt_failed,
+            on_vote_decision=_on_vote_decision,
+            on_night_action_decision=_on_night_action_decision,
         )
 
         host, port_str = settings.MASTER_WS_LISTEN.rsplit(":", 1)

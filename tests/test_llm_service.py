@@ -15,7 +15,7 @@ import re
 import pytest
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
-from wolfbot.domain.models import Game, LogEntry, NightAction, Seat, Vote
+from wolfbot.domain.models import Game, LogEntry, NightAction, Player, Seat, Vote
 from wolfbot.llm.prompt_builder import task_daytime_speech, task_night_action, task_vote
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.llm_service import LLMAction, LLMAdapter
@@ -122,6 +122,100 @@ async def test_submit_llm_votes_returns_before_decider_completes(repo: SqliteRep
     release.set()
     await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
     assert len(gs.votes) == 2
+
+
+async def test_submit_llm_votes_reactive_voice_routes_to_dispatcher(
+    repo: SqliteRepo,
+) -> None:
+    """Phase-D: reactive_voice games must skip the gameplay decider and ask
+    each NPC bot for its own vote. The decider must not be invoked at all
+    when the dispatcher is wired."""
+    game_rounds, seats = await _seed_vote_game(repo)
+    # Re-create the game row with discussion_mode=reactive_voice so the
+    # branch in submit_llm_votes triggers.
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET discussion_mode=? WHERE id=?",
+        ("reactive_voice", game_rounds.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+    game = (await repo.load_game(game_rounds.id))
+    assert game is not None
+    assert game.discussion_mode == "reactive_voice"
+
+    captured_dispatch: list[dict[int, int | None]] = []
+
+    class _StubDispatcher:
+        async def dispatch_votes(
+            self, *, game_id: str, day: int, round_: int,
+            voters: list[Player],  # type: ignore[name-defined]
+            seats: list[Seat],
+            candidate_seats: list[int],
+            public_state_summary: str = "",
+        ) -> dict[int, int | None]:
+            # Pretend NPC bots all chose seat 1 (the human).
+            result = {v.seat_no: 1 for v in voters}
+            captured_dispatch.append(result)
+            return result
+
+    gs = _FakeGameService()
+
+    class _UnusedDecider:
+        async def decide(self, *args: object, **kwargs: object) -> LLMAction:
+            raise AssertionError("gameplay decider must not be invoked in reactive_voice")
+
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=_UnusedDecider(),  # type: ignore[arg-type]
+        rng=random.Random(0),
+        npc_decision_dispatcher=_StubDispatcher(),
+    )
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+
+    players = await repo.load_players(game.id)
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # Both LLM seats voted seat 1 via the dispatcher.
+    assert len(captured_dispatch) == 1
+    voted_seats = {v[1] for v in gs.votes}
+    assert voted_seats == {2, 3}
+    targets = {v[1]: v[2] for v in gs.votes}
+    assert targets[2] == 1 and targets[3] == 1
+
+
+async def test_submit_llm_votes_reactive_voice_falls_back_when_no_dispatcher(
+    repo: SqliteRepo,
+) -> None:
+    """Without a dispatcher the reactive_voice branch can't fire, so the
+    historical gameplay-LLM decider is still used (back-compat for tests
+    that don't wire the dispatcher)."""
+    game_rounds, seats = await _seed_vote_game(repo)
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET discussion_mode=? WHERE id=?",
+        ("reactive_voice", game_rounds.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+    game = (await repo.load_game(game_rounds.id))
+    assert game is not None
+
+    gs = _FakeGameService()
+    decider = _ScriptedDecider(
+        [
+            LLMAction(intent="vote", target_name="H1", reason_summary="", confidence=0.5),
+            LLMAction(intent="vote", target_name="H1", reason_summary="", confidence=0.5),
+        ]
+    )
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    # No npc_decision_dispatcher configured.
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+
+    players = await repo.load_players(game.id)
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+    # Fell back to the gameplay decider.
+    assert decider.call_count == 2
 
 
 async def test_run_votes_aborts_when_phase_stale_at_dispatch(repo: SqliteRepo) -> None:

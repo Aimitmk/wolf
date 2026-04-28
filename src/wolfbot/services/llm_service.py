@@ -548,6 +548,7 @@ class LLMAdapter:
         rng: random.Random | None = None,
         clock: Callable[[], int] | None = None,
         discussion_service: DiscussionService | None = None,
+        npc_decision_dispatcher: object | None = None,
     ) -> None:
         import time as _time
 
@@ -558,6 +559,11 @@ class LLMAdapter:
         self.rng = rng or random.Random()
         self._clock: Callable[[], int] = clock or (lambda: int(_time.time()))
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Phase-D: when set, reactive_voice games dispatch votes / night
+        # actions to NPC bots via WS instead of using `self.decider`. The
+        # type is widened to `object` to keep this module from importing
+        # the master-side dispatcher (which depends on websockets).
+        self._npc_decision_dispatcher = npc_decision_dispatcher
         # Optional SpeechEvent emission. When None, behavior matches pre-
         # speech-event-bus rounds mode: only PLAYER_SPEECH log + Discord post
         # are produced. When set, every accepted utterance is also recorded
@@ -798,6 +804,11 @@ class LLMAdapter:
 
         `restrict_to_seats` lets `resend_pending_dms` re-dispatch for only the
         LLM seats that still owe a vote after `/wolf extend`.
+
+        Phase-D: when ``game.discussion_mode == "reactive_voice"`` and a
+        decision dispatcher is configured, votes are routed to each
+        seat's NPC bot over WS instead of going through the gameplay
+        decider. Rounds mode (the historical path) is unchanged.
         """
         seats_by_no = {s.seat_no: s for s in seats}
         llm_voters = [
@@ -809,12 +820,132 @@ class LLMAdapter:
             llm_voters = [p for p in llm_voters if p.seat_no in restrict_to_seats]
         if not llm_voters:
             return
-        task = asyncio.create_task(
-            self._run_votes(game, llm_voters, players, seats, candidates, round_),
-            name=f"llm-votes-{game.id}-d{game.day_number}-r{round_}",
-        )
+        if (
+            game.discussion_mode == "reactive_voice"
+            and self._npc_decision_dispatcher is not None
+        ):
+            task = asyncio.create_task(
+                self._run_votes_via_npc_dispatcher(
+                    game, llm_voters, players, seats, candidates, round_
+                ),
+                name=f"npc-votes-{game.id}-d{game.day_number}-r{round_}",
+            )
+        else:
+            task = asyncio.create_task(
+                self._run_votes(game, llm_voters, players, seats, candidates, round_),
+                name=f"llm-votes-{game.id}-d{game.day_number}-r{round_}",
+            )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_votes_via_npc_dispatcher(
+        self,
+        game: Game,
+        llm_voters: Sequence[Player],
+        all_players: Sequence[Player],
+        seats: Sequence[Seat],
+        candidates: Sequence[int] | None,
+        round_: int,
+    ) -> None:
+        """Reactive_voice vote path: fan out DecideVoteRequest, persist
+        targets, default to abstain on offline / timeout.
+        """
+        seats_by_no = {s.seat_no: s for s in seats}
+        expected_phase = Phase.DAY_VOTE if round_ == 0 else Phase.DAY_RUNOFF
+        # Re-load game and stop early if the phase already advanced. The
+        # dispatcher's per-vote round-trip is bounded by request_ttl_ms but
+        # a force-skip / abort can still beat it.
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.ended_at is not None
+            or fresh.phase is not expected_phase
+            or fresh.day_number != game.day_number
+        ):
+            return
+        # Build candidate set per voter — same shape as the decider path.
+        # We fan out only voters who have at least one legal target;
+        # voters with no legal target (e.g. last-survivor edge) abstain.
+        existing_votes = await self.repo.load_votes(
+            game.id, day=game.day_number, round_=round_
+        )
+        voted = {v.voter_seat for v in existing_votes}
+        per_voter_candidates: dict[int, list[int]] = {}
+        voters_to_dispatch: list[Player] = []
+        for v in llm_voters:
+            if v.seat_no in voted:
+                continue
+            if candidates is None:
+                cands = [
+                    s.seat_no
+                    for s in seats
+                    if s.seat_no != v.seat_no
+                    and any(
+                        p.seat_no == s.seat_no and p.alive for p in all_players
+                    )
+                ]
+            else:
+                cands = [
+                    s.seat_no
+                    for s in seats
+                    if s.seat_no in set(candidates) and s.seat_no != v.seat_no
+                ]
+            per_voter_candidates[v.seat_no] = cands
+            voters_to_dispatch.append(v)
+        if not voters_to_dispatch:
+            return
+        # Use the union of all per-voter candidate seats for the dispatch
+        # call — the NPC bot will pick from the seats given. (Each voter's
+        # legal set is identical in practice for the regular vote.)
+        union_candidates: set[int] = set()
+        for cs in per_voter_candidates.values():
+            union_candidates.update(cs)
+        dispatcher = self._npc_decision_dispatcher
+        try:
+            results = await dispatcher.dispatch_votes(  # type: ignore[union-attr]
+                game_id=game.id,
+                day=game.day_number,
+                round_=round_,
+                voters=voters_to_dispatch,
+                seats=seats,
+                candidate_seats=sorted(union_candidates),
+            )
+        except Exception:
+            log.exception(
+                "npc_vote_dispatch_failed game=%s day=%d round=%d",
+                game.id, game.day_number, round_,
+            )
+            return
+        # Persist each result. ``None`` (offline / timeout / explicit
+        # abstain) becomes ``target_seat=None`` on the Vote row so the
+        # viewer surfaces the seat as silent.
+        for voter in voters_to_dispatch:
+            target = results.get(voter.seat_no)
+            # Validate target is in the voter's legal set, otherwise abstain.
+            if target is not None and target not in per_voter_candidates.get(
+                voter.seat_no, []
+            ):
+                log.info(
+                    "npc_vote_decision_illegal_target game=%s seat=%d target=%s",
+                    game.id, voter.seat_no, target,
+                )
+                target = None
+            try:
+                await self.gs.submit_vote(
+                    game.id,
+                    voter.seat_no,
+                    target_seat=target,
+                    round_=round_,
+                    day=game.day_number,
+                )
+            except Exception:
+                log.exception(
+                    "npc_vote_submit_failed game=%s seat=%d round=%d",
+                    game.id, voter.seat_no, round_,
+                )
+        # Touch seats_by_no to keep the parameter live for log readers
+        # auditing the dispatch (lint guard).
+        _ = seats_by_no
 
     async def _run_votes(
         self,

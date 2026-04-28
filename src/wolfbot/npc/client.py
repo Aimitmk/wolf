@@ -44,6 +44,14 @@ from wolfbot.domain.ws_messages import (
     TtsFinished,
     VoteDecision,
 )
+from wolfbot.npc.decision_service import (
+    _NIGHT_SCHEMA,
+    _VOTE_SCHEMA,
+    DecisionLLM,
+    build_night_prompt,
+    build_vote_prompt,
+    parse_decision,
+)
 from wolfbot.npc.game_state import NpcGameState, apply_update, state_from_snapshot
 from wolfbot.npc.playback import (
     VoicePlayback,
@@ -121,6 +129,10 @@ class NpcClient:
     # then PrivateStateUpdate (append/patch) for incremental events. The
     # NPC bot uses this in vote / night / speech decision handlers.
     game_states: dict[str, NpcGameState] = field(default_factory=dict)
+    # Phase-D: per-seat decision LLM. When None, vote / night handlers
+    # fall through to the historical stub (target=None) — useful for
+    # tests that don't want to bind a real LLM client.
+    decision_llm: DecisionLLM | None = None
 
     # ---------------------------------------------------------- registration
 
@@ -450,37 +462,72 @@ class NpcClient:
         )
 
     async def _on_decide_vote_request(self, req: DecideVoteRequest) -> None:
-        """Phase-D: NPC decides its own vote target.
+        """Phase-D: NPC decides its own vote target via NPC_LLM.
 
-        This first cut is a placeholder — it returns ``target_seat=None``
-        (abstain) so the wire is fully exercised end-to-end before the
-        LLM-backed decision logic lands. Master records the abstention and
-        the viewer surfaces the seat as silent for that vote.
+        Falls back to ``target_seat=None`` (abstain) when state is
+        missing, no decision LLM is configured, or the LLM call /
+        response parse fails. Every fallback is logged so the viewer
+        surfaces the seat as silent for that round (per the user's
+        "log it so the viewer shows the seat went silent" rule).
         """
         if req.npc_id != self.config.npc_id:
             return
+        target, reason = await self._decide_vote_target(req)
         decision = VoteDecision(
             ts=self.now_ms(),
             trace_id=req.trace_id,
             request_id=req.request_id,
             npc_id=self.config.npc_id,
             seat_no=req.seat_no,
-            target_seat=None,
-            reason_summary="phase_d_stub_abstain",
+            target_seat=target,
+            reason_summary=reason,
         )
         await self.send(decision.model_dump_json())
+
+    async def _decide_vote_target(
+        self, req: DecideVoteRequest
+    ) -> tuple[int | None, str]:
+        from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+
+        state = self.game_states.get(req.game_id)
+        if state is None:
+            log.warning(
+                "npc_vote_no_state game=%s seat=%d", req.game_id, req.seat_no,
+            )
+            return None, "no_state"
+        if self.decision_llm is None:
+            return None, "no_decision_llm"
+        persona = NPC_PERSONAS_BY_KEY.get(state.persona_key)
+        if persona is None:
+            log.warning(
+                "npc_vote_unknown_persona persona=%s", state.persona_key,
+            )
+            return None, "unknown_persona"
+        legal = frozenset(seat for seat, _name in req.candidate_seats)
+        system, user = build_vote_prompt(state=state, persona=persona, request=req)
+        try:
+            raw = await self.decision_llm.decide_json(
+                system_prompt=system, user_prompt=user, schema=_VOTE_SCHEMA,
+            )
+        except Exception:
+            log.exception(
+                "npc_vote_llm_failed game=%s seat=%d", req.game_id, req.seat_no,
+            )
+            return None, "llm_error"
+        result = parse_decision(raw, legal_seats=legal)
+        return result.target_seat, result.reason_summary
 
     async def _on_decide_night_action_request(
         self, req: DecideNightActionRequest
     ) -> None:
-        """Phase-D: NPC decides its own night action.
+        """Phase-D: NPC decides its own night action via NPC_LLM.
 
-        Stub identical to the vote handler — returns ``target_seat=None``
-        (skip) so Master's resolution path can be wired up first. The
-        LLM-backed decision lands in a follow-up commit.
+        Same fallback shape as the vote handler — None target on missing
+        state, no decision LLM, LLM error, or out-of-set response.
         """
         if req.npc_id != self.config.npc_id:
             return
+        target, reason = await self._decide_night_target(req)
         decision = NightActionDecision(
             ts=self.now_ms(),
             trace_id=req.trace_id,
@@ -488,10 +535,41 @@ class NpcClient:
             npc_id=self.config.npc_id,
             seat_no=req.seat_no,
             action_kind=req.action_kind,
-            target_seat=None,
-            reason_summary="phase_d_stub_skip",
+            target_seat=target,
+            reason_summary=reason,
         )
         await self.send(decision.model_dump_json())
+
+    async def _decide_night_target(
+        self, req: DecideNightActionRequest
+    ) -> tuple[int | None, str]:
+        from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+
+        state = self.game_states.get(req.game_id)
+        if state is None:
+            log.warning(
+                "npc_night_no_state game=%s seat=%d", req.game_id, req.seat_no,
+            )
+            return None, "no_state"
+        if self.decision_llm is None:
+            return None, "no_decision_llm"
+        persona = NPC_PERSONAS_BY_KEY.get(state.persona_key)
+        if persona is None:
+            return None, "unknown_persona"
+        legal = frozenset(seat for seat, _name in req.candidate_seats)
+        system, user = build_night_prompt(state=state, persona=persona, request=req)
+        try:
+            raw = await self.decision_llm.decide_json(
+                system_prompt=system, user_prompt=user, schema=_NIGHT_SCHEMA,
+            )
+        except Exception:
+            log.exception(
+                "npc_night_llm_failed game=%s seat=%d kind=%s",
+                req.game_id, req.seat_no, req.action_kind,
+            )
+            return None, "llm_error"
+        result = parse_decision(raw, legal_seats=legal)
+        return result.target_seat, result.reason_summary
 
 
 __all__ = ["NpcClient", "NpcClientConfig"]

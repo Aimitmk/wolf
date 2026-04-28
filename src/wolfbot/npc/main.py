@@ -208,6 +208,7 @@ async def _main() -> None:
 
     # ---- Build NPC pipeline ----
     from wolfbot.npc.client import NpcClient, NpcClientConfig
+    from wolfbot.npc.decision_service import DecisionLLM
     from wolfbot.npc.generator_factory import make_npc_generator
     from wolfbot.npc.playback import DiscordVoicePlayback, VoicePlaybackError
     from wolfbot.npc.speech_service import NpcSpeechService
@@ -216,6 +217,14 @@ async def _main() -> None:
     generator = make_npc_generator(
         settings.npc_decider_config(),
         persona_key=settings.NPC_PERSONA_KEY,
+    )
+    # Phase-D: same provider/credentials drive vote / night-action
+    # decisions as the speech generator. The OpenAI-compatible generator
+    # already has a `decide_json` method; for Mock / Gemini we leave the
+    # decision LLM unset and the NPC client falls back to the abstain
+    # default until those backends grow a `decide_json` of their own.
+    decision_llm: DecisionLLM | None = (
+        generator if isinstance(generator, DecisionLLM) else None
     )
     speech_service = NpcSpeechService(generator=generator)
     tts = VoicevoxTtsService(
@@ -298,6 +307,7 @@ async def _main() -> None:
         on_vc_leave=_ensure_vc_left,
         on_set_mute=_set_self_mute,
         on_post_chat=_post_to_vc_chat,
+        decision_llm=decision_llm,
     )
 
     # Register with Master
