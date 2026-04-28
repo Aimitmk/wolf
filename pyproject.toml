@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 wolfbot = "wolfbot.main:cli"
 wolfbot-npc = "wolfbot.npc.main:main"
+wolfbot-voicetest = "wolfbot.voicetest.main:run"
 
 [build-system]
 requires = ["hatchling"]

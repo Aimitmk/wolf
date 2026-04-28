@@ -107,6 +107,20 @@ class MasterSettings(BaseSettings):
     GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
     GROQ_STT_BASE_URL: str = "https://api.groq.com/openai/v1"
 
+    # ── Pre-STT silence gate ──────────────────────────────────────────
+    # Discord's speaking-start fires on any audio above a low threshold
+    # (breathing, keyboard, room hum). With ``SilenceGeneratorSink``
+    # padding, this would burn one Groq + one xAI analyzer call for
+    # every such non-speech burst. The gate suppresses the STT call
+    # (and emits ``stt_failed reason=pre_stt_silence_gate`` so the
+    # arbiter still finalises the segment) when the buffer is too
+    # short or too quiet to plausibly contain speech. Tuned from
+    # voicetest measurements: pure noise sits at RMS 0-100, faint /
+    # distant speech 200-500, normal talking 1000+.
+    # Set ``VOICE_PRE_STT_MIN_RMS=0`` to disable the gate entirely.
+    VOICE_PRE_STT_MIN_RMS: int = 200
+    VOICE_PRE_STT_MIN_DURATION_MS: int = 300
+
     # ── Master TTS narration (reactive_voice only) ────────────────────
     # When `LLM_DISCUSSION_MODE=reactive_voice` and Master is in VC,
     # phase-transition announcements (PHASE_CHANGE / MORNING / VICTORY

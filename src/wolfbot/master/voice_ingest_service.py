@@ -65,6 +65,20 @@ class VoiceIngestConfig:
     pcm_sample_rate: int = 48_000
     pcm_channels: int = 2
     pcm_sample_width: int = 2
+    # Pre-STT silence gate. Discord's speaking-start fires on any audio
+    # above a low threshold (breathing, keyboard, room hum) and the
+    # SilenceGeneratorSink keeps the segment open; without this gate
+    # every such non-speech burst hits the STT API. Both thresholds
+    # default to 0 (disabled) so existing tests / callers see the same
+    # behavior; production wiring opts in via MasterSettings.
+    # ``pre_stt_min_rms`` is a 16-bit signed RMS computed across the
+    # full segment buffer - speech is typically 1000-5000, breathing
+    # / typing 100-500, true silence 0-100.
+    pre_stt_min_rms: int = 0
+    # ``pre_stt_min_duration_ms`` rejects sub-syllable bursts triggered
+    # by the silence-padding playback or single mouse clicks. Real
+    # utterances are ≥300ms.
+    pre_stt_min_duration_ms: int = 0
 
 
 @dataclass
@@ -93,6 +107,25 @@ class VadEngine(Protocol):
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _pcm_rms_s16le(pcm: bytes) -> int:
+    """Root-mean-square magnitude across all 16-bit signed LE samples.
+
+    Returns 0 for empty / odd-length buffers. ~20ms for a 2-second
+    48kHz stereo segment in pure Python — negligible vs the STT
+    network round-trip we're potentially saving.
+    """
+    n = len(pcm) // 2
+    if n == 0:
+        return 0
+    import struct
+
+    samples = struct.unpack(f"<{n}h", pcm[: n * 2])
+    sq = 0
+    for s in samples:
+        sq += s * s
+    return int((sq / n) ** 0.5)
 
 
 class VoiceIngestService:
@@ -127,6 +160,10 @@ class VoiceIngestService:
         self.dropped_npc_packets = 0
         self.stt_low_confidence_count = 0
         self.stt_provider_error_count = 0
+        # Pre-STT silence gate — counts segments suppressed before
+        # the STT call so an operator can spot a misconfigured
+        # threshold (e.g. silenced everything → no Whisper traffic).
+        self.pre_stt_silence_gated_count = 0
 
     # ---------------------------------------------------------- packet boundary
 
@@ -293,6 +330,61 @@ class VoiceIngestService:
                 result=result,
                 failure_reason=failure_reason,
             )
+
+        # Pre-STT silence gate. Skip the network round-trip when the
+        # buffer is too short or too quiet to plausibly contain
+        # speech — Discord's speaking-start fires on breathing /
+        # keyboard / hum, and without this every such non-speech
+        # burst would burn one Groq + one xAI analyzer call.
+        if (
+            self.config.pre_stt_min_rms > 0
+            or self.config.pre_stt_min_duration_ms > 0
+        ):
+            bytes_per_ms = (
+                self.config.pcm_sample_rate
+                * self.config.pcm_channels
+                * self.config.pcm_sample_width
+                // 1000
+            )
+            duration_ms = (
+                len(pcm_snapshot) // bytes_per_ms if bytes_per_ms else 0
+            )
+            need_rms_check = self.config.pre_stt_min_rms > 0
+            rms = _pcm_rms_s16le(pcm_snapshot) if need_rms_check else 0
+            too_short = duration_ms < self.config.pre_stt_min_duration_ms
+            too_quiet = need_rms_check and rms < self.config.pre_stt_min_rms
+            if too_short or too_quiet:
+                self.pre_stt_silence_gated_count += 1
+                log.info(
+                    "stt_pre_silence_gated game=%s segment=%s "
+                    "duration_ms=%d rms=%d reason=%s",
+                    game_id,
+                    seg.segment_id,
+                    duration_ms,
+                    rms,
+                    "too_short" if too_short else "below_rms",
+                )
+                if dump_enabled:
+                    await dump_segment(
+                        _build_dump(
+                            result=None,
+                            failure_reason="pre_stt_silence_gate",
+                        ),
+                        pcm_snapshot,
+                    )
+                await self.master_client.send_stt_failed(
+                    SttFailed(
+                        ts=self._now_ms(),
+                        trace_id=f"vi-{seg.segment_id}",
+                        game_id=game_id,
+                        phase_id=phase_id,
+                        speaker_discord_user_id=seg.speaker_user_id,
+                        seat_no=seg.seat_no,
+                        segment_id=seg.segment_id,
+                        failure_reason="pre_stt_silence_gate",
+                    )
+                )
+                return
 
         try:
             result: SttResult = await self.stt.transcribe(

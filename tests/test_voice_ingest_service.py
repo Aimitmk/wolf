@@ -187,3 +187,94 @@ async def test_restart_abandons_open_segments() -> None:
     await svc.begin_segment(speaker_user_id="u4")
     abandoned = await svc.abandon_open_segments()
     assert abandoned == 2
+
+
+async def test_pre_stt_silence_gate_skips_short_or_quiet_segments() -> None:
+    """Pre-STT silence gate must suppress the STT call for buffers
+    too short or too quiet to plausibly contain speech, and emit a
+    canonical ``stt_failed reason=pre_stt_silence_gate`` instead."""
+
+    view = InMemoryNpcRegistryView()
+    client = FakeMasterIngestionClient()
+    # Scripted result is never reached when the gate fires - if it
+    # were, the assertion on stt_failures would still catch the
+    # mis-routing because confidence=0.99 would land in
+    # speech_payloads, not stt_failures.
+    stt = FakeSttService(default=SttResult(text="x", confidence=0.99, duration_ms=1))
+    svc = VoiceIngestService(
+        registry_view=view,
+        master_client=client,
+        stt=stt,
+        seat_lookup=_seat_lookup,
+        phase_lookup=_phase_lookup_active,
+        config=VoiceIngestConfig(
+            pre_stt_min_rms=200,
+            pre_stt_min_duration_ms=300,
+        ),
+        now_ms=lambda: 1,
+    )
+    # Buffer = 100 frames * 4 bytes (stereo s16) = 400 bytes ≈ 2ms
+    # well under both thresholds and contains all-zero PCM.
+    await svc.begin_segment(speaker_user_id="u3")
+    await svc.handle_voice_packet(speaker_user_id="u3", pcm=b"\x00" * 400)
+    await svc.end_segment(speaker_user_id="u3")
+    assert client.speech_payloads == []
+    assert len(client.stt_failures) == 1
+    assert client.stt_failures[0].failure_reason == "pre_stt_silence_gate"
+    assert svc.pre_stt_silence_gated_count == 1
+    # Sanity: the STT service was never called.
+    assert stt.call_count == 0
+
+
+async def test_pre_stt_silence_gate_passes_loud_speech() -> None:
+    """A long, loud buffer should pass the gate and reach STT."""
+
+    view = InMemoryNpcRegistryView()
+    client = FakeMasterIngestionClient()
+    stt = FakeSttService(default=SttResult(text="ok", confidence=0.9, duration_ms=500))
+    svc = VoiceIngestService(
+        registry_view=view,
+        master_client=client,
+        stt=stt,
+        seat_lookup=_seat_lookup,
+        phase_lookup=_phase_lookup_active,
+        config=VoiceIngestConfig(
+            pre_stt_min_rms=200,
+            pre_stt_min_duration_ms=300,
+        ),
+        now_ms=lambda: 1,
+    )
+    # Build ~1s of loud square-wave PCM: 48000 Hz * 2ch * 2B = 192000
+    # bytes/sec. Use a +/- 8000 amplitude so RMS clears the 200 gate.
+    import struct
+
+    samples = [8000 if (i // 480) % 2 == 0 else -8000 for i in range(48_000 * 2)]
+    pcm = struct.pack(f"<{len(samples)}h", *samples)
+    await svc.begin_segment(speaker_user_id="u3")
+    await svc.handle_voice_packet(speaker_user_id="u3", pcm=pcm)
+    await svc.end_segment(speaker_user_id="u3")
+    assert len(client.speech_payloads) == 1
+    assert client.stt_failures == []
+    assert svc.pre_stt_silence_gated_count == 0
+
+
+async def test_pre_stt_silence_gate_disabled_by_default() -> None:
+    """Default ``VoiceIngestConfig`` keeps the gate off so existing
+    tests / callers that pass tiny buffers still reach STT."""
+
+    view = InMemoryNpcRegistryView()
+    client = FakeMasterIngestionClient()
+    stt = FakeSttService(default=SttResult(text="x", confidence=0.9, duration_ms=1))
+    svc = VoiceIngestService(
+        registry_view=view,
+        master_client=client,
+        stt=stt,
+        seat_lookup=_seat_lookup,
+        phase_lookup=_phase_lookup_active,
+        now_ms=lambda: 1,
+    )
+    await svc.begin_segment(speaker_user_id="u3")
+    await svc.handle_voice_packet(speaker_user_id="u3", pcm=b"\x00" * 16)
+    await svc.end_segment(speaker_user_id="u3")
+    assert len(client.speech_payloads) == 1
+    assert svc.pre_stt_silence_gated_count == 0

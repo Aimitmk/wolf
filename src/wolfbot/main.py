@@ -150,6 +150,9 @@ async def _run() -> None:
             from discord.ext import voice_recv
 
             from wolfbot.master.audio_sink import WolfbotAudioSink
+            from wolfbot.master.voice_recv_dave_patch import (
+                apply_dave_decrypt_patch,
+            )
             from wolfbot.master.voice_recv_resilience import (
                 apply_packet_router_resilience,
             )
@@ -159,6 +162,13 @@ async def _run() -> None:
             # silences the entire reactive_voice pipeline for the rest of
             # the game (no STT, no NPC dispatch).
             apply_packet_router_resilience()
+            # Layer DAVE (E2EE voice) inner decrypt on top of voice_recv's
+            # outer AEAD. Without this, channels with E2EE enabled deliver
+            # MLS-encrypted opus that the decoder can't read, manifesting
+            # as a flood of `corrupted stream` warnings and zero usable
+            # audio (the ``e5660c02f79a`` debug dumps before this patch
+            # were the canonical symptom). See voice_recv_dave_patch.py.
+            apply_dave_decrypt_patch()
 
             try:
                 channel_id = int(game.main_vc_channel_id)
@@ -1017,7 +1027,10 @@ async def _run() -> None:
                 GroqWhisperAudioAnalyzer,
             )
             from wolfbot.master.voice_ingest_client import DirectMasterIngestionClient
-            from wolfbot.master.voice_ingest_service import VoiceIngestService
+            from wolfbot.master.voice_ingest_service import (
+                VoiceIngestConfig,
+                VoiceIngestService,
+            )
 
             # Direct callbacks (no WS ctx needed)
             async def _direct_vad_started(msg: Any) -> None:
@@ -1096,6 +1109,10 @@ async def _run() -> None:
                 stt=voice_llm,
                 seat_lookup=_seat_lookup,
                 phase_lookup=_phase_lookup,
+                config=VoiceIngestConfig(
+                    pre_stt_min_rms=settings.VOICE_PRE_STT_MIN_RMS,
+                    pre_stt_min_duration_ms=settings.VOICE_PRE_STT_MIN_DURATION_MS,
+                ),
             )
             if settings.VOICE_STT_PROVIDER == "groq":
                 log.info(
