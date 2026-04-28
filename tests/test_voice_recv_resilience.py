@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -173,10 +174,24 @@ def test_none_pop_data_is_ignored_without_calling_sink() -> None:
     assert captured == []
 
 
-@pytest.mark.parametrize("exc", [ValueError("oops"), KeyError("k"), OpusError(-1)])
-def test_arbitrary_pop_data_exception_is_swallowed(exc: BaseException) -> None:
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        # Wrap in lambdas so OpusError(-1) is only constructed at test
+        # run time, not at collection time. Without this, environments
+        # without libopus loaded crash in `_lib.opus_strerror(...)` and
+        # take the entire module's collection down with them.
+        pytest.param(lambda: ValueError("oops"), id="value-error"),
+        pytest.param(lambda: KeyError("k"), id="key-error"),
+        pytest.param(lambda: OpusError(-1), id="opus-error"),
+    ],
+)
+def test_arbitrary_pop_data_exception_is_swallowed(
+    exc_factory: Callable[[], BaseException],
+) -> None:
     """OpusError is the known failure mode; any other unexpected exception
     must also be contained so the thread keeps draining packets."""
+    exc = exc_factory()
     apply_packet_router_resilience()
 
     end = threading.Event()
