@@ -74,7 +74,7 @@ function SeatCard({ seat }: { seat: Seat }) {
         </Stack>
         {!seat.alive && (
           <Typography variant="caption" color="error" sx={{ mt: 0.5, display: "block" }}>
-            {seat.death_cause === "EXECUTED"
+            {seat.death_cause === "EXECUTION"
               ? `${seat.death_day}日目に処刑`
               : seat.death_cause === "ATTACK"
               ? `${seat.death_day}日目朝に襲撃死`

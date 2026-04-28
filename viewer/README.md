@@ -13,14 +13,19 @@ pnpm dev
 
 ## Loading a different game
 
-Set `GAME_FILE` to any absolute or relative JSON path:
+The viewer picks a file using this priority order:
+
+1. **`GAME_FILE` env var** — absolute or relative to `viewer/`
+2. **Most-recent `viewer/games/*.json`** — auto-populated by the bot at every game end (victory or `/wolf abort`)
+3. **Fallback** — `viewer/sample-data/game-sample.json`
+
+So after a real game ends, you can just run `pnpm dev` and the viewer
+will load the most recent export automatically. To pick a specific
+historical game by id, set `GAME_FILE`:
 
 ```bash
-GAME_FILE=/abs/path/to/exported-game.json pnpm dev
-GAME_FILE=../some-other-game.json         pnpm dev
+GAME_FILE=games/g_abc123def.json pnpm dev
 ```
-
-The path is resolved from the `viewer/` directory when relative.
 
 ## Sample data
 

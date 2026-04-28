@@ -23,3 +23,7 @@ next-env.d.ts
 # IDE
 .vscode/
 .idea/
+
+# Auto-exported real-game JSON, written by GameService._on_game_end_finalize.
+# Sample data lives in sample-data/ and stays committed.
+games/*.json

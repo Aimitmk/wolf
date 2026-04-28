@@ -9,7 +9,7 @@ export type RoleKey =
   | "MEDIUM"
   | "KNIGHT";
 
-export type DeathCause = "EXECUTED" | "ATTACK" | null;
+export type DeathCause = "EXECUTION" | "ATTACK" | null;
 
 export type DiscussionMode = "rounds" | "reactive_voice";
 

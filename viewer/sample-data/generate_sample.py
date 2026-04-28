@@ -747,7 +747,7 @@ def main() -> None:
             {
                 **s,
                 "alive": not (s["seat_no"] in (3, 7)),
-                "death_cause": "EXECUTED" if s["seat_no"] in (3, 7) else None,
+                "death_cause": "EXECUTION" if s["seat_no"] in (3, 7) else None,
                 "death_day": 1 if s["seat_no"] == 3 else (2 if s["seat_no"] == 7 else None),
             }
             for s in SEATS

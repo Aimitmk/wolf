@@ -41,7 +41,7 @@
       "discord_user_id": "1498225401372086314",
       "role": "WEREWOLF",
       "alive": false,
-      "death_cause": "EXECUTED",
+      "death_cause": "EXECUTION",
       "death_day": 1
     },
     {
@@ -85,7 +85,7 @@
       "discord_user_id": "1498225401372086318",
       "role": "WEREWOLF",
       "alive": false,
-      "death_cause": "EXECUTED",
+      "death_cause": "EXECUTION",
       "death_day": 2
     },
     {

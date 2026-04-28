@@ -145,6 +145,7 @@ class GameService:
         rng: Random | None = None,
         on_reactive_phase_enter: Callable[[str], Awaitable[None]] | None = None,
         on_reactive_game_end: Callable[[str], Awaitable[None]] | None = None,
+        on_game_end_finalize: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.repo = repo
         self.discord = discord
@@ -158,6 +159,11 @@ class GameService:
         # host abort so reactive_voice plumbing (NPC seat assignments, VC
         # joins) can be released.
         self._on_reactive_game_end = on_reactive_game_end
+        # Fires once per game-end (natural victory OR host abort), AFTER
+        # ``repo.end_game`` has committed, so the hook sees the row in its
+        # final ended_at state. Used to trigger the viewer JSON export
+        # without blocking gameplay — exceptions are logged + swallowed.
+        self._on_game_end_finalize = on_game_end_finalize
 
     def _lock_for(self, game_id: str) -> asyncio.Lock:
         lock = self._advance_locks.get(game_id)
@@ -274,6 +280,7 @@ class GameService:
                         "on_reactive_game_end failed for %s", game_id
                     )
             await self.repo.end_game(game_id, ended_at_epoch=self.clock())
+            await self._run_finalize_hook(game_id)
 
         # 7. Wake the engine so it reschedules on the new deadline.
         self.wake.wake(game_id)
@@ -1010,8 +1017,22 @@ class GameService:
                     "on_reactive_game_end failed during abort %s", game_id
                 )
         await self.repo.end_game(game_id, ended_at_epoch=self.clock())
+        await self._run_finalize_hook(game_id)
         self.wake.wake(game_id)
         return True
+
+    async def _run_finalize_hook(self, game_id: str) -> None:
+        """Fire the post-game-end finalize hook (export, archival, etc).
+
+        Errors are logged and swallowed — finalization MUST NOT prevent
+        the engine from cleaning up the ended game.
+        """
+        if self._on_game_end_finalize is None:
+            return
+        try:
+            await self._on_game_end_finalize(game_id)
+        except Exception:
+            log.exception("on_game_end_finalize failed for %s", game_id)
 
 
 def new_game_id() -> str:

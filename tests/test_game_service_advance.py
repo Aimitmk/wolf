@@ -615,6 +615,61 @@ async def test_host_abort_invokes_on_reactive_game_end_callback(
     assert fired == [game.id]
 
 
+async def test_host_abort_invokes_finalize_hook(
+    repo: SqliteRepo,
+) -> None:
+    """The finalize hook (used to export viewer JSON) must fire on host_abort."""
+    disc = FakeDiscordAdapter()
+    llm = FakeLLMAdapter()
+    reg = EngineRegistry()
+    finalized: list[str] = []
+
+    async def on_finalize(game_id: str) -> None:
+        finalized.append(game_id)
+
+    service = GameService(
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        rng=random.Random(0),
+        on_game_end_finalize=on_finalize,
+    )
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+
+    ok = await service.host_abort(game.id)
+    assert ok
+    assert finalized == [game.id]
+
+
+async def test_finalize_hook_swallows_exceptions(
+    repo: SqliteRepo,
+) -> None:
+    """A failing finalize hook (e.g. export disk-full) MUST NOT block teardown."""
+    disc = FakeDiscordAdapter()
+    llm = FakeLLMAdapter()
+    reg = EngineRegistry()
+
+    async def on_finalize(_game_id: str) -> None:
+        raise RuntimeError("disk full")
+
+    service = GameService(
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        rng=random.Random(0),
+        on_game_end_finalize=on_finalize,
+    )
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+
+    # Abort should still succeed despite the finalize hook raising.
+    ok = await service.host_abort(game.id)
+    assert ok
+
+
 async def test_host_abort_returns_false_when_already_ended(
     repo: SqliteRepo,
     svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],

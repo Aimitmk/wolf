@@ -396,6 +396,24 @@ async def _run() -> None:
         # voice channel between games. Reattaches at the next /wolf start.
         await _master_leave_vc()
 
+    async def _on_game_end_finalize(game_id: str) -> None:
+        """Export the finished/aborted game to viewer-compatible JSON.
+
+        Joins SQLite + ``logs/llm_calls/{game_id}/*.jsonl`` into one file
+        under ``viewer/games/{game_id}.json``. The viewer auto-discovers
+        the most-recent file in that directory, so a finished game can
+        be reviewed by simply running ``cd viewer && pnpm dev`` — no
+        separate export step or env var. Errors here MUST NOT prevent
+        end-of-game cleanup; ``GameService._run_finalize_hook`` already
+        wraps this in try/except.
+        """
+        from wolfbot.services.game_export import export_game
+
+        await export_game(
+            game_id=game_id,
+            db_path=settings.WOLFBOT_DB_PATH,
+        )
+
     game_service = GameService(
         repo=repo,
         discord=discord_adapter,
@@ -403,6 +421,7 @@ async def _run() -> None:
         wake=registry,
         on_reactive_phase_enter=_on_reactive_phase_enter,
         on_reactive_game_end=_on_reactive_game_end,
+        on_game_end_finalize=_on_game_end_finalize,
     )
     discord_adapter.set_game_service(game_service)
     llm_adapter.set_game_service(game_service)
