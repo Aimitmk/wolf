@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import time
 from typing import Any
 
 import discord
@@ -185,6 +186,112 @@ async def _run() -> None:
             finally:
                 master_vc_ref[0] = None
 
+    async def _assign_online_npcs_to_seats(game_id: str) -> int:
+        """Pair online NPC bots with unassigned LLM seats and tell them to
+        join VC. Idempotent (already-assigned NPCs are skipped). Returns
+        the number of NEW assignments dispatched in this call — callers
+        use it to decide whether to wait for VC join confirmations.
+        """
+        if not _npc_registry_ref or _vc_phase_cache[0] is None:
+            return 0
+        from wolfbot.domain.ws_messages import SeatAssigned
+
+        _game_id, phase_id = _vc_phase_cache[0]
+        npc_reg = _npc_registry_ref[0]
+        seats = await repo.load_seats(game_id)
+        llm_seats = [s for s in seats if s.is_llm]
+        online = npc_reg.all_online()
+        assigned_npc_ids = {
+            e.npc_id for e in online if e.assigned_seat is not None and e.game_id == game_id
+        }
+        unassigned_npcs = [e for e in online if e.npc_id not in assigned_npc_ids]
+        unassigned_seats = [
+            s for s in llm_seats
+            if not any(e.assigned_seat == s.seat_no and e.game_id == game_id for e in online)
+        ]
+        dispatched = 0
+        for npc_entry, seat in zip(unassigned_npcs, unassigned_seats, strict=False):
+            npc_reg.assign(npc_entry.npc_id, seat=seat.seat_no,
+                           game_id=game_id, phase_id=phase_id)
+            log.info("npc_seat_assigned npc=%s seat=%d game=%s",
+                     npc_entry.npc_id, seat.seat_no, game_id)
+            # Tell the picked bot to join VC. Unselected NPCs receive
+            # nothing and stay idle (no VC).
+            if npc_entry.send is not None:
+                try:
+                    msg = SeatAssigned(
+                        ts=int(asyncio.get_running_loop().time() * 1000),
+                        trace_id=f"assign-{game_id}-{seat.seat_no}",
+                        npc_id=npc_entry.npc_id,
+                        seat_no=seat.seat_no,
+                        game_id=game_id,
+                        phase_id=phase_id,
+                    )
+                    await npc_entry.send(msg.model_dump_json())
+                    dispatched += 1
+                except Exception:
+                    log.exception(
+                        "seat_assigned_send_failed npc=%s seat=%d",
+                        npc_entry.npc_id,
+                        seat.seat_no,
+                    )
+        return dispatched
+
+    async def _wait_for_npcs_in_vc(expected_count: int, timeout: float = 5.0) -> None:
+        """Block until `expected_count` bots are visible in Master's VC.
+
+        After SeatAssigned dispatch, NPCs join VC asynchronously (Discord
+        connect ~1-1.5s each). Without this wait, the SETUP_COMPLETE
+        narration starts speaking into an empty channel. We poll the
+        VoiceChannel.members list (counting bots, excluding the Master
+        itself) and bail on timeout so a single slow NPC doesn't stall
+        game start indefinitely.
+        """
+        if expected_count <= 0:
+            return
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            vc = master_vc_ref[0]
+            channel = getattr(vc, "channel", None) if vc is not None else None
+            members = getattr(channel, "members", None)
+            if members is not None:
+                bot_user = bot.user
+                count = sum(
+                    1 for m in members if getattr(m, "bot", False) and m != bot_user
+                )
+                if count >= expected_count:
+                    log.info("npc_vc_join_confirmed count=%d", count)
+                    return
+            await asyncio.sleep(0.25)
+        log.info(
+            "npc_vc_join_timeout expected=%d after=%.1fs", expected_count, timeout
+        )
+
+    async def _on_reactive_game_start(game_id: str) -> None:
+        """Pre-game NPC + Master VC setup, called from `/wolf start`.
+
+        Without this, NPCs only join VC on DAY_DISCUSSION entry — too
+        late for the SETUP_COMPLETE / day-1 PHASE_CHANGE narration to
+        be heard from a populated channel. We:
+          1. Cache phase_id (needed for SeatAssigned),
+          2. Master joins VC (so it can voice the announcement),
+          3. Assign online NPCs to LLM seats + dispatch SeatAssigned
+             so they join VC,
+          4. Wait briefly for the NPC VC joins to land.
+        Idempotent — `_on_reactive_phase_enter` re-invokes the same
+        helpers later and finds nothing left to do.
+        """
+        g = await repo.load_game(game_id)
+        if g is None or g.ended_at is not None:
+            return
+        if g.discussion_mode != "reactive_voice":
+            return
+        await _refresh_voice_ingest_cache(game_id)
+        await _master_join_vc_for_game(g)
+        dispatched = await _assign_online_npcs_to_seats(game_id)
+        if dispatched > 0:
+            await _wait_for_npcs_in_vc(dispatched)
+
     async def _on_reactive_phase_enter(game_id: str) -> None:
         await _refresh_voice_ingest_cache(game_id)
         # Master joins the game's VC the first time the game enters a
@@ -218,47 +325,10 @@ async def _run() -> None:
                         game_id,
                         g_for_vc.phase,
                     )
-        # Assign online NPC bots to their game seats so the arbiter can pick them.
-        if _npc_registry_ref and _vc_phase_cache[0] is not None:
-            from wolfbot.domain.ws_messages import SeatAssigned
-
-            _game_id, phase_id = _vc_phase_cache[0]
-            npc_reg = _npc_registry_ref[0]
-            seats = await repo.load_seats(game_id)
-            llm_seats = [s for s in seats if s.is_llm]
-            online = npc_reg.all_online()
-            # Pair each online NPC bot with an unassigned LLM seat (round-robin).
-            assigned_npc_ids = {
-                e.npc_id for e in online if e.assigned_seat is not None and e.game_id == game_id}
-            unassigned_npcs = [
-                e for e in online if e.npc_id not in assigned_npc_ids]
-            unassigned_seats = [s for s in llm_seats if not any(
-                e.assigned_seat == s.seat_no and e.game_id == game_id for e in online
-            )]
-            for npc_entry, seat in zip(unassigned_npcs, unassigned_seats, strict=False):
-                npc_reg.assign(npc_entry.npc_id, seat=seat.seat_no,
-                               game_id=game_id, phase_id=phase_id)
-                log.info("npc_seat_assigned npc=%s seat=%d game=%s",
-                         npc_entry.npc_id, seat.seat_no, game_id)
-                # Tell the picked bot to join VC. Unselected NPCs receive
-                # nothing and stay idle (no VC).
-                if npc_entry.send is not None:
-                    try:
-                        msg = SeatAssigned(
-                            ts=int(asyncio.get_running_loop().time() * 1000),
-                            trace_id=f"assign-{game_id}-{seat.seat_no}",
-                            npc_id=npc_entry.npc_id,
-                            seat_no=seat.seat_no,
-                            game_id=game_id,
-                            phase_id=phase_id,
-                        )
-                        await npc_entry.send(msg.model_dump_json())
-                    except Exception:
-                        log.exception(
-                            "seat_assigned_send_failed npc=%s seat=%d",
-                            npc_entry.npc_id,
-                            seat.seat_no,
-                        )
+        # Assign online NPC bots to their game seats so the arbiter can
+        # pick them. No-op when `/wolf start`'s pre-game callback already
+        # claimed them.
+        await _assign_online_npcs_to_seats(game_id)
         if _reactive_phase_cb:
             await _reactive_phase_cb[0].try_dispatch_next(game_id)
 
@@ -345,6 +415,7 @@ async def _run() -> None:
         on_speech_recorded=_on_speech_recorded,
         npc_registry=npc_registry,
         text_analyzer=text_analyzer,
+        on_reactive_game_start=_on_reactive_game_start,
     )
     await bot.add_cog(cog)
     bot.tree.add_command(cog.wolf, guild=discord.Object(
@@ -449,6 +520,54 @@ async def _run() -> None:
                     getattr(channel, "id", None),
                 )
 
+        async def _push_deadline_after_narration(game_id: str) -> None:
+            """Push the active phase's `deadline_epoch` to `now + duration`.
+
+            Called from the narrator after TTS playback finishes. Without
+            this, mock-mode short phases (vote=6s) get fully consumed by a
+            15s TTS announcement and the engine advances before any NPC /
+            human can act. Real-time phases also benefit — the phase clock
+            now starts from when Levi finishes speaking.
+
+            Only pushes forward (never backward), and only when the phase
+            currently has a deadline (transient SETUP / NIGHT_0 /
+            WAITING_HOST_DECISION / GAME_OVER skip).
+            """
+            from wolfbot.domain.durations import current_phase_durations
+
+            fresh = await repo.load_game(game_id)
+            if fresh is None or fresh.ended_at is not None:
+                return
+            if fresh.deadline_epoch is None:
+                return
+            durations = current_phase_durations()
+            duration_for: dict[Phase, int] = {
+                Phase.DAY_DISCUSSION: durations.discussion_for_day(
+                    max(1, fresh.day_number)
+                ),
+                Phase.DAY_VOTE: durations.vote,
+                Phase.DAY_RUNOFF: durations.runoff,
+                Phase.DAY_RUNOFF_SPEECH: durations.runoff_speech_grace,
+                Phase.NIGHT: durations.night,
+            }
+            duration = duration_for.get(fresh.phase)
+            if duration is None:
+                return
+            new_deadline = int(time.time()) + duration
+            if new_deadline <= fresh.deadline_epoch:
+                # TTS finished within the original budget — no push needed.
+                return
+            await repo.set_deadline(fresh.id, new_deadline)
+            log.info(
+                "master_tts_deadline_pushed game=%s phase=%s "
+                "old=%d new=%d delta=+%ds",
+                fresh.id,
+                fresh.phase.value,
+                fresh.deadline_epoch,
+                new_deadline,
+                new_deadline - fresh.deadline_epoch,
+            )
+
         async def _master_narrate(game: Any, kind: str, text: str) -> bool:
             """Public-post narrator: voice + VC chat in reactive_voice mode.
 
@@ -461,10 +580,16 @@ async def _run() -> None:
             if game.discussion_mode != "reactive_voice":
                 return False
             if master_vc_ref[0] is None:
-                # Game is reactive_voice but Master never joined VC (e.g.
-                # voice_ingest is off). Fall through to text so progress
-                # still surfaces somewhere.
-                return False
+                # Lazy-join: SETUP_COMPLETE and the day-1 PHASE_CHANGE are
+                # posted *before* `_on_reactive_phase_enter` runs, so on the
+                # very first transition Master isn't in VC yet. Join here
+                # so opening narrations are voiced instead of falling
+                # through to text. Idempotent for later log entries.
+                await _master_join_vc_for_game(game)
+                if master_vc_ref[0] is None:
+                    # Join failed (voice_ingest off, channel resolution
+                    # failed, etc.) — fall through to text.
+                    return False
             from wolfbot.domain.models import LogEntry as _LogEntry
 
             players = await repo.load_players(game.id)
@@ -515,6 +640,13 @@ async def _run() -> None:
             if output.voice_text:
                 async with master_tts.suppress_npc_dispatch(arbiter):
                     await master_tts.speak(output.voice_text)
+                # Phase deadlines are committed in apply_transition based
+                # on `now` at plan_next time, so a 15s TTS playback eats
+                # straight into the next phase's budget — in mock mode the
+                # vote/runoff window can elapse before NPCs even start.
+                # After the announcement plays, push the deadline forward
+                # so the phase clock starts from when Levi finishes.
+                await _push_deadline_after_narration(game.id)
                 # After Master narrates, give NPC dispatch a kick — a
                 # PHASE_CHANGE into DAY_DISCUSSION should immediately
                 # invite an NPC reply.

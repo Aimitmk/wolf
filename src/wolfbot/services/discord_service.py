@@ -458,6 +458,7 @@ class WolfCog(commands.Cog):
         on_speech_recorded: Callable[[str], Awaitable[None]] | None = None,
         npc_registry: NpcRegistry | None = None,
         text_analyzer: Any = None,
+        on_reactive_game_start: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__()
         self.bot = bot
@@ -482,6 +483,10 @@ class WolfCog(commands.Cog):
         # is active and a Voice LLM key is set; falls back to plain raw
         # capture when None.
         self._text_analyzer = text_analyzer
+        # Pre-engine reactive_voice setup hook. Wired in main.py for
+        # reactive_voice mode; runs right after `claim_start_and_backfill`
+        # so Master + NPCs are in VC before SETUP_COMPLETE narration plays.
+        self._on_reactive_game_start = on_reactive_game_start
 
     def _select_llm_seat_personas(
         self,
@@ -927,6 +932,17 @@ class WolfCog(commands.Cog):
 
         final_seats = await self.repo.load_seats(game.id)
         roster_lines = [f"席{seat.seat_no} {seat.display_name}" for seat in final_seats]
+
+        # Pre-engine reactive_voice hook: invite Master + NPC bots into VC
+        # *before* the engine fires SETUP_COMPLETE narration. Without this
+        # the day-1 announcement plays into an empty channel because NPCs
+        # only join VC on DAY_DISCUSSION entry. Best-effort — engine still
+        # starts on failure so the game can progress in text fallback.
+        if self._on_reactive_game_start is not None:
+            try:
+                await self._on_reactive_game_start(game.id)
+            except Exception:
+                log.exception("on_reactive_game_start failed for %s", game.id)
 
         engine = GameEngine(game_id=game.id, repo=self.repo, advance=self.gs.advance)
         await self.registry.attach(engine)
