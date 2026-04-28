@@ -36,9 +36,20 @@ async def test_mock_decider_returns_vote_intent_with_null_target() -> None:
     assert result.target_name is None
 
 
-async def test_mock_decider_returns_night_action_with_null_target() -> None:
+async def test_mock_decider_returns_night_action_with_smallest_seat() -> None:
     decider = MockLLMActionDecider()
     user_ctx = task_night_action(SubmissionType.WOLF_ATTACK, CANDIDATES)
+    result = await decider.decide(system_prompt="", user_context=user_ctx)
+    assert result.intent == "night_action"
+    # Smallest 席N picked from the candidate list so both wolves converge
+    # on the same target — otherwise mock attacks split and park the game
+    # in WAITING_HOST_DECISION every night.
+    assert result.target_name == "席1"
+
+
+async def test_mock_decider_night_action_falls_back_to_none_when_no_seats() -> None:
+    decider = MockLLMActionDecider()
+    user_ctx = task_night_action(SubmissionType.WOLF_ATTACK, ())
     result = await decider.decide(system_prompt="", user_context=user_ctx)
     assert result.intent == "night_action"
     assert result.target_name is None

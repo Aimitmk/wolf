@@ -105,14 +105,22 @@ def _name(seats: Mapping[int, Seat], seat_no: int) -> str:
 
 
 def _public_log(
-    game: Game, kind: str, text: str, now_epoch: int, phase: Phase | None = None
+    game: Game,
+    kind: str,
+    text: str,
+    now_epoch: int,
+    phase: Phase | None = None,
+    actor_seat: int | None = None,
 ) -> LogEntry:
+    # `actor_seat` is forwarded so EXECUTION (target) and MORNING (victim)
+    # carry the affected seat. Master Levi narration reads this field to
+    # voice the actual seat label instead of "対象不明".
     return LogEntry(
         game_id=game.id,
         day=game.day_number,
         phase=phase or game.phase,
         kind=kind,
-        actor_seat=None,
+        actor_seat=actor_seat,
         visibility="PUBLIC",
         text=text,
         created_at=now_epoch,
@@ -543,6 +551,7 @@ def _apply_execution(
             kind="EXECUTION",
             text=f"{exec_name} が処刑されました。{tally_suffix}",
             now_epoch=now_epoch,
+            actor_seat=executed_seat,
         ),
     )
     updates = (
@@ -795,6 +804,7 @@ def plan_night_resolve(
             text=morning_text,
             now_epoch=now_epoch,
             phase=Phase.DAY_DISCUSSION,
+            actor_seat=killed_seat,
         ),
     )
 

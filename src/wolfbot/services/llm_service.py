@@ -372,9 +372,14 @@ class MockLLMActionDecider:
                 confidence=0.5,
             )
         if "対象を 1 名選んでください" in user_context:
+            # Deterministic target = smallest 席N appearing in the candidate
+            # list. For WOLF_ATTACK both wolves see the *same* candidate list
+            # (legal_attack_targets excludes all wolves), so they converge on
+            # one target — avoiding the wolf-attack split that would otherwise
+            # park the mock game in WAITING_HOST_DECISION every night.
             return LLMAction(
                 intent="night_action",
-                target_name=None,
+                target_name=self._pick_smallest_seat_token(user_context),
                 reason_summary="mock night action",
                 confidence=0.5,
             )
@@ -391,6 +396,19 @@ class MockLLMActionDecider:
             reason_summary="mock speech",
             confidence=0.5,
         )
+
+    @staticmethod
+    def _pick_smallest_seat_token(user_context: str) -> str | None:
+        # Parse only the "合法候補:" line — the rest of the prompt contains
+        # an example token ("例: `席3 Alice`") that would otherwise pollute
+        # the seat list and cause us to "pick" a non-candidate.
+        match = re.search(r"合法候補:[ \t]*([^\n]*)", user_context)
+        if match is None:
+            return None
+        seats = [int(m) for m in re.findall(r"席(\d+)", match.group(1))]
+        if not seats:
+            return None
+        return f"席{min(seats)}"
 
 
 class FakeLLMActionDecider:

@@ -229,6 +229,11 @@ for persona in "${PERSONAS[@]}"; do
         "${persona}" \
         "${LOG_DIR}/${persona}.log" \
         "${MOCK_ENV_PREFIX}WOLFBOT_NPC_ENV=envs/npc/.env.${persona} '${WOLFBOT_NPC_BIN}'"
+    # Small stagger so 9 NPCs don't all finish Discord login and slam
+    # Master's WS accept() in the same instant. Master + the NPC retry
+    # loop both tolerate concurrency, but staggering avoids the easy
+    # ECONNREFUSED race entirely.
+    sleep 0.4
 done
 
 # Land on the master window when the user attaches.

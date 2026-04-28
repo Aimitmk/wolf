@@ -192,7 +192,25 @@ async def _main() -> None:
         f"{base_url}{sep}role=npc"
         f"&psk={settings.MASTER_NPC_PSK.get_secret_value()}"
     )
-    ws = await websockets.connect(ws_url)
+    # Retry transient ECONNREFUSED so a startup race (Master still binding,
+    # or 9 NPCs hammering accept() at once) doesn't kill the worker. After
+    # ~15s of consistent refusal we surface the error — that's a real
+    # configuration problem, not a race.
+    ws = None
+    last_err: BaseException | None = None
+    for attempt in range(10):
+        try:
+            ws = await websockets.connect(ws_url)
+            break
+        except (ConnectionRefusedError, OSError) as e:
+            last_err = e
+            log.warning(
+                "npc_ws_connect_refused attempt=%d url=%s err=%r", attempt + 1, base_url, e
+            )
+            await asyncio.sleep(min(0.5 * (attempt + 1), 3.0))
+    if ws is None:
+        assert last_err is not None
+        raise last_err
 
     async def _ws_send(msg: str) -> None:
         await ws.send(msg)
