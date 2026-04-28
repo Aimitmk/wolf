@@ -35,7 +35,7 @@ def _seat_range_label() -> str:
     return f"1〜{VILLAGE_SIZE}"
 
 
-def _pcm_to_wav(
+def pcm_to_wav(
     pcm: bytes,
     *,
     sample_rate: int = 48_000,
@@ -489,7 +489,7 @@ class GroqWhisperAudioAnalyzer:
         # Groq's whisper endpoint rejects headerless PCM. Wrap to WAV
         # using the configured PCM format so ffmpeg on Groq's side can
         # demux the stream.
-        wav_audio = _pcm_to_wav(
+        wav_audio = pcm_to_wav(
             audio,
             sample_rate=self.pcm_sample_rate,
             channels=self.pcm_channels,

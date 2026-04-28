@@ -58,6 +58,13 @@ class VoiceIngestConfig:
     stt_language: str = "ja-JP"
     vad_finalization_timeout_ms: int = 4000
     heartbeat_interval_s: float = 5.0
+    # PCM format of bytes accumulated in ``_OpenSegment.audio_buffer``.
+    # Defaults match discord-ext-voice_recv's opus decoder output and
+    # are surfaced here so the optional debug dump produces a playable
+    # WAV without round-tripping through STT-provider config.
+    pcm_sample_rate: int = 48_000
+    pcm_channels: int = 2
+    pcm_sample_width: int = 2
 
 
 @dataclass
@@ -237,9 +244,42 @@ class VoiceIngestService:
         *,
         audio_end_ms: int,
     ) -> None:
+        from wolfbot.master.voice_debug_dump import (
+            SegmentDumpRecord,
+            debug_dir,
+            dump_segment,
+        )
+
+        # Snapshot the audio bytes once. The buffer is later truncated by
+        # ``end_segment`` cleanup; capturing here keeps the debug dump
+        # aligned with what was actually sent to Whisper.
+        pcm_snapshot = bytes(seg.audio_buffer)
+        dump_enabled = debug_dir() is not None
+
+        def _build_dump(
+            *,
+            result: SttResult | None,
+            failure_reason: str | None,
+        ) -> SegmentDumpRecord:
+            return SegmentDumpRecord(
+                game_id=game_id,
+                phase_id=phase_id,
+                segment_id=seg.segment_id,
+                seat_no=seg.seat_no,
+                speaker_user_id=seg.speaker_user_id,
+                audio_start_ms=seg.audio_start_ms,
+                audio_end_ms=audio_end_ms,
+                pcm_sample_rate=self.config.pcm_sample_rate,
+                pcm_channels=self.config.pcm_channels,
+                pcm_sample_width=self.config.pcm_sample_width,
+                audio_bytes=len(pcm_snapshot),
+                result=result,
+                failure_reason=failure_reason,
+            )
+
         try:
             result: SttResult = await self.stt.transcribe(
-                audio=bytes(seg.audio_buffer),
+                audio=pcm_snapshot,
                 language=self.config.stt_language,
                 timeout_s=self.config.stt_timeout_s,
             )
@@ -252,6 +292,11 @@ class VoiceIngestService:
                 seg.segment_id,
                 exc.failure_reason,
             )
+            if dump_enabled:
+                await dump_segment(
+                    _build_dump(result=None, failure_reason=exc.failure_reason),
+                    pcm_snapshot,
+                )
             await self.master_client.send_stt_failed(
                 SttFailed(
                     ts=self._now_ms(),
@@ -271,6 +316,11 @@ class VoiceIngestService:
                 game_id,
                 seg.segment_id,
             )
+            if dump_enabled:
+                await dump_segment(
+                    _build_dump(result=None, failure_reason="stt_provider_error"),
+                    pcm_snapshot,
+                )
             await self.master_client.send_stt_failed(
                 SttFailed(
                     ts=self._now_ms(),
@@ -293,6 +343,11 @@ class VoiceIngestService:
                 seg.segment_id,
                 result.confidence,
             )
+            if dump_enabled:
+                await dump_segment(
+                    _build_dump(result=result, failure_reason="stt_low_confidence"),
+                    pcm_snapshot,
+                )
             await self.master_client.send_stt_failed(
                 SttFailed(
                     ts=self._now_ms(),
@@ -312,6 +367,10 @@ class VoiceIngestService:
             if result.co_declaration in CO_CLAIM_VALUES
             else None
         )
+        if dump_enabled:
+            await dump_segment(
+                _build_dump(result=result, failure_reason=None), pcm_snapshot
+            )
         await self.master_client.send_speech_event_payload(
             SpeechEventPayload(
                 ts=self._now_ms(),
