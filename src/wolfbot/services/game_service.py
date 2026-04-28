@@ -146,6 +146,7 @@ class GameService:
         on_reactive_phase_enter: Callable[[str], Awaitable[None]] | None = None,
         on_reactive_game_end: Callable[[str], Awaitable[None]] | None = None,
         on_game_end_finalize: Callable[[str], Awaitable[None]] | None = None,
+        phase_d_state_pusher: object | None = None,
     ) -> None:
         self.repo = repo
         self.discord = discord
@@ -164,6 +165,18 @@ class GameService:
         # final ended_at state. Used to trigger the viewer JSON export
         # without blocking gameplay — exceptions are logged + swallowed.
         self._on_game_end_finalize = on_game_end_finalize
+        # Phase-D: optional state pusher that fans out PrivateStateUpdate
+        # messages to NPC bots after each apply_transition. Constructed
+        # in main.py only when reactive_voice is enabled; rounds-mode
+        # never sets it so the existing path is byte-for-byte unchanged.
+        self._phase_d_state_pusher = phase_d_state_pusher
+
+    def set_phase_d_state_pusher(self, pusher: object) -> None:
+        """Late-bind the Phase-D pusher. main.py constructs the pusher
+        only after the NPC registry exists (inside the reactive_voice
+        wiring block), which lands after GameService itself is built;
+        this setter breaks the order dependency."""
+        self._phase_d_state_pusher = pusher
 
     def _lock_for(self, game_id: str) -> asyncio.Lock:
         lock = self._advance_locks.get(game_id)
@@ -250,6 +263,25 @@ class GameService:
                 await self._safe_post_morning(new_game, entry.text)
             else:
                 await self._safe_post_public(new_game, entry.text, entry.kind)
+
+        # Phase-D: fan out PrivateStateUpdate messages to NPC bots so each
+        # seat's in-memory mirror absorbs the seer/medium/guard results,
+        # alive-set changes, and day_advanced ticks before the next
+        # decision request fires. No-op for rounds-mode games (the pusher
+        # short-circuits on `discussion_mode != "reactive_voice"`).
+        pusher = self._phase_d_state_pusher
+        if pusher is not None:
+            push_after_advance = getattr(pusher, "push_after_advance", None)
+            if push_after_advance is not None:
+                try:
+                    await push_after_advance(
+                        game=new_game,
+                        prev_phase=previous_phase,
+                        private_logs=transition.private_logs,
+                        public_logs=transition.public_logs,
+                    )
+                except Exception:
+                    log.exception("phase_d_state_push_failed game=%s", game_id)
 
         # 4. Announce WAITING status if we paused.
         if transition.requires_host_decision and transition.pending is not None:

@@ -390,16 +390,53 @@ class NightActionDecision(BaseEnvelope):
     reason_summary: str = ""
 
 
+class WolfChatRequest(BaseEnvelope):
+    """Master → NPC (wolf seat only): "post a coordination line now".
+
+    Sent sequentially to each alive wolf NPC at the start of the night
+    phase before attack-decision dispatch. Each wolf reads the others'
+    `wolf_chat_history` (already updated via `private_state_update`) so
+    the chain converges on a target. NPC replies via `WolfChatSend`
+    carrying the same `request_id` so Master can drain its pending
+    futures.
+    """
+
+    type: Literal["wolf_chat_request"] = "wolf_chat_request"
+    request_id: str
+    npc_id: str
+    seat_no: int
+    game_id: str
+    phase_id: str
+    candidate_seats: tuple[tuple[int, str], ...] = Field(
+        default_factory=tuple,
+        description=(
+            "(seat_no, name) pairs of legal attack targets — passed so the "
+            "wolf NPC can ground its proposal in real candidates rather "
+            "than improvising a name."
+        ),
+    )
+    public_state_summary: str = ""
+    expires_at_ms: int
+
+
 class WolfChatSend(BaseEnvelope):
     """NPC (wolf seat only) → Master: post a line to the wolves' private
     chat. Master persists it as a `WOLF_CHAT` private LogEntry and pushes
-    a `wolf_chat` PrivateStateUpdate to every other live wolf seat's NPC."""
+    a `wolf_chat` PrivateStateUpdate to every other live wolf seat's NPC.
+
+    `request_id` is non-null when the line was prompted by a
+    `WolfChatRequest` from Master; the dispatcher uses it to resolve the
+    pending future. Spontaneous wolf chat (a wolf NPC volunteers a line
+    without a request) leaves it null — Master broker still persists +
+    fans out, just without resolving any future.
+    """
 
     type: Literal["wolf_chat_send"] = "wolf_chat_send"
     npc_id: str
     seat_no: int
     game_id: str
     text: str
+    request_id: str | None = None
 
 
 class PlaybackAuthorized(BaseEnvelope):

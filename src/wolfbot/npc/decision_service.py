@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -230,6 +230,82 @@ _NIGHT_ACT_TEXT: dict[str, str] = {
 }
 
 
+_WOLF_CHAT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["text"],
+    "properties": {
+        "text": {
+            "type": "string",
+            "description": "短い coordinator メッセージ (狼仲間にだけ届く)。最大 80 文字。",
+        },
+    },
+}
+
+
+def build_wolf_chat_prompt(
+    *,
+    state: NpcGameState,
+    persona: Persona,
+    candidates: Sequence[tuple[int, str]],
+    public_state_summary: str,
+) -> tuple[str, str]:
+    """Compose system + user prompts for a wolf-chat coordination line.
+
+    Wolves talk to each other privately. The line must:
+    - propose / agree / counter on a target,
+    - stay under 80 chars,
+    - speak in the persona's voice (this is still character).
+    """
+    persona_block = _build_persona_block(persona)
+    state_block = _build_state_block(state)
+    candidates_str = (
+        "、".join(f"席{seat_no} {name}" for seat_no, name in candidates)
+        or "(なし)"
+    )
+    digest = public_state_summary or "(情報なし)"
+    system = (
+        "あなたは人狼ゲームの 1 プレイヤーです。"
+        "あなたは人狼で、仲間の人狼にだけ届く秘密チャットでこのターンの "
+        "襲撃方針を簡潔に伝えてください。村人に届く発話ではないので、"
+        "ペルソナの口調を保ちつつ素直に作戦を提示してよい (ただし"
+        "メタ用語は避ける)。返答は JSON のみ。"
+    )
+    user_parts = [
+        f"## 現在: 人狼チャット (day {state.day_number})",
+        "",
+        persona_block,
+        "",
+        "## 自分の状況 (非公開)",
+        state_block,
+        "",
+        "## 場の状況 (Master ダイジェスト)",
+        digest,
+        "",
+        f"## 襲撃候補席\n{candidates_str}",
+        "",
+        "上記を踏まえ、仲間の狼に向けて 80 文字以内で 1 行だけ書いてください。"
+        "JSON は {\"text\": \"...\"} の形。",
+    ]
+    return system, "\n".join(p for p in user_parts if p is not None)
+
+
+def parse_wolf_chat_text(raw_json: str) -> str | None:
+    """Pull the ``text`` field out of the JSON response, with empty / non-string
+    payloads dropped to None so the dispatcher records a no-line outcome."""
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("text")
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip()
+    return cleaned or None
+
+
 def build_night_prompt(
     *,
     state: NpcGameState,
@@ -303,9 +379,12 @@ def parse_decision(
 __all__ = [
     "_NIGHT_SCHEMA",
     "_VOTE_SCHEMA",
+    "_WOLF_CHAT_SCHEMA",
     "DecisionLLM",
     "DecisionResult",
     "build_night_prompt",
     "build_vote_prompt",
+    "build_wolf_chat_prompt",
     "parse_decision",
+    "parse_wolf_chat_text",
 ]

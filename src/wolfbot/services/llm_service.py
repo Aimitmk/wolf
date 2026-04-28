@@ -683,6 +683,32 @@ class LLMAdapter:
                 continue
             buckets[action_label].append((player, kind, list(legal)))
         dispatcher = self._npc_decision_dispatcher
+        # Phase-D pre-night wolf-chat coordination. Mirrors rounds-mode
+        # `_run_wolf_chat`: each alive wolf NPC gets a turn (sequential)
+        # to post a coordination line BEFORE the wolf_attack bucket
+        # fans out, so wolf B sees wolf A's proposed target via the
+        # wolf_chat_history the broker already pushed.
+        wolf_attack_items = buckets.get("wolf_attack", [])
+        if len(wolf_attack_items) >= 2:
+            wolves = [p for p, _kind, _legal in wolf_attack_items]
+            attack_legal: set[int] = set()
+            for _p, _kind, legal in wolf_attack_items:
+                attack_legal.update(legal)
+            try:
+                await dispatcher.dispatch_wolf_chat_lines(  # type: ignore[union-attr]
+                    game_id=game.id,
+                    day=game.day_number,
+                    wolves=wolves,
+                    seats=seats,
+                    candidate_seats=sorted(attack_legal),
+                    public_state_summary=await self._build_public_digest(game, seats),
+                )
+            except Exception:
+                log.exception(
+                    "phase_d_wolf_chat_dispatch_failed game=%s day=%d",
+                    game.id, game.day_number,
+                )
+
         for action_label, items in buckets.items():
             if not items:
                 continue

@@ -252,6 +252,101 @@ async def test_dispatch_night_actions_routes_action_kind() -> None:
     assert results == {3: 1}
 
 
+async def test_dispatch_wolf_chat_lines_resolves_sequentially() -> None:
+    """`dispatch_wolf_chat_lines` runs wolves sequentially so each
+    WolfChatRequest awaits the previous wolf's broker fan-out before the
+    next wolf is asked."""
+    from wolfbot.domain.ws_messages import WolfChatRequest, WolfChatSend
+
+    registry = InMemoryNpcRegistry()
+    seat2_buf: list[str] = []
+    seat3_buf: list[str] = []
+    registry.register(
+        npc_id="npc_w2", discord_bot_user_id="bw2",
+        supported_voices=(), version="1",
+        send=_capture_send(seat2_buf), now_ms=1000, persona_key="setsu",
+    )
+    registry.assign("npc_w2", seat=2, game_id="g1", phase_id="g1::day1::NIGHT::1")
+    registry.register(
+        npc_id="npc_w3", discord_bot_user_id="bw3",
+        supported_voices=(), version="1",
+        send=_capture_send(seat3_buf), now_ms=1000, persona_key="gina",
+    )
+    registry.assign("npc_w3", seat=3, game_id="g1", phase_id="g1::day1::NIGHT::1")
+
+    dispatcher = NpcDecisionDispatcher(
+        registry=registry,
+        config=DecisionDispatcherConfig(request_ttl_ms=5_000),
+        now_ms=lambda: 1_000,
+    )
+    wolves = [
+        Player(seat_no=2, role=Role.WEREWOLF, alive=True),
+        Player(seat_no=3, role=Role.WEREWOLF, alive=True),
+    ]
+
+    async def _drive() -> dict[int, str | None]:
+        return await dispatcher.dispatch_wolf_chat_lines(
+            game_id="g1", day=1, wolves=wolves, seats=_seats(),
+            candidate_seats=[1],
+        )
+
+    task = asyncio.create_task(_drive())
+    # Wait for wolf 2's request (lower seat goes first because of sort).
+    for _ in range(50):
+        if seat2_buf:
+            break
+        await asyncio.sleep(0.01)
+    assert len(seat2_buf) == 1
+    assert seat3_buf == []  # wolf 3 hasn't been asked yet
+
+    sent2 = WolfChatRequest.model_validate_json(seat2_buf[0])
+    await dispatcher.on_wolf_chat_send(
+        WolfChatSend(
+            ts=2_000, trace_id=sent2.trace_id, request_id=sent2.request_id,
+            npc_id="npc_w2", seat_no=2, game_id="g1",
+            text="席1を狙う",
+        )
+    )
+    # Now wolf 3 should be asked.
+    for _ in range(50):
+        if seat3_buf:
+            break
+        await asyncio.sleep(0.01)
+    assert len(seat3_buf) == 1
+    sent3 = WolfChatRequest.model_validate_json(seat3_buf[0])
+    await dispatcher.on_wolf_chat_send(
+        WolfChatSend(
+            ts=3_000, trace_id=sent3.trace_id, request_id=sent3.request_id,
+            npc_id="npc_w3", seat_no=3, game_id="g1",
+            text="同意",
+        )
+    )
+    results = await task
+    assert results == {2: "席1を狙う", 3: "同意"}
+
+
+async def test_dispatch_wolf_chat_lines_timeout_yields_none() -> None:
+    registry = InMemoryNpcRegistry()
+    seat2_buf: list[str] = []
+    registry.register(
+        npc_id="npc_w2", discord_bot_user_id="bw2",
+        supported_voices=(), version="1",
+        send=_capture_send(seat2_buf), now_ms=1000, persona_key="setsu",
+    )
+    registry.assign("npc_w2", seat=2, game_id="g1", phase_id="g1::day1::NIGHT::1")
+    dispatcher = NpcDecisionDispatcher(
+        registry=registry,
+        config=DecisionDispatcherConfig(request_ttl_ms=100),
+        now_ms=lambda: 0,
+    )
+    wolves = [Player(seat_no=2, role=Role.WEREWOLF, alive=True)]
+    results = await dispatcher.dispatch_wolf_chat_lines(
+        game_id="g1", day=1, wolves=wolves, seats=_seats(),
+        candidate_seats=[1],
+    )
+    assert results == {2: None}
+
+
 async def test_decide_vote_request_payload_shape() -> None:
     """The wire payload carries the seat / round / candidate pairs and a
     deadline so the NPC bot can build its prompt without a Master DB hit."""

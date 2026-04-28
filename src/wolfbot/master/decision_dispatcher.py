@@ -36,6 +36,8 @@ from wolfbot.domain.ws_messages import (
     DecideVoteRequest,
     NightActionDecision,
     VoteDecision,
+    WolfChatRequest,
+    WolfChatSend,
 )
 from wolfbot.master.npc_registry import NpcEntry, NpcRegistry
 
@@ -65,6 +67,16 @@ class _PendingDecision:
     request_id: str
 
 
+@dataclass
+class _PendingWolfChat:
+    """Pending wolf-chat round-trip — resolves to the spoken text."""
+
+    future: asyncio.Future[str | None]
+    seat_no: int
+    npc_id: str
+    request_id: str
+
+
 class NpcDecisionDispatcher:
     """Send DecideVoteRequest / DecideNightActionRequest to NPC bots and
     collect their decisions.
@@ -86,6 +98,10 @@ class NpcDecisionDispatcher:
         self._now_ms = now_ms
         # request_id → pending future. Cleaned up on resolution / timeout.
         self._pending: dict[str, _PendingDecision] = {}
+        # request_id → pending wolf-chat future (kept separate from
+        # `_pending` so a stray vote_decision can't accidentally resolve
+        # a wolf chat or vice versa).
+        self._pending_wolf_chat: dict[str, _PendingWolfChat] = {}
 
     # ------------------------------------------------- public dispatch entry
 
@@ -133,6 +149,50 @@ class NpcDecisionDispatcher:
             *(_one(v) for v in voters), return_exceptions=False
         )
         return dict(results)
+
+    async def dispatch_wolf_chat_lines(
+        self,
+        *,
+        game_id: str,
+        day: int,
+        wolves: Sequence[Player],
+        seats: Sequence[Seat],
+        candidate_seats: Sequence[int],
+        public_state_summary: str = "",
+    ) -> dict[int, str | None]:
+        """Sequentially elicit one wolf-chat line per alive wolf seat.
+
+        Sequential by design: each WolfChatRequest is awaited so the
+        broker's broadcast lands before the next wolf's request fires,
+        which is what lets the wolves' state mirrors converge before the
+        attack-decision dispatch.
+
+        Returns ``{wolf_seat: line_or_None}`` — None when the NPC was
+        offline / send failed / timed out / declined.
+        """
+        from wolfbot.domain.discussion import make_phase_id
+
+        seats_by_no = {s.seat_no: s for s in seats}
+        candidate_pairs = tuple(
+            (no, seats_by_no[no].display_name)
+            for no in candidate_seats
+            if no in seats_by_no
+        )
+        phase_id = make_phase_id(
+            game_id, day, Phase.NIGHT_0 if day == 0 else Phase.NIGHT
+        )
+        out: dict[int, str | None] = {}
+        for wolf in sorted(wolves, key=lambda p: p.seat_no):
+            text = await self._dispatch_one_wolf_chat(
+                wolf=wolf,
+                seats_by_no=seats_by_no,
+                candidate_pairs=candidate_pairs,
+                game_id=game_id,
+                phase_id=phase_id,
+                public_state_summary=public_state_summary,
+            )
+            out[wolf.seat_no] = text
+        return out
 
     async def dispatch_night_actions(
         self,
@@ -201,6 +261,22 @@ class NpcDecisionDispatcher:
             msg.reason_summary or "(none)",
         )
 
+    async def on_wolf_chat_send(self, msg: WolfChatSend) -> None:
+        """Resolve any pending wolf-chat future for ``msg.request_id``.
+
+        Idempotent: if no future is parked (e.g. spontaneous wolf line
+        sent without a request, or duplicate from retransmit), this is a
+        no-op. Persistence + broadcast still happens via the broker
+        regardless.
+        """
+        if msg.request_id is None:
+            return
+        pending = self._pending_wolf_chat.pop(msg.request_id, None)
+        if pending is None:
+            return
+        if not pending.future.done():
+            pending.future.set_result(msg.text)
+
     async def on_night_action_decision(self, msg: NightActionDecision) -> None:
         pending = self._pending.pop(msg.request_id, None)
         if pending is None:
@@ -263,6 +339,67 @@ class NpcDecisionDispatcher:
             payload_json=req.model_dump_json(),
             label="vote",
         )
+
+    async def _dispatch_one_wolf_chat(
+        self,
+        *,
+        wolf: Player,
+        seats_by_no: dict[int, Seat],
+        candidate_pairs: tuple[tuple[int, str], ...],
+        game_id: str,
+        phase_id: str,
+        public_state_summary: str,
+    ) -> str | None:
+        seat = seats_by_no.get(wolf.seat_no)
+        if seat is None or not seat.is_llm:
+            return None
+        entry = self._find_npc_for_seat(game_id, wolf.seat_no)
+        if entry is None or entry.send is None:
+            log.info(
+                "wolf_chat_dispatch_skip_no_npc game=%s seat=%d",
+                game_id, wolf.seat_no,
+            )
+            return None
+        request_id = f"rwc_{uuid.uuid4().hex[:12]}"
+        deadline = self._now_ms() + self.config.request_ttl_ms
+        req = WolfChatRequest(
+            ts=self._now_ms(),
+            trace_id=f"wolf_chat-{game_id}-{wolf.seat_no}",
+            request_id=request_id,
+            npc_id=entry.npc_id,
+            seat_no=wolf.seat_no,
+            game_id=game_id,
+            phase_id=phase_id,
+            candidate_seats=candidate_pairs,
+            public_state_summary=public_state_summary,
+            expires_at_ms=deadline,
+        )
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str | None] = loop.create_future()
+        self._pending_wolf_chat[request_id] = _PendingWolfChat(
+            future=future, seat_no=wolf.seat_no,
+            npc_id=entry.npc_id, request_id=request_id,
+        )
+        try:
+            await entry.send(req.model_dump_json())
+        except Exception:
+            log.exception(
+                "wolf_chat_dispatch_send_failed npc=%s seat=%d",
+                entry.npc_id, wolf.seat_no,
+            )
+            self._pending_wolf_chat.pop(request_id, None)
+            return None
+        timeout_s = self.config.request_ttl_ms / 1000.0
+        try:
+            return await asyncio.wait_for(future, timeout=timeout_s)
+        except TimeoutError:
+            log.info(
+                "wolf_chat_dispatch_timeout npc=%s seat=%d request=%s",
+                entry.npc_id, wolf.seat_no, request_id,
+            )
+            return None
+        finally:
+            self._pending_wolf_chat.pop(request_id, None)
 
     async def _dispatch_one_night(
         self,

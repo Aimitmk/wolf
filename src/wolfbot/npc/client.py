@@ -43,14 +43,19 @@ from wolfbot.domain.ws_messages import (
     TtsFailed,
     TtsFinished,
     VoteDecision,
+    WolfChatRequest,
+    WolfChatSend,
 )
 from wolfbot.npc.decision_service import (
     _NIGHT_SCHEMA,
     _VOTE_SCHEMA,
+    _WOLF_CHAT_SCHEMA,
     DecisionLLM,
     build_night_prompt,
     build_vote_prompt,
+    build_wolf_chat_prompt,
     parse_decision,
+    parse_wolf_chat_text,
 )
 from wolfbot.npc.game_state import NpcGameState, apply_update, state_from_snapshot
 from wolfbot.npc.playback import (
@@ -196,6 +201,10 @@ class NpcClient:
         elif t == "decide_night_action_request":
             await self._on_decide_night_action_request(
                 DecideNightActionRequest.model_validate(payload)
+            )
+        elif t == "wolf_chat_request":
+            await self._on_wolf_chat_request(
+                WolfChatRequest.model_validate(payload)
             )
         else:
             log.info("npc_client_unhandled_type type=%s", t)
@@ -564,6 +573,67 @@ class NpcClient:
             reason_summary=reason,
         )
         await self.send(decision.model_dump_json())
+
+    async def _on_wolf_chat_request(self, req: WolfChatRequest) -> None:
+        """Phase-D: wolf NPC posts a coordination line.
+
+        Drops with empty text on missing state / non-wolf role / no
+        decision LLM / LLM error / parse failure. Master's broker still
+        runs on every WolfChatSend, so an empty text is silently
+        absorbed rather than persisted.
+        """
+        if req.npc_id != self.config.npc_id:
+            return
+        text = await self._build_wolf_chat_line(req)
+        decision = WolfChatSend(
+            ts=self.now_ms(),
+            trace_id=req.trace_id,
+            npc_id=self.config.npc_id,
+            seat_no=req.seat_no,
+            game_id=req.game_id,
+            text=text or "",
+            request_id=req.request_id,
+        )
+        await self.send(decision.model_dump_json())
+
+    async def _build_wolf_chat_line(self, req: WolfChatRequest) -> str | None:
+        from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+
+        state = self.game_states.get(req.game_id)
+        if state is None:
+            log.warning(
+                "npc_wolf_chat_no_state game=%s seat=%d",
+                req.game_id, req.seat_no,
+            )
+            return None
+        if state.role != "WEREWOLF":
+            log.info(
+                "npc_wolf_chat_drop_non_wolf seat=%d role=%s",
+                req.seat_no, state.role,
+            )
+            return None
+        if self.decision_llm is None:
+            return None
+        persona = NPC_PERSONAS_BY_KEY.get(state.persona_key)
+        if persona is None:
+            return None
+        system, user = build_wolf_chat_prompt(
+            state=state,
+            persona=persona,
+            candidates=req.candidate_seats,
+            public_state_summary=req.public_state_summary,
+        )
+        try:
+            raw = await self.decision_llm.decide_json(
+                system_prompt=system, user_prompt=user, schema=_WOLF_CHAT_SCHEMA,
+            )
+        except Exception:
+            log.exception(
+                "npc_wolf_chat_llm_failed game=%s seat=%d",
+                req.game_id, req.seat_no,
+            )
+            return None
+        return parse_wolf_chat_text(raw)
 
     async def _decide_night_target(
         self, req: DecideNightActionRequest

@@ -615,6 +615,20 @@ async def _run() -> None:
             now_ms=lambda: int(time.time() * 1000),
         )
 
+        # Phase-D: state pusher fans out seer/medium/guard results,
+        # alive_changed, and day_advanced PrivateStateUpdates to NPC
+        # bots after each transition. Wired into GameService via the
+        # late-binding setter (the pusher needs npc_registry which is
+        # only available here, but GameService was constructed earlier).
+        from wolfbot.master.phase_d_state_pusher import PhaseDStatePusher
+
+        phase_d_pusher = PhaseDStatePusher(
+            repo=repo,
+            registry=npc_registry,
+            now_ms=lambda: int(time.time() * 1000),
+        )
+        game_service.set_phase_d_state_pusher(phase_d_pusher)
+
         async def _reactive_voice_reenter(game_id: str) -> None:
             # On Master restart, reactive_voice games still in
             # DAY_DISCUSSION need their VC joined again before the
@@ -942,7 +956,17 @@ async def _run() -> None:
             await decision_dispatcher.on_night_action_decision(msg)
 
         async def _on_wolf_chat_send(msg: Any, _ctx: Any) -> None:
+            # Two consumers run for every wolf_chat_send:
+            # 1) Broker: persist as WOLF_CHAT private log + broadcast a
+            #    `wolf_chat` PrivateStateUpdate to other live wolves.
+            # 2) Dispatcher: resolve the matching pending future when
+            #    the line was prompted by a Master-issued `WolfChatRequest`.
+            # Order matters — let the broker run first so by the time
+            # the dispatcher resolves the future and the wolf-chat
+            # gather() returns, every other wolf NPC's mirror is
+            # already updated.
             await wolf_chat_broker.handle_wolf_chat_send(msg)
+            await decision_dispatcher.on_wolf_chat_send(msg)
 
         master_handlers = MasterHandlers(
             registry=npc_registry,
