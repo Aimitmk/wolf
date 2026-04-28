@@ -2610,3 +2610,220 @@ def test_make_gemini_decider_constructs_vertex_ai_client(
     assert decider.model == "gemini-3-flash-preview"
     assert decider.thinking_level == "high"
     assert decider.timeout == 15.0
+
+
+# ---------------------------------------------------------- trace integration
+#
+# These verify that each provider's ``decide()`` actually flushes a JSONL
+# trace line carrying the right ``provider`` tag, the model name, the raw
+# response text, and token usage extracted from the SDK reply. The kwargs
+# tests above only check the request side; without these the trace could
+# silently regress (e.g. a provider rename, missing token extraction, or a
+# refactor that drops ``log_llm_call`` from one branch's ``finally``) and
+# still pass CI. Also covers the error path so a failure recorded into the
+# trace has ``response=None`` and a non-empty ``error`` string.
+
+
+class _FakeChatCompletionsWithUsage:
+    """Like ``_FakeChatCompletions`` but the response carries ``.usage`` so
+    the OpenAI-shaped token extractor returns real integers."""
+
+    def __init__(
+        self, content: str, usage: tuple[int, int, int] = (1500, 200, 1700)
+    ) -> None:
+        self._content = content
+        self._usage = usage
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        prompt, completion, total = self._usage
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content=self._content))
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                total_tokens=total,
+            ),
+        )
+
+
+class _FakeAsyncOpenAIWithUsage:
+    """OpenAI-shaped fake whose responses include ``usage``."""
+
+    def __init__(self, content: str, usage: tuple[int, int, int] = (1500, 200, 1700)) -> None:
+        from types import SimpleNamespace
+
+        self.chat = SimpleNamespace(
+            completions=_FakeChatCompletionsWithUsage(content, usage)
+        )
+
+
+class _FakeGenAIModelsWithUsage:
+    """``generate_content`` fake whose response exposes ``usage_metadata``
+    so ``extract_gemini_vertex_tokens`` returns real integers."""
+
+    def __init__(self, content: str, usage: tuple[int, int, int] = (2000, 300, 2300)) -> None:
+        self._content = content
+        self._usage = usage
+        self.calls: list[dict[str, object]] = []
+
+    async def generate_content(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        prompt, completion, total = self._usage
+        return SimpleNamespace(
+            text=self._content,
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=prompt,
+                candidates_token_count=completion,
+                total_token_count=total,
+            ),
+        )
+
+
+class _FakeGenAIClientWithUsage:
+    def __init__(self, content: str, usage: tuple[int, int, int] = (2000, 300, 2300)) -> None:
+        from types import SimpleNamespace
+
+        self.aio = SimpleNamespace(models=_FakeGenAIModelsWithUsage(content, usage))
+
+
+def _read_trace_jsonl(trace_dir, game_id: str = "g_trace") -> list[dict]:
+    import json
+
+    path = trace_dir / game_id / "gameplay.jsonl"
+    assert path.exists(), f"trace file not written: {path}"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.fixture
+def trace_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("WOLFBOT_LLM_TRACE_DIR", str(tmp_path))
+    monkeypatch.delenv("WOLFBOT_LLM_TRACE_DISABLED", raising=False)
+    return tmp_path
+
+
+async def test_xai_decider_writes_trace_with_response_and_tokens(
+    trace_dir,
+) -> None:
+    from wolfbot.services.llm_service import XAILLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    fake = _FakeAsyncOpenAIWithUsage(_canned_action_json())
+    decider = XAILLMActionDecider(client=fake, model="grok-4-1-fast")  # type: ignore[arg-type]
+    with trace_context(game_id="g_trace", phase="DAY_DISCUSSION", day=1):
+        await decider.decide("sys-xai", "ctx-xai")
+
+    rows = _read_trace_jsonl(trace_dir)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "xai"
+    assert row["model"] == "grok-4-1-fast"
+    assert row["role"] == "gameplay"
+    assert row["system_prompt"] == "sys-xai"
+    assert row["user_prompt"] == "ctx-xai"
+    assert '"intent": "speak"' in row["response"]
+    assert row["error"] is None
+    assert row["tokens"] == {"prompt": 1500, "completion": 200, "total": 1700}
+    assert row["phase"] == "DAY_DISCUSSION"
+    assert row["day"] == 1
+
+
+async def test_deepseek_decider_writes_trace_with_thinking_metadata(
+    trace_dir,
+) -> None:
+    from wolfbot.services.llm_service import DeepSeekLLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    fake = _FakeAsyncOpenAIWithUsage(_canned_action_json(), usage=(900, 110, 1010))
+    decider = DeepSeekLLMActionDecider(
+        client=fake,  # type: ignore[arg-type]
+        model="deepseek-v4-flash",
+        thinking="enabled",
+        reasoning_effort="max",
+    )
+    with trace_context(game_id="g_trace"):
+        await decider.decide("sys-ds", "ctx-ds")
+
+    rows = _read_trace_jsonl(trace_dir)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "deepseek"
+    assert row["model"] == "deepseek-v4-flash"
+    assert row["error"] is None
+    assert row["tokens"] == {"prompt": 900, "completion": 110, "total": 1010}
+    # System prompt is the full one-with-JSON-contract, not the bare input.
+    assert "sys-ds" in row["system_prompt"]
+    assert "json" in row["system_prompt"].lower()
+    # DeepSeek-specific knobs surfaced via extra metadata.
+    assert row["metadata"]["thinking"] == "enabled"
+    assert row["metadata"]["reasoning_effort"] == "max"
+
+
+async def test_gemini_decider_writes_trace_with_thinking_level(trace_dir) -> None:
+    from wolfbot.services.llm_service import GeminiLLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    fake = _FakeGenAIClientWithUsage(_canned_action_json(), usage=(1800, 220, 2020))
+    decider = GeminiLLMActionDecider(
+        client=fake, model="gemini-3-flash-preview", thinking_level="medium"
+    )
+    with trace_context(game_id="g_trace"):
+        await decider.decide("sys-gem", "ctx-gem")
+
+    rows = _read_trace_jsonl(trace_dir)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "gemini"
+    assert row["model"] == "gemini-3-flash-preview"
+    assert row["error"] is None
+    assert row["tokens"] == {"prompt": 1800, "completion": 220, "total": 2020}
+    assert row["system_prompt"] == "sys-gem"
+    assert row["user_prompt"] == "ctx-gem"
+    assert row["metadata"]["thinking_level"] == "medium"
+
+
+async def test_decider_error_path_writes_trace_with_null_response(
+    trace_dir,
+) -> None:
+    """When the underlying SDK call raises, the trace line records the error
+    string, leaves ``response`` as None, and tokens as None — so the viewer
+    can show that an LLM round failed without crashing on missing fields."""
+    from wolfbot.services.llm_service import XAILLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    class _Boom:
+        async def create(self, **kwargs: object) -> object:
+            raise RuntimeError("upstream API exploded")
+
+    class _BoomChat:
+        completions = _Boom()
+
+    class _BoomClient:
+        chat = _BoomChat()
+
+    # tenacity retries 4 times before giving up; suppress the final raise so
+    # we can inspect the trace.
+    decider = XAILLMActionDecider(client=_BoomClient(), model="grok-x")  # type: ignore[arg-type]
+    with (
+        trace_context(game_id="g_trace"),
+        pytest.raises(RuntimeError, match="exploded"),
+    ):
+        await decider.decide("sys", "ctx")
+
+    rows = _read_trace_jsonl(trace_dir)
+    # 4 retry attempts → 4 trace lines (each finally fires once).
+    assert len(rows) == 4
+    for row in rows:
+        assert row["provider"] == "xai"
+        assert row["response"] is None
+        assert row["tokens"] is None
+        assert row["error"] is not None
+        assert "RuntimeError" in row["error"]
+        assert "exploded" in row["error"]
