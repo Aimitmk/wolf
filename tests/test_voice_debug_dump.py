@@ -124,6 +124,60 @@ async def test_txt_leads_with_transcript_for_quick_inspection(
     assert "co_declaration: seer" in body
 
 
+async def test_raw_analyzer_json_appended_for_full_visibility(
+    enabled_dir: Path,
+) -> None:
+    """The analyzer LLM emits more fields than ``SttResult`` exposes
+    (vote_target_seat, stance, future fields). Operator wants to see
+    ALL of them in the .txt to validate the analysis without
+    cross-referencing the JSONL trace."""
+    result = SttResult(
+        text="席3が怪しいから投票",
+        confidence=0.95,
+        duration_ms=2_000,
+        summary="席3への投票表明",
+        co_declaration=None,
+        addressed_name=None,
+        raw_analysis={
+            "summary": "席3への投票表明",
+            "co_claim": None,
+            "vote_target_seat": 3,
+            "stance": {"3": "negative", "5": "positive"},
+            "addressed_name": None,
+        },
+    )
+    await dump_segment(_record(result=result), pcm=b"\x00" * 4_000)
+    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    # First line is still the transcript — analyzer fields don't push
+    # the headline answer below the fold.
+    assert body.splitlines()[0] == "transcript: 席3が怪しいから投票"
+    # The raw analyzer JSON section must include fields that aren't
+    # surfaced via SttResult's typed fields.
+    assert "analysis (raw):" in body
+    assert '"vote_target_seat": 3' in body
+    assert '"stance":' in body
+    assert '"3": "negative"' in body
+    # Japanese values are NOT escaped to ASCII (\uXXXX) — operator
+    # readability matters more than wire compactness here.
+    assert "席3への投票表明" in body
+
+
+async def test_raw_analyzer_section_omitted_when_no_analysis(
+    enabled_dir: Path,
+) -> None:
+    """If ``raw_analysis`` is None (e.g. STT-only provider, hard
+    failure), the section is omitted entirely — no empty headers."""
+    result = SttResult(
+        text="hi",
+        confidence=1.0,
+        duration_ms=100,
+        raw_analysis=None,
+    )
+    await dump_segment(_record(result=result), pcm=b"\x00" * 100)
+    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    assert "analysis (raw):" not in body
+
+
 async def test_low_confidence_path_dumps_with_failure_reason(
     enabled_dir: Path,
 ) -> None:

@@ -84,7 +84,15 @@ def _format_txt(record: SegmentDumpRecord) -> str:
     operator sees first when they open the file in Finder/quick-look —
     they're typically debugging "did Whisper hear me say X?" and the
     answer should not be buried under metadata fields.
+
+    The full analyzer-LLM JSON output is appended at the bottom under
+    ``analysis (raw):`` so structured fields like ``vote_target_seat``
+    and ``stance`` are visible without cross-referencing the JSONL
+    trace. Pretty-printed with ``ensure_ascii=False`` so Japanese
+    field values stay readable.
     """
+    import json
+
     duration_s = (record.audio_end_ms - record.audio_start_ms) / 1000.0
     lines: list[str] = []
     if record.result is not None and record.result.text:
@@ -118,6 +126,12 @@ def _format_txt(record: SegmentDumpRecord) -> str:
         record.result is not None and record.result.text
     ):
         lines.append(f"failure_reason: {record.failure_reason}")
+    if record.result is not None and record.result.raw_analysis:
+        lines.append("")
+        lines.append("analysis (raw):")
+        lines.append(
+            json.dumps(record.result.raw_analysis, ensure_ascii=False, indent=2)
+        )
     return "\n".join(lines) + "\n"
 
 

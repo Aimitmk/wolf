@@ -161,6 +161,12 @@ async def test_full_pipeline_success_propagates_structured_fields(
     assert result.summary == "席3への投票表明"
     assert result.co_declaration is None
     assert result.addressed_name is None
+    # ``raw_analysis`` carries the full analyzer JSON for debug
+    # visibility — fields the typed result drops (vote_target_seat /
+    # stance) must round-trip here.
+    assert result.raw_analysis is not None
+    assert result.raw_analysis["vote_target_seat"] == 3
+    assert result.raw_analysis["stance"] == {"3": "negative"}
     # 4000 PCM bytes at Discord's native 48 kHz stereo 16-bit
     # (192_000 bytes/sec) ≈ 20 ms.
     assert 15 < result.duration_ms < 30

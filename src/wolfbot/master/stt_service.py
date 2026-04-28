@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from wolfbot.domain.enums import (
     CO_CLAIM_VALUES,
@@ -80,6 +80,14 @@ class SttResult:
     extracted from the utterance by providers that infer it (Gemini's
     `co_claim`). Authoritative when set; otherwise the discussion service
     falls back to substring matching on `text` for legacy compatibility.
+
+    `raw_analysis` carries the full parsed JSON dict from the analyzer
+    LLM (or the multimodal analyzer's structured output). This is
+    pure debug visibility — production code paths read the typed
+    fields above. The optional debug dump uses it to surface
+    ``vote_target_seat``, ``stance``, and any future analyzer fields
+    in the ``.txt`` sidecar without needing a separate cross-reference
+    to the JSONL trace.
     """
 
     text: str
@@ -88,6 +96,7 @@ class SttResult:
     summary: str | None = None
     co_declaration: str | None = None
     addressed_name: str | None = None
+    raw_analysis: dict[str, Any] | None = None
 
 
 class SttProviderError(RuntimeError):
@@ -349,6 +358,7 @@ class GeminiAudioAnalyzer:
                     summary=summary_str,
                     co_declaration=co_declaration,
                     addressed_name=addressed_name,
+                    raw_analysis=parsed or None,
                 )
 
         except SttProviderError:
@@ -548,6 +558,7 @@ class GroqWhisperAudioAnalyzer:
             summary=summary_str,
             co_declaration=co_decl,
             addressed_name=addressed_name,
+            raw_analysis=analysis or None,
         )
 
     async def _whisper(
