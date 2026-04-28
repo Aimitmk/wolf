@@ -62,8 +62,16 @@ class WolfbotAudioSink(voice_recv.AudioSink):
     @voice_recv.AudioSink.listener()  # type: ignore[untyped-decorator]
     def on_voice_member_speaking_start(self, member: discord.Member) -> None:
         uid = str(member.id)
+        # Snapshot the display name now — by the time the coroutine
+        # runs the member object may have been GC'd or had its nick
+        # changed, and we want the name as it was when speech began.
+        display_name = getattr(member, "display_name", None) or getattr(
+            member, "name", None
+        )
         asyncio.run_coroutine_threadsafe(
-            self._ingest.begin_segment(speaker_user_id=uid),
+            self._ingest.begin_segment(
+                speaker_user_id=uid, display_name=display_name
+            ),
             self._loop,
         )
 

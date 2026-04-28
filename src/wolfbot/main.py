@@ -180,7 +180,15 @@ async def _run() -> None:
                 sink = WolfbotAudioSink(
                     voice_ingest, loop=asyncio.get_running_loop()
                 )
-                vc_client.listen(sink)
+                # Wrap with SilenceGeneratorSink so gaps in Discord's
+                # opus stream (the user pausing mid-utterance) get
+                # padded with synthetic 20ms silence frames. Without
+                # this, our PCM buffer concatenates only the spoken
+                # frames and the resulting WAV plays back time-
+                # compressed — Whisper sees garbled audio and falls
+                # back to its boilerplate hallucinations
+                # ("ご視聴ありがとうございました").
+                vc_client.listen(voice_recv.SilenceGeneratorSink(sink))
                 master_vc_ref[0] = vc_client
                 log.info(
                     "master_vc_joined channel=%s game=%s", channel_id, game.id

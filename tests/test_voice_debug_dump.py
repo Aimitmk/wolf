@@ -29,6 +29,7 @@ def _record(
     segment_id: str = "seg_001",
     seat_no: int = 1,
     audio_bytes: int = 9_600,
+    display_name: str | None = "🌙 セツ",
     result: SttResult | None = None,
     failure_reason: str | None = None,
 ) -> SegmentDumpRecord:
@@ -44,6 +45,7 @@ def _record(
         pcm_channels=2,
         pcm_sample_width=2,
         audio_bytes=audio_bytes,
+        display_name=display_name,
         result=result,
         failure_reason=failure_reason,
     )
@@ -68,9 +70,9 @@ async def test_disabled_when_env_unset(
 
 
 async def test_writes_wav_and_txt_pair_on_success(enabled_dir: Path) -> None:
-    """Both files land under ``<dir>/<game_id>/`` with the segment id as
-    a shared stem, so an operator scanning Finder sees ``.wav`` /
-    ``.txt`` next to each other."""
+    """Both files land under ``<dir>/<game_id>/<speaker_name>/`` with the
+    segment id as a shared stem, so an operator scanning Finder sees
+    ``.wav`` / ``.txt`` next to each other, grouped by player."""
     pcm = b"\x01\x02\x03\x04" * 1_000  # 4 KB ≈ 20 ms @ 48 kHz stereo
     result = SttResult(
         text="席3が怪しい",
@@ -82,8 +84,8 @@ async def test_writes_wav_and_txt_pair_on_success(enabled_dir: Path) -> None:
     )
     await dump_segment(_record(result=result), pcm=pcm)
 
-    wav_path = enabled_dir / "g_dbg" / "seg_001.wav"
-    txt_path = enabled_dir / "g_dbg" / "seg_001.txt"
+    wav_path = enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.wav"
+    txt_path = enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt"
     assert wav_path.exists() and txt_path.exists()
 
 
@@ -93,7 +95,7 @@ async def test_dumped_wav_is_a_real_wav_file(enabled_dir: Path) -> None:
     pcm = b"\x00\x01" * 9_600  # ~50 ms @ 48 kHz stereo
     await dump_segment(_record(audio_bytes=len(pcm)), pcm=pcm)
 
-    wav_path = enabled_dir / "g_dbg" / "seg_001.wav"
+    wav_path = enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.wav"
     with wave.open(str(wav_path), "rb") as r:
         assert r.getframerate() == 48_000
         assert r.getnchannels() == 2
@@ -117,7 +119,7 @@ async def test_txt_leads_with_transcript_for_quick_inspection(
         addressed_name=None,
     )
     await dump_segment(_record(result=result), pcm=b"\x00" * 4_000)
-    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    body = (enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt").read_text(encoding="utf-8")
     first = body.splitlines()[0]
     assert first == "transcript: 占いCO 席7白"
     assert "asr_conf     : 0.950" in body
@@ -147,7 +149,7 @@ async def test_raw_analyzer_json_appended_for_full_visibility(
         },
     )
     await dump_segment(_record(result=result), pcm=b"\x00" * 4_000)
-    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    body = (enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt").read_text(encoding="utf-8")
     # First line is still the transcript — analyzer fields don't push
     # the headline answer below the fold.
     assert body.splitlines()[0] == "transcript: 席3が怪しいから投票"
@@ -174,7 +176,7 @@ async def test_raw_analyzer_section_omitted_when_no_analysis(
         raw_analysis=None,
     )
     await dump_segment(_record(result=result), pcm=b"\x00" * 100)
-    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    body = (enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt").read_text(encoding="utf-8")
     assert "analysis (raw):" not in body
 
 
@@ -197,7 +199,7 @@ async def test_low_confidence_path_dumps_with_failure_reason(
         _record(result=result, failure_reason="stt_low_confidence"),
         pcm=b"\x00" * 4_000,
     )
-    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    body = (enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt").read_text(encoding="utf-8")
     assert "transcript: ご視聴ありがとうございました" in body
     assert "asr_conf     : 0.050" in body
 
@@ -212,7 +214,7 @@ async def test_hard_failure_path_dumps_audio_with_failure_reason(
         _record(result=None, failure_reason="groq_http_400"),
         pcm=b"\x00" * 4_000,
     )
-    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    body = (enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt").read_text(encoding="utf-8")
     first = body.splitlines()[0]
     assert first == "transcript: <FAILED: groq_http_400>"
     assert "failure_reason: groq_http_400" in body
@@ -229,6 +231,67 @@ async def test_path_components_sanitized(enabled_dir: Path) -> None:
     found = list(enabled_dir.rglob("*.wav"))
     assert len(found) == 1
     assert ".." not in str(found[0])
+
+
+async def test_display_name_groups_segments_by_speaker(
+    enabled_dir: Path,
+) -> None:
+    """Segments from the same speaker land in the same per-name
+    subdirectory so an operator can ``ls`` to see one player's full
+    transcript history."""
+    pcm = b"\x00" * 200
+    await dump_segment(
+        _record(segment_id="seg_a", display_name="🌙 セツ"), pcm=pcm
+    )
+    await dump_segment(
+        _record(segment_id="seg_b", display_name="🌙 セツ"), pcm=pcm
+    )
+    speaker_dir = enabled_dir / "g_dbg" / "🌙 セツ"
+    assert (speaker_dir / "seg_a.wav").exists()
+    assert (speaker_dir / "seg_b.wav").exists()
+
+
+async def test_display_name_falls_back_to_user_id(enabled_dir: Path) -> None:
+    """Empty / missing display_name falls back to the Discord user ID
+    so dumps still group together — better than dropping into a single
+    'unknown' bucket where two speakers would collide."""
+    await dump_segment(_record(display_name=None), pcm=b"\x00" * 200)
+    expected = enabled_dir / "g_dbg" / "753109683971293296" / "seg_001.wav"
+    assert expected.exists()
+
+
+async def test_display_name_with_path_traversal_sanitized(
+    enabled_dir: Path,
+) -> None:
+    """A nick like ``../etc`` must NOT escape the game subdirectory —
+    display_name comes from Discord and is fully attacker-controlled."""
+    rec = _record(display_name="../../../etc/passwd")
+    await dump_segment(rec, pcm=b"\x00" * 100)
+    # Path components above the debug root must not exist.
+    assert not (enabled_dir.parent / "etc").exists()
+    found = list(enabled_dir.rglob("*.wav"))
+    assert len(found) == 1
+    assert ".." not in str(found[0])
+    # The dump still landed inside the game subdirectory.
+    assert (enabled_dir / "g_dbg") in found[0].parents
+
+
+async def test_txt_includes_speaker_name_when_known(
+    enabled_dir: Path,
+) -> None:
+    """Operator-friendly: the txt sidecar surfaces the human name so
+    they don't need to map seat_no → player every time."""
+    await dump_segment(
+        _record(
+            display_name="🌙 セツ",
+            result=SttResult(text="hi", confidence=1.0, duration_ms=100),
+        ),
+        pcm=b"\x00" * 100,
+    )
+    body = (
+        enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt"
+    ).read_text(encoding="utf-8")
+    assert "speaker_name : 🌙 セツ" in body
 
 
 async def test_write_failure_swallowed(
@@ -266,7 +329,8 @@ async def test_overrides_pcm_format_for_downsampled_callers(
         result=None,
     )
     await dump_segment(rec, pcm=b"\x00" * 32_000)
-    with wave.open(str(enabled_dir / "g_dbg" / "seg_mono.wav"), "rb") as r:
+    # display_name unset → falls back to the speaker_user_id ("u").
+    with wave.open(str(enabled_dir / "g_dbg" / "u" / "seg_mono.wav"), "rb") as r:
         assert r.getframerate() == 16_000
         assert r.getnchannels() == 1
 
@@ -285,7 +349,7 @@ async def test_dumped_txt_is_human_readable_not_json(enabled_dir: Path) -> None:
         ),
         pcm=b"\x00" * 100,
     )
-    body = (enabled_dir / "g_dbg" / "seg_001.txt").read_text(encoding="utf-8")
+    body = (enabled_dir / "g_dbg" / "🌙 セツ" / "seg_001.txt").read_text(encoding="utf-8")
     # No JSON braces should appear at the top level.
     assert not body.startswith("{")
     # The structure is colon-delimited key/value lines.

@@ -13,8 +13,13 @@ Layout::
 
     $WOLFBOT_VOICE_DEBUG_DIR/
       {game_id}/
-        seg_{id}.wav    # 48 kHz stereo 16-bit (Discord native)
-        seg_{id}.txt    # transcript + metadata, paired with the .wav
+        {speaker_name}/
+          seg_{id}.wav    # 48 kHz stereo 16-bit (Discord native)
+          seg_{id}.txt    # transcript + metadata, paired with the .wav
+
+The speaker subdirectory uses ``display_name`` when known so an operator
+can browse the dumps grouped by player; falls back to the Discord user
+ID when the display_name isn't available.
 
 Disabled by default — without the env var set, dumping is a no-op so
 production deployments can leave the call site in place. File writes
@@ -36,6 +41,11 @@ from wolfbot.master.stt_service import SttResult, pcm_to_wav
 log = logging.getLogger(__name__)
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+# Username sanitizer — preserves unicode (so "🌙 セツ" stays readable)
+# and only strips characters that are unsafe on Windows / macOS / Linux
+# filesystems or that would create traversal hazards.
+_UNSAFE_PATH_CHARS = re.compile(r"[<>:\"/\\|?*\x00-\x1f]+")
 
 
 @dataclass(frozen=True)
@@ -61,6 +71,7 @@ class SegmentDumpRecord:
     pcm_channels: int
     pcm_sample_width: int
     audio_bytes: int
+    display_name: str | None = None
     result: SttResult | None = None
     failure_reason: str | None = None
 
@@ -75,6 +86,33 @@ def _sanitize(s: str) -> str:
     """Sanitize a single path component (game_id or segment_id)."""
     cleaned = _SAFE_RE.sub("_", s).strip("_")
     return cleaned or "x"
+
+
+def _sanitize_username(name: str | None, fallback: str) -> str:
+    """Sanitize a display_name for use as a directory component.
+
+    Lenient compared to :func:`_sanitize` — preserves Japanese / emoji
+    so the dump tree stays human-browsable. Replaces only characters
+    that are illegal on common filesystems or that would enable path
+    traversal. Falls back to ``fallback`` (typically the Discord user
+    ID) when the input is empty / None / sanitizes to nothing.
+    """
+    if not name:
+        return _sanitize(fallback)
+    # Drop unsafe chars first so traversal segments like "../" can't
+    # survive even if the rest of the string is harmless.
+    cleaned = _UNSAFE_PATH_CHARS.sub("_", name)
+    # Strip leading/trailing dots and whitespace — `.` and ` ` directory
+    # names are legal but visually confusing and (on Windows) trimmed
+    # silently by the OS, which would collapse two distinct names.
+    cleaned = cleaned.strip(" .\t\n\r")
+    # Defensive: any residual ".." sequences get neutralised.
+    cleaned = cleaned.replace("..", "_")
+    # Keep filenames at a sane length — most filesystems cap each
+    # component at 255 bytes; UTF-8 Japanese is 3 bytes/char.
+    if len(cleaned.encode("utf-8")) > 80:
+        cleaned = cleaned[:40]
+    return cleaned or _sanitize(fallback)
 
 
 def _format_txt(record: SegmentDumpRecord) -> str:
@@ -107,6 +145,8 @@ def _format_txt(record: SegmentDumpRecord) -> str:
     lines.append(f"segment_id   : {record.segment_id}")
     lines.append(f"seat_no      : {record.seat_no}")
     lines.append(f"speaker_uid  : {record.speaker_user_id}")
+    if record.display_name:
+        lines.append(f"speaker_name : {record.display_name}")
     lines.append(f"audio_window : {record.audio_start_ms} → {record.audio_end_ms} ms ({duration_s:.2f}s)")
     lines.append(
         f"pcm_format   : {record.pcm_sample_rate}Hz "
@@ -153,9 +193,12 @@ async def dump_segment(record: SegmentDumpRecord, pcm: bytes) -> None:
             sample_width=record.pcm_sample_width,
         )
         txt = _format_txt(record)
-        game_dir = base / _sanitize(record.game_id)
+        speaker_dir = _sanitize_username(
+            record.display_name, fallback=record.speaker_user_id
+        )
+        target_dir = base / _sanitize(record.game_id) / speaker_dir
         seg_stem = _sanitize(record.segment_id)
-        await asyncio.to_thread(_write_pair, game_dir, seg_stem, wav, txt)
+        await asyncio.to_thread(_write_pair, target_dir, seg_stem, wav, txt)
     except Exception:
         log.exception(
             "voice_debug_dump_failed game=%s segment=%s",
@@ -164,11 +207,11 @@ async def dump_segment(record: SegmentDumpRecord, pcm: bytes) -> None:
         )
 
 
-def _write_pair(game_dir: Path, seg_stem: str, wav: bytes, txt: str) -> None:
+def _write_pair(target_dir: Path, seg_stem: str, wav: bytes, txt: str) -> None:
     """Synchronous file writer — runs inside ``asyncio.to_thread``."""
-    game_dir.mkdir(parents=True, exist_ok=True)
-    (game_dir / f"{seg_stem}.wav").write_bytes(wav)
-    (game_dir / f"{seg_stem}.txt").write_text(txt, encoding="utf-8")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / f"{seg_stem}.wav").write_bytes(wav)
+    (target_dir / f"{seg_stem}.txt").write_text(txt, encoding="utf-8")
 
 
 __all__ = [

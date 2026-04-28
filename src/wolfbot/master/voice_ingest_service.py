@@ -75,6 +75,7 @@ class _OpenSegment:
     seat_no: int
     speaker_user_id: str
     audio_start_ms: int
+    display_name: str | None = None
     audio_buffer: bytearray = field(default_factory=bytearray)
 
 
@@ -142,8 +143,18 @@ class VoiceIngestService:
 
     # ---------------------------------------------------------- VAD lifecycle
 
-    async def begin_segment(self, *, speaker_user_id: str) -> str | None:
+    async def begin_segment(
+        self,
+        *,
+        speaker_user_id: str,
+        display_name: str | None = None,
+    ) -> str | None:
         """Open a VAD window for `speaker_user_id` and notify Master.
+
+        ``display_name`` is the speaker's Discord display name as known
+        at VAD-start time. It's stored on the segment so the optional
+        debug dump can group files per-speaker by name. Optional —
+        unit tests typically don't pass it.
 
         Returns the new `segment_id`, or None if a session is not active
         (no game phase / unknown seat).
@@ -164,6 +175,7 @@ class VoiceIngestService:
             seat_no=seat_no,
             speaker_user_id=speaker_user_id,
             audio_start_ms=now,
+            display_name=display_name,
         )
         msg = VadSpeechStarted(
             ts=now,
@@ -273,6 +285,7 @@ class VoiceIngestService:
                 pcm_channels=self.config.pcm_channels,
                 pcm_sample_width=self.config.pcm_sample_width,
                 audio_bytes=len(pcm_snapshot),
+                display_name=seg.display_name,
                 result=result,
                 failure_reason=failure_reason,
             )
