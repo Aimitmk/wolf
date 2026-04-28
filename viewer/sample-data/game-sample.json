@@ -160,7 +160,7 @@
       "speech_events": [
         {
           "event_id": "sp_2_1714291275000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 2,
           "text": "占い師COします。初日ランダム白で席9 ジョナスを占いました。白判定です。",
           "stt_confidence": null,
@@ -171,7 +171,7 @@
         },
         {
           "event_id": "sp_3_1714291290000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 3,
           "text": "私も占い師です。席4 SQを占って白でした。席2は何かおかしい。",
           "stt_confidence": null,
@@ -182,7 +182,7 @@
         },
         {
           "event_id": "sp_5_1714291310000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 5,
           "text": "霊媒師COはまだしません。今日処刑が出てから結果を出します。",
           "stt_confidence": null,
@@ -193,7 +193,7 @@
         },
         {
           "event_id": "sp_9_1714291330000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 9,
           "text": "席2の白判定をもらった9番です。占い理由が筋が通ってる。",
           "stt_confidence": null,
@@ -204,7 +204,7 @@
         },
         {
           "event_id": "sp_4_1714291350000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 4,
           "text": "占いが2人いる。どちらが本物か議論したい。",
           "stt_confidence": null,
@@ -215,7 +215,7 @@
         },
         {
           "event_id": "sp_6_1714291370000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 6,
           "text": "占いCOの2人をしっかり見極めましょう。",
           "stt_confidence": null,
@@ -226,7 +226,7 @@
         },
         {
           "event_id": "sp_7_1714291390000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 7,
           "text": "席3が偽のように見える。占い理由が雑な印象。",
           "stt_confidence": null,
@@ -237,7 +237,7 @@
         },
         {
           "event_id": "sp_8_1714291410000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 8,
           "text": "私は席2が怪しいと感じる。席3を信じたい。",
           "stt_confidence": null,
@@ -248,7 +248,7 @@
         },
         {
           "event_id": "sp_1_1714291430000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 1,
           "text": "席3の占い理由がパッとしない。席2の方が信用できそう。",
           "stt_confidence": null,
@@ -259,7 +259,7 @@
         },
         {
           "event_id": "sp_2_1714291460000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 2,
           "text": "席3の理由が薄いです。席3を投票候補にしたい。",
           "stt_confidence": null,
@@ -270,7 +270,7 @@
         },
         {
           "event_id": "sp_3_1714291475000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 3,
           "text": "席2が偽です。みなさん席2に投票してください。",
           "stt_confidence": null,
@@ -281,7 +281,7 @@
         },
         {
           "event_id": "sp_5_1714291490000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 5,
           "text": "占い騙りなら2が真の可能性が高い気がする。",
           "stt_confidence": null,
@@ -292,7 +292,7 @@
         },
         {
           "event_id": "sp_9_1714291510000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 9,
           "text": "席2に白を貰った立場として、席3が偽だと考える。",
           "stt_confidence": null,
@@ -450,7 +450,7 @@
       "speech_events": [
         {
           "event_id": "sp_2_1714291730000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 2,
           "text": "席7を占いました。黒判定です。席7 シゲミチが人狼です。",
           "stt_confidence": null,
@@ -461,7 +461,7 @@
         },
         {
           "event_id": "sp_5_1714291750000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 5,
           "text": "霊媒結果: 席3 ジーナは人狼でした。占い騙りで確定です。",
           "stt_confidence": null,
@@ -472,7 +472,7 @@
         },
         {
           "event_id": "sp_6_1714291770000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 6,
           "text": "騎士COします。昨夜は席2を護衛して、襲撃を弾きました。",
           "stt_confidence": null,
@@ -483,7 +483,7 @@
         },
         {
           "event_id": "sp_7_1714291790000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 7,
           "text": "私は人狼じゃない。席2の占いは捏造です。",
           "stt_confidence": null,
@@ -494,7 +494,7 @@
         },
         {
           "event_id": "sp_8_1714291810000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 8,
           "text": "席2 セツが本当に占い師なら、席7 黒は信じざるを得ない。",
           "stt_confidence": null,
@@ -505,7 +505,7 @@
         },
         {
           "event_id": "sp_1_1714291830000",
-          "source": "rounds_text",
+          "source": "text",
           "speaker_seat": 1,
           "text": "占い・霊媒・騎士の3CO全部噛み合ってるので席7処刑で行きましょう。",
           "stt_confidence": null,

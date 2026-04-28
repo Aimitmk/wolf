@@ -118,7 +118,7 @@ export function formatDuration(ms: number | null): string {
 }
 
 const SOURCE_JA: Record<string, string> = {
-  rounds_text: "テキスト議論",
+  text: "テキスト議論",
   voice_stt: "音声→STT",
   npc_generated: "NPC生成",
 };

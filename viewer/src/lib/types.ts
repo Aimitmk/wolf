@@ -13,7 +13,7 @@ export type DeathCause = "EXECUTION" | "ATTACK" | null;
 
 export type DiscussionMode = "rounds" | "reactive_voice";
 
-export type SpeechSource = "rounds_text" | "voice_stt" | "npc_generated";
+export type SpeechSource = "text" | "voice_stt" | "npc_generated";
 
 export type CoDeclaration = "seer" | "medium" | "knight" | null;
 

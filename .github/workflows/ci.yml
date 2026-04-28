@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python (lint + type + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Sync deps
+        run: uv sync --all-extras --dev
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Test
+        run: uv run pytest tests
+
+  viewer:
+    name: Viewer (typecheck + contract tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The viewer's contract test spawns the real Python exporter
+      # (`scripts/export-game.py`) against a seeded fixture DB, so this
+      # job needs both Node and uv.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Sync Python deps (for live exporter spawn)
+        run: uv sync --all-extras --dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: viewer/pnpm-lock.yaml
+
+      - name: Install viewer deps
+        working-directory: viewer
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        working-directory: viewer
+        run: pnpm typecheck
+
+      - name: Contract tests (vitest + live Python exporter)
+        working-directory: viewer
+        run: pnpm test

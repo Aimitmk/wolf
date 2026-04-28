@@ -1,0 +1,688 @@
+{
+  "$defs": {
+    "GameMeta": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "guild_id": {
+          "title": "Guild Id",
+          "type": "string"
+        },
+        "host_user_id": {
+          "title": "Host User Id",
+          "type": "string"
+        },
+        "discussion_mode": {
+          "enum": [
+            "rounds",
+            "reactive_voice"
+          ],
+          "title": "Discussion Mode",
+          "type": "string"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        },
+        "ended_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ended At Ms"
+        },
+        "victory": {
+          "anyOf": [
+            {
+              "enum": [
+                "village",
+                "wolf"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Victory"
+        },
+        "main_text_channel_id": {
+          "title": "Main Text Channel Id",
+          "type": "string"
+        },
+        "main_vc_channel_id": {
+          "title": "Main Vc Channel Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "guild_id",
+        "host_user_id",
+        "discussion_mode",
+        "created_at_ms",
+        "ended_at_ms",
+        "victory",
+        "main_text_channel_id",
+        "main_vc_channel_id"
+      ],
+      "title": "GameMeta",
+      "type": "object"
+    },
+    "NightActionExport": {
+      "additionalProperties": false,
+      "properties": {
+        "day": {
+          "title": "Day",
+          "type": "integer"
+        },
+        "actor_seat": {
+          "title": "Actor Seat",
+          "type": "integer"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_seat": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Seat"
+        },
+        "submitted_at_ms": {
+          "title": "Submitted At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "day",
+        "actor_seat",
+        "kind",
+        "target_seat",
+        "submitted_at_ms"
+      ],
+      "title": "NightActionExport",
+      "type": "object"
+    },
+    "PhaseSection": {
+      "additionalProperties": false,
+      "properties": {
+        "day": {
+          "title": "Day",
+          "type": "integer"
+        },
+        "phase": {
+          "title": "Phase",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "title": "Started At Ms",
+          "type": "integer"
+        },
+        "public_logs": {
+          "items": {
+            "$ref": "#/$defs/PublicLogEntry"
+          },
+          "title": "Public Logs",
+          "type": "array"
+        },
+        "speech_events": {
+          "items": {
+            "$ref": "#/$defs/SpeechEventExport"
+          },
+          "title": "Speech Events",
+          "type": "array"
+        },
+        "votes": {
+          "items": {
+            "$ref": "#/$defs/VoteExport"
+          },
+          "title": "Votes",
+          "type": "array"
+        },
+        "night_actions": {
+          "items": {
+            "$ref": "#/$defs/NightActionExport"
+          },
+          "title": "Night Actions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "day",
+        "phase",
+        "started_at_ms",
+        "public_logs",
+        "speech_events",
+        "votes",
+        "night_actions"
+      ],
+      "title": "PhaseSection",
+      "type": "object"
+    },
+    "PublicLogEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "actor_seat": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actor Seat"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "actor_seat",
+        "text",
+        "created_at_ms"
+      ],
+      "title": "PublicLogEntry",
+      "type": "object"
+    },
+    "SeatExport": {
+      "additionalProperties": false,
+      "properties": {
+        "seat_no": {
+          "title": "Seat No",
+          "type": "integer"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "is_llm": {
+          "title": "Is Llm",
+          "type": "boolean"
+        },
+        "persona_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Persona Key"
+        },
+        "discord_user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Discord User Id"
+        },
+        "role": {
+          "enum": [
+            "VILLAGER",
+            "WEREWOLF",
+            "MADMAN",
+            "SEER",
+            "MEDIUM",
+            "KNIGHT"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "alive": {
+          "title": "Alive",
+          "type": "boolean"
+        },
+        "death_cause": {
+          "anyOf": [
+            {
+              "enum": [
+                "EXECUTION",
+                "ATTACK"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Death Cause"
+        },
+        "death_day": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Death Day"
+        }
+      },
+      "required": [
+        "seat_no",
+        "display_name",
+        "is_llm",
+        "persona_key",
+        "discord_user_id",
+        "role",
+        "alive",
+        "death_cause",
+        "death_day"
+      ],
+      "title": "SeatExport",
+      "type": "object"
+    },
+    "SpeechEventExport": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "text",
+            "voice_stt",
+            "npc_generated"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "speaker_seat": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Speaker Seat"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "stt_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Stt Confidence"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Summary"
+        },
+        "co_declaration": {
+          "anyOf": [
+            {
+              "enum": [
+                "seer",
+                "medium",
+                "knight"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Co Declaration"
+        },
+        "addressed_seat_no": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Addressed Seat No"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event_id",
+        "source",
+        "speaker_seat",
+        "text",
+        "stt_confidence",
+        "summary",
+        "co_declaration",
+        "addressed_seat_no",
+        "created_at_ms"
+      ],
+      "title": "SpeechEventExport",
+      "type": "object"
+    },
+    "TokenUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt"
+        },
+        "completion": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Completion"
+        },
+        "total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Total"
+        }
+      },
+      "required": [
+        "prompt",
+        "completion",
+        "total"
+      ],
+      "title": "TokenUsage",
+      "type": "object"
+    },
+    "TraceEntry": {
+      "additionalProperties": true,
+      "description": "One JSONL trace row — see :mod:`wolfbot.services.llm_trace`.\n\n``extra=\"allow\"`` because trace metadata is intentionally open: the\nMaster / NPC paths may attach arbitrary debug fields that the viewer\njust renders verbatim.",
+      "properties": {
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "gameplay",
+            "npc_speech",
+            "voice_stt"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Phase"
+        },
+        "day": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Day"
+        },
+        "actor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actor"
+        },
+        "system_prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "System Prompt"
+        },
+        "user_prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "User Prompt"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Response"
+        },
+        "latency_ms": {
+          "title": "Latency Ms",
+          "type": "integer"
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata"
+        },
+        "file_stem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Stem"
+        }
+      },
+      "required": [
+        "ts",
+        "role",
+        "provider",
+        "model",
+        "phase",
+        "day",
+        "actor",
+        "system_prompt",
+        "user_prompt",
+        "response",
+        "latency_ms",
+        "tokens",
+        "error"
+      ],
+      "title": "TraceEntry",
+      "type": "object"
+    },
+    "VoteExport": {
+      "additionalProperties": false,
+      "properties": {
+        "day": {
+          "title": "Day",
+          "type": "integer"
+        },
+        "round": {
+          "title": "Round",
+          "type": "integer"
+        },
+        "voter_seat": {
+          "title": "Voter Seat",
+          "type": "integer"
+        },
+        "target_seat": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Seat"
+        },
+        "submitted_at_ms": {
+          "title": "Submitted At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "day",
+        "round",
+        "voter_seat",
+        "target_seat",
+        "submitted_at_ms"
+      ],
+      "title": "VoteExport",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Top-level shape of one ``viewer/games/{id}.json`` file.",
+  "properties": {
+    "game": {
+      "$ref": "#/$defs/GameMeta"
+    },
+    "seats": {
+      "items": {
+        "$ref": "#/$defs/SeatExport"
+      },
+      "title": "Seats",
+      "type": "array"
+    },
+    "phases": {
+      "items": {
+        "$ref": "#/$defs/PhaseSection"
+      },
+      "title": "Phases",
+      "type": "array"
+    },
+    "trace": {
+      "items": {
+        "$ref": "#/$defs/TraceEntry"
+      },
+      "title": "Trace",
+      "type": "array"
+    }
+  },
+  "required": [
+    "game",
+    "seats",
+    "phases",
+    "trace"
+  ],
+  "title": "GameExport",
+  "type": "object"
+}
