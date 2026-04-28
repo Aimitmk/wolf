@@ -55,6 +55,24 @@ async def test_mock_decider_night_action_falls_back_to_none_when_no_seats() -> N
     assert result.target_name is None
 
 
+async def test_mock_decider_dispatches_when_task_text_is_in_system_prompt() -> None:
+    """Regression: the real `_ask` path puts task_text into the *system*
+    prompt (via `build_system_prompt`'s `{task_block}`). If the mock only
+    checked user_context it would silently fall through to canned speech
+    on every vote / night submission, target_name would default to None,
+    and `_resolve_target` would log "LLM returned null target" and pick
+    randomly — exactly the bug that broke wolf-attack convergence."""
+    decider = MockLLMActionDecider()
+    night_task = task_night_action(SubmissionType.WOLF_ATTACK, CANDIDATES)
+    result = await decider.decide(system_prompt=night_task, user_context="user ctx")
+    assert result.intent == "night_action"
+    assert result.target_name == "席1"
+
+    vote_task = task_vote(CANDIDATES, runoff=False)
+    result = await decider.decide(system_prompt=vote_task, user_context="user ctx")
+    assert result.intent == "vote"
+
+
 async def test_mock_decider_returns_daytime_speech() -> None:
     decider = MockLLMActionDecider()
     user_ctx = task_daytime_speech(day_number=1, discussion_round=1, role=Role.VILLAGER)

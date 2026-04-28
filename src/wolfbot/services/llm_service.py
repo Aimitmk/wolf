@@ -362,16 +362,19 @@ class MockLLMActionDecider:
 
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
         self.call_count += 1
-        # The user_context is built by prompt_builder.task_*; each task has
-        # an unambiguous unique phrase.
-        if "投票先として合法な候補は" in user_context:
+        # `task_text` is injected into the *system* prompt (see
+        # `build_system_prompt`'s `{task_block}`), not the user context.
+        # We scan both so the dispatch keys work regardless of where a
+        # caller decides to put them.
+        haystack = f"{system_prompt}\n{user_context}"
+        if "投票先として合法な候補は" in haystack:
             return LLMAction(
                 intent="vote",
                 target_name=None,
                 reason_summary="mock vote",
                 confidence=0.5,
             )
-        if "対象を 1 名選んでください" in user_context:
+        if "対象を 1 名選んでください" in haystack:
             # Deterministic target = smallest 席N appearing in the candidate
             # list. For WOLF_ATTACK both wolves see the *same* candidate list
             # (legal_attack_targets excludes all wolves), so they converge on
@@ -379,11 +382,11 @@ class MockLLMActionDecider:
             # park the mock game in WAITING_HOST_DECISION every night.
             return LLMAction(
                 intent="night_action",
-                target_name=self._pick_smallest_seat_token(user_context),
+                target_name=self._pick_smallest_seat_token(haystack),
                 reason_summary="mock night action",
                 confidence=0.5,
             )
-        if "人狼チャット" in user_context:
+        if "人狼チャット" in haystack:
             return LLMAction(
                 intent="speak",
                 public_message=self._next_wolf_chat(),
@@ -398,11 +401,11 @@ class MockLLMActionDecider:
         )
 
     @staticmethod
-    def _pick_smallest_seat_token(user_context: str) -> str | None:
+    def _pick_smallest_seat_token(prompt: str) -> str | None:
         # Parse only the "合法候補:" line — the rest of the prompt contains
         # an example token ("例: `席3 Alice`") that would otherwise pollute
         # the seat list and cause us to "pick" a non-candidate.
-        match = re.search(r"合法候補:[ \t]*([^\n]*)", user_context)
+        match = re.search(r"合法候補:[ \t]*([^\n]*)", prompt)
         if match is None:
             return None
         seats = [int(m) for m in re.findall(r"席(\d+)", match.group(1))]
