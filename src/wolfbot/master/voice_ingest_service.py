@@ -211,6 +211,31 @@ class VoiceIngestService:
         *,
         audio_end_ms: int,
     ) -> None:
+        from wolfbot.services.llm_trace import trace_context
+
+        actor = (
+            f"speaker_user_id={seg.speaker_user_id} seat={seg.seat_no} "
+            f"segment={seg.segment_id}"
+        )
+        with trace_context(
+            game_id=game_id,
+            phase=phase_id,
+            actor=actor,
+            metadata={
+                "segment_id": seg.segment_id,
+                "audio_end_ms": audio_end_ms,
+            },
+        ):
+            await self._run_stt_inner(seg, game_id, phase_id, audio_end_ms=audio_end_ms)
+
+    async def _run_stt_inner(
+        self,
+        seg: _OpenSegment,
+        game_id: str,
+        phase_id: str,
+        *,
+        audio_end_ms: int,
+    ) -> None:
         try:
             result: SttResult = await self.stt.transcribe(
                 audio=bytes(seg.audio_buffer),

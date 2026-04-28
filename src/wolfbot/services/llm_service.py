@@ -58,6 +58,11 @@ from wolfbot.llm.prompt_builder import (
     task_wolf_chat,
 )
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+from wolfbot.services.llm_trace import (
+    CallTimer,
+    log_llm_call,
+    trace_context,
+)
 
 if TYPE_CHECKING:  # avoid importing heavy modules unless needed
     from openai import AsyncOpenAI
@@ -80,6 +85,19 @@ class MessagePoster(Protocol):
 
 
 log = logging.getLogger(__name__)
+
+
+def _classify_task_text(task_text: str) -> str:
+    """Coarse tag of which `task_*` produced this prompt — for trace metadata only."""
+    if "投票先として合法な候補は" in task_text:
+        return "vote"
+    if "対象を 1 名選んでください" in task_text:
+        return "night_action"
+    if "人狼チャット" in task_text:
+        return "wolf_chat"
+    if "議論フェイズ" in task_text or "演説" in task_text:
+        return "discussion"
+    return "unknown"
 
 
 def seat_token(seat: Seat) -> str:
@@ -185,22 +203,40 @@ class XAILLMActionDecider:
         reraise=True,
     )
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
-        # xAI model IDs aren't in the openai SDK's Literal, hence the ignore.
-        resp = await self.client.chat.completions.create(  # type: ignore[call-overload]
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_context},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": RESPONSE_SCHEMA,
-            },
-            timeout=self.timeout,
-        )
-        message = resp.choices[0].message
-        content = message.content or "{}"
-        return LLMAction.model_validate_json(content)
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        try:
+            # xAI model IDs aren't in the openai SDK's Literal, hence the ignore.
+            resp = await self.client.chat.completions.create(  # type: ignore[call-overload]
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_context},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": RESPONSE_SCHEMA,
+                },
+                timeout=self.timeout,
+            )
+            message = resp.choices[0].message
+            content = message.content or "{}"
+            return LLMAction.model_validate_json(content)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await log_llm_call(
+                role="gameplay",
+                provider="xai",
+                model=self.model,
+                system_prompt=system_prompt,
+                user_prompt=user_context,
+                response=content if err is None else None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+            )
 
 
 class DeepSeekLLMActionDecider:
@@ -250,11 +286,35 @@ class DeepSeekLLMActionDecider:
         }
         if self.thinking == "enabled":
             kwargs["reasoning_effort"] = self.reasoning_effort
-        # DeepSeek model IDs aren't in the openai SDK's Literal, hence the ignore.
-        resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
-        message = resp.choices[0].message
-        content = message.content or "{}"
-        return LLMAction.model_validate_json(content)
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        try:
+            # DeepSeek model IDs aren't in the openai SDK's Literal, hence the ignore.
+            resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
+            message = resp.choices[0].message
+            content = message.content or "{}"
+            return LLMAction.model_validate_json(content)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await log_llm_call(
+                role="gameplay",
+                provider="deepseek",
+                model=self.model,
+                system_prompt=full_system,
+                user_prompt=user_context,
+                response=content if err is None else None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                extra={
+                    "thinking": self.thinking,
+                    "reasoning_effort": self.reasoning_effort
+                    if self.thinking == "enabled"
+                    else None,
+                },
+            )
 
 
 class GeminiLLMActionDecider:
@@ -288,22 +348,41 @@ class GeminiLLMActionDecider:
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
         from google.genai import types
 
-        resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
-            model=self.model,
-            contents=user_context,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_json_schema=RESPONSE_SCHEMA["schema"],
-                thinking_config=types.ThinkingConfig(
-                    # SDK normalizes the string into ThinkingLevel at runtime;
-                    # the type annotation is enum-only, so silence the check.
-                    thinking_level=self.thinking_level,  # type: ignore[arg-type]
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        try:
+            resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
+                model=self.model,
+                contents=user_context,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_json_schema=RESPONSE_SCHEMA["schema"],
+                    thinking_config=types.ThinkingConfig(
+                        # SDK normalizes the string into ThinkingLevel at runtime;
+                        # the type annotation is enum-only, so silence the check.
+                        thinking_level=self.thinking_level,  # type: ignore[arg-type]
+                    ),
                 ),
-            ),
-        )
-        content = resp.text or "{}"
-        return LLMAction.model_validate_json(content)
+            )
+            content = resp.text or "{}"
+            return LLMAction.model_validate_json(content)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await log_llm_call(
+                role="gameplay",
+                provider="gemini",
+                model=self.model,
+                system_prompt=system_prompt,
+                user_prompt=user_context,
+                response=content if err is None else None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                extra={"thinking_level": self.thinking_level},
+            )
 
 
 class MockLLMActionDecider:
@@ -1244,11 +1323,24 @@ class LLMAdapter:
             private_logs=private_logs,
             deduced_facts_block=deduced_block,
         )
-        try:
-            return await self.decider.decide(system, user)
-        except Exception:
-            log.exception("LLM decide failed for seat %s game %s", player.seat_no, game.id)
-            return LLMAction(intent="skip", reason_summary="decider error")
+        actor = (
+            f"seat={player.seat_no} persona={seat.persona_key} role={player.role.value}"
+        )
+        task_tag = _classify_task_text(task_text)
+        with trace_context(
+            game_id=game.id,
+            phase=game.phase.value,
+            day=game.day_number,
+            actor=actor,
+            metadata={"task": task_tag},
+        ):
+            try:
+                return await self.decider.decide(system, user)
+            except Exception:
+                log.exception(
+                    "LLM decide failed for seat %s game %s", player.seat_no, game.id
+                )
+                return LLMAction(intent="skip", reason_summary="decider error")
 
     async def _build_deduced_facts_block(
         self,

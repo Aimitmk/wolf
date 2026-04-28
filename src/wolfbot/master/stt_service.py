@@ -218,6 +218,8 @@ class GeminiAudioAnalyzer:
 
         import httpx
 
+        from wolfbot.services.llm_trace import CallTimer, log_llm_call
+
         audio_b64 = base64.b64encode(audio).decode("ascii")
         effective_timeout = min(timeout_s, self.timeout_s)
 
@@ -248,13 +250,15 @@ class GeminiAudioAnalyzer:
             f"?key={self.api_key}"
         )
 
+        timer = CallTimer()
+        raw_text = ""
+        err: str | None = None
         try:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 resp = await client.post(url, json=body)
                 if resp.status_code != 200:
-                    raise SttProviderError(
-                        f"gemini_http_{resp.status_code}"
-                    )
+                    err = f"gemini_http_{resp.status_code}"
+                    raise SttProviderError(err)
 
                 resp_json = resp.json()
                 raw_text = (
@@ -304,13 +308,26 @@ class GeminiAudioAnalyzer:
         except SttProviderError:
             raise
         except httpx.TimeoutException as exc:
-            raise SttProviderError("gemini_timeout") from exc
+            err = "gemini_timeout"
+            raise SttProviderError(err) from exc
         except httpx.ConnectError as exc:
-            raise SttProviderError("gemini_connection_refused") from exc
+            err = "gemini_connection_refused"
+            raise SttProviderError(err) from exc
         except Exception as exc:
-            raise SttProviderError(
-                f"gemini_unexpected_{type(exc).__name__}"
-            ) from exc
+            err = f"gemini_unexpected_{type(exc).__name__}"
+            raise SttProviderError(err) from exc
+        finally:
+            await log_llm_call(
+                role="voice_stt",
+                provider="gemini",
+                model=self.model,
+                system_prompt=self._SYSTEM_PROMPT,
+                user_prompt=f"[audio bytes={len(audio)} mime=audio/wav]",
+                response=raw_text or None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                extra={"audio_bytes": len(audio), "language": language},
+            )
 
     @staticmethod
     def _parse_response(raw: str) -> dict:  # type: ignore[type-arg]

@@ -79,6 +79,13 @@ class GeminiNpcGenerator:
         from google import genai
         from google.genai import types
 
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            log_llm_call,
+            parse_game_id_from_phase_id,
+            trace_context,
+        )
+
         if self._persona_key is None:
             raise RuntimeError(
                 "GeminiNpcGenerator.generate() called before set_persona(); "
@@ -94,29 +101,72 @@ class GeminiNpcGenerator:
             location=self.config.location,
             http_options=types.HttpOptions(timeout=int(self.config.timeout * 1000)),
         )
-        try:
-            resp = await client.aio.models.generate_content(
-                model=self.config.model,
-                contents=user,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    response_mime_type="application/json",
-                    response_json_schema=_RESPONSE_SCHEMA["schema"],
-                    thinking_config=types.ThinkingConfig(
-                        # The SDK normalizes the string into ThinkingLevel
-                        # at runtime; the type annotation is enum-only.
-                        thinking_level=self.config.thinking_level,  # type: ignore[arg-type]
-                    ),
-                ),
-            )
-        except Exception:
-            log.exception(
-                "npc_generate_gemini_failed project=%s model=%s",
-                self.config.project, self.config.model,
-            )
-            return None
 
-        content = resp.text or "{}"
+        actor = (
+            f"npc_id={request.npc_id} seat={request.seat_no} persona={self._persona_key}"
+        )
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        with trace_context(
+            game_id=parse_game_id_from_phase_id(request.phase_id),
+            phase=request.phase_id,
+            actor=actor,
+            metadata={
+                "request_id": request.request_id,
+                "logic_packet_id": request.logic_packet_id,
+                "suggested_intent": request.suggested_intent,
+                "max_chars": request.max_chars,
+                "thinking_level": self.config.thinking_level,
+            },
+        ):
+            try:
+                resp = await client.aio.models.generate_content(
+                    model=self.config.model,
+                    contents=user,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        response_mime_type="application/json",
+                        response_json_schema=_RESPONSE_SCHEMA["schema"],
+                        thinking_config=types.ThinkingConfig(
+                            # The SDK normalizes the string into ThinkingLevel
+                            # at runtime; the type annotation is enum-only.
+                            thinking_level=self.config.thinking_level,  # type: ignore[arg-type]
+                        ),
+                    ),
+                )
+                content = resp.text or "{}"
+            except Exception as exc:
+                err = f"{type(exc).__name__}: {exc}"
+                log.exception(
+                    "npc_generate_gemini_failed project=%s model=%s",
+                    self.config.project, self.config.model,
+                )
+                await log_llm_call(
+                    role="npc_speech",
+                    provider="gemini",
+                    model=self.config.model,
+                    system_prompt=system,
+                    user_prompt=user,
+                    response=None,
+                    latency_ms=timer.elapsed_ms,
+                    error=err,
+                    file_stem=f"npc_{self._persona_key}",
+                )
+                return None
+
+            await log_llm_call(
+                role="npc_speech",
+                provider="gemini",
+                model=self.config.model,
+                system_prompt=system,
+                user_prompt=user,
+                response=content,
+                latency_ms=timer.elapsed_ms,
+                error=None,
+                file_stem=f"npc_{self._persona_key}",
+            )
+
         try:
             data = json.loads(content)
         except json.JSONDecodeError:

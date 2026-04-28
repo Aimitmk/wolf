@@ -224,6 +224,13 @@ class OpenAICompatibleNpcGenerator:
     ) -> NpcGeneratedSpeech | None:
         from openai import AsyncOpenAI
 
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            log_llm_call,
+            parse_game_id_from_phase_id,
+            trace_context,
+        )
+
         if self._persona_key is None:
             raise RuntimeError(
                 "OpenAICompatibleNpcGenerator.generate() called before set_persona(); "
@@ -258,16 +265,60 @@ class OpenAICompatibleNpcGenerator:
             kwargs["extra_body"] = {"thinking": {"type": self.config.thinking}}
             if self.config.thinking == "enabled":
                 kwargs["reasoning_effort"] = self.config.reasoning_effort
-        try:
-            resp = await client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
-        except Exception:
-            log.exception(
-                "npc_generate_failed model=%s base_url=%s",
-                self.config.model, self.config.base_url,
-            )
-            return None
 
-        content = resp.choices[0].message.content or "{}"
+        provider_tag = "deepseek" if self.config.mode == "json_object" else "openai-compat"
+        actor = (
+            f"npc_id={request.npc_id} seat={request.seat_no} persona={self._persona_key}"
+        )
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        with trace_context(
+            game_id=parse_game_id_from_phase_id(request.phase_id),
+            phase=request.phase_id,
+            actor=actor,
+            metadata={
+                "request_id": request.request_id,
+                "logic_packet_id": request.logic_packet_id,
+                "suggested_intent": request.suggested_intent,
+                "max_chars": request.max_chars,
+                "base_url": self.config.base_url,
+            },
+        ):
+            try:
+                resp = await client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
+                content = resp.choices[0].message.content or "{}"
+            except Exception as exc:
+                err = f"{type(exc).__name__}: {exc}"
+                log.exception(
+                    "npc_generate_failed model=%s base_url=%s",
+                    self.config.model, self.config.base_url,
+                )
+                await log_llm_call(
+                    role="npc_speech",
+                    provider=provider_tag,
+                    model=self.config.model,
+                    system_prompt=system,
+                    user_prompt=user,
+                    response=None,
+                    latency_ms=timer.elapsed_ms,
+                    error=err,
+                    file_stem=f"npc_{self._persona_key}",
+                )
+                return None
+
+            await log_llm_call(
+                role="npc_speech",
+                provider=provider_tag,
+                model=self.config.model,
+                system_prompt=system,
+                user_prompt=user,
+                response=content,
+                latency_ms=timer.elapsed_ms,
+                error=None,
+                file_stem=f"npc_{self._persona_key}",
+            )
+
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
