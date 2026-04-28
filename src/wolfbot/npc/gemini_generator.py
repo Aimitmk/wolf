@@ -81,6 +81,7 @@ class GeminiNpcGenerator:
 
         from wolfbot.services.llm_trace import (
             CallTimer,
+            extract_gemini_vertex_tokens,
             log_llm_call,
             parse_game_id_from_phase_id,
             trace_context,
@@ -108,6 +109,7 @@ class GeminiNpcGenerator:
         timer = CallTimer()
         content = ""
         err: str | None = None
+        tokens: dict[str, int | None] | None = None
         with trace_context(
             game_id=parse_game_id_from_phase_id(request.phase_id),
             phase=request.phase_id,
@@ -136,6 +138,7 @@ class GeminiNpcGenerator:
                     ),
                 )
                 content = resp.text or "{}"
+                tokens = extract_gemini_vertex_tokens(resp)
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
                 log.exception(
@@ -164,6 +167,7 @@ class GeminiNpcGenerator:
                 response=content,
                 latency_ms=timer.elapsed_ms,
                 error=None,
+                tokens=tokens,
                 file_stem=f"npc_{self._persona_key}",
             )
 

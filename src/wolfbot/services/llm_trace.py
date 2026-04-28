@@ -154,11 +154,15 @@ async def log_llm_call(
     actor: str | None = None,
     extra: dict[str, Any] | None = None,
     file_stem: str | None = None,
+    tokens: dict[str, int | None] | None = None,
 ) -> None:
     """Append one trace line. Never raises — failures are logged and dropped.
 
     ``role`` selects the default file stem (``"{role}.jsonl"``); pass
     ``file_stem`` to override (e.g. NPC bots use ``"npc_setsu"``).
+
+    ``tokens`` carries token usage as ``{"prompt": N, "completion": N, "total": N}``
+    when the provider returned usage metadata, ``None`` otherwise.
     """
     if not trace_enabled():
         return
@@ -182,6 +186,7 @@ async def log_llm_call(
             "user_prompt": user_prompt,
             "response": response,
             "latency_ms": latency_ms,
+            "tokens": tokens,
             "error": error,
         }
         ctx_md = _metadata_ctx.get()
@@ -201,6 +206,52 @@ def _append_line(path: Path, line: str) -> None:
         f.write(line)
 
 
+def extract_openai_tokens(resp: Any) -> dict[str, int | None] | None:
+    """Pull ``{prompt, completion, total}`` from an OpenAI-compatible response.
+
+    Used by the xAI / DeepSeek / OpenAI-compat paths. Returns ``None`` when
+    the response has no usage attribute (e.g. test fakes), so trace lines
+    stay valid even without real token data.
+    """
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "prompt": getattr(usage, "prompt_tokens", None),
+        "completion": getattr(usage, "completion_tokens", None),
+        "total": getattr(usage, "total_tokens", None),
+    }
+
+
+def extract_gemini_vertex_tokens(resp: Any) -> dict[str, int | None] | None:
+    """Pull ``{prompt, completion, total}`` from a google-genai response.
+
+    Vertex Gemini exposes ``resp.usage_metadata.{prompt_token_count,
+    candidates_token_count, total_token_count}`` — different field names
+    from OpenAI but the same three integers conceptually.
+    """
+    um = getattr(resp, "usage_metadata", None)
+    if um is None:
+        return None
+    return {
+        "prompt": getattr(um, "prompt_token_count", None),
+        "completion": getattr(um, "candidates_token_count", None),
+        "total": getattr(um, "total_token_count", None),
+    }
+
+
+def extract_gemini_rest_tokens(resp_json: dict[str, Any]) -> dict[str, int | None] | None:
+    """Pull token counts from the Gemini REST ``generateContent`` response."""
+    um = resp_json.get("usageMetadata")
+    if not isinstance(um, dict):
+        return None
+    return {
+        "prompt": um.get("promptTokenCount"),
+        "completion": um.get("candidatesTokenCount"),
+        "total": um.get("totalTokenCount"),
+    }
+
+
 _SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
@@ -216,6 +267,9 @@ def _sanitize(s: str) -> str:
 
 __all__ = [
     "CallTimer",
+    "extract_gemini_rest_tokens",
+    "extract_gemini_vertex_tokens",
+    "extract_openai_tokens",
     "log_llm_call",
     "parse_game_id_from_phase_id",
     "trace_base_dir",

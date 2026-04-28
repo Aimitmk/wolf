@@ -218,7 +218,11 @@ class GeminiAudioAnalyzer:
 
         import httpx
 
-        from wolfbot.services.llm_trace import CallTimer, log_llm_call
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            extract_gemini_rest_tokens,
+            log_llm_call,
+        )
 
         audio_b64 = base64.b64encode(audio).decode("ascii")
         effective_timeout = min(timeout_s, self.timeout_s)
@@ -253,6 +257,7 @@ class GeminiAudioAnalyzer:
         timer = CallTimer()
         raw_text = ""
         err: str | None = None
+        tokens: dict[str, int | None] | None = None
         try:
             async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 resp = await client.post(url, json=body)
@@ -261,6 +266,7 @@ class GeminiAudioAnalyzer:
                     raise SttProviderError(err)
 
                 resp_json = resp.json()
+                tokens = extract_gemini_rest_tokens(resp_json)
                 raw_text = (
                     resp_json.get("candidates", [{}])[0]
                     .get("content", {})
@@ -326,6 +332,7 @@ class GeminiAudioAnalyzer:
                 response=raw_text or None,
                 latency_ms=timer.elapsed_ms,
                 error=err,
+                tokens=tokens,
                 extra={"audio_bytes": len(audio), "language": language},
             )
 

@@ -186,6 +186,82 @@ async def test_extra_metadata_merges_with_context(trace_dir: Path) -> None:
     }
 
 
+async def test_log_llm_call_records_tokens(trace_dir: Path) -> None:
+    with trace_context(game_id="g_tok"):
+        await log_llm_call(
+            role="gameplay",
+            provider="xai",
+            model="grok-4-1-fast",
+            system_prompt="s",
+            user_prompt="u",
+            response="r",
+            latency_ms=42,
+            tokens={"prompt": 1500, "completion": 200, "total": 1700},
+        )
+    entry = json.loads(
+        (trace_dir / "g_tok" / "gameplay.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert entry["tokens"] == {"prompt": 1500, "completion": 200, "total": 1700}
+
+
+def test_extract_openai_tokens() -> None:
+    from types import SimpleNamespace
+
+    from wolfbot.services.llm_trace import extract_openai_tokens
+
+    resp = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=1500, completion_tokens=200, total_tokens=1700
+        )
+    )
+    assert extract_openai_tokens(resp) == {
+        "prompt": 1500,
+        "completion": 200,
+        "total": 1700,
+    }
+    # Test fakes without `usage` must return None, never raise.
+    assert extract_openai_tokens(SimpleNamespace()) is None
+
+
+def test_extract_gemini_vertex_tokens() -> None:
+    from types import SimpleNamespace
+
+    from wolfbot.services.llm_trace import extract_gemini_vertex_tokens
+
+    resp = SimpleNamespace(
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=2000,
+            candidates_token_count=300,
+            total_token_count=2300,
+        )
+    )
+    assert extract_gemini_vertex_tokens(resp) == {
+        "prompt": 2000,
+        "completion": 300,
+        "total": 2300,
+    }
+    assert extract_gemini_vertex_tokens(SimpleNamespace()) is None
+
+
+def test_extract_gemini_rest_tokens() -> None:
+    from wolfbot.services.llm_trace import extract_gemini_rest_tokens
+
+    body = {
+        "candidates": [],
+        "usageMetadata": {
+            "promptTokenCount": 800,
+            "candidatesTokenCount": 100,
+            "totalTokenCount": 900,
+        },
+    }
+    assert extract_gemini_rest_tokens(body) == {
+        "prompt": 800,
+        "completion": 100,
+        "total": 900,
+    }
+    assert extract_gemini_rest_tokens({}) is None
+
+
 def test_parse_game_id_from_phase_id() -> None:
     assert parse_game_id_from_phase_id("g_abc::day1::DAY_DISCUSSION::1") == "g_abc"
     assert parse_game_id_from_phase_id(None) is None

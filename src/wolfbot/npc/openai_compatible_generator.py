@@ -226,6 +226,7 @@ class OpenAICompatibleNpcGenerator:
 
         from wolfbot.services.llm_trace import (
             CallTimer,
+            extract_openai_tokens,
             log_llm_call,
             parse_game_id_from_phase_id,
             trace_context,
@@ -273,6 +274,7 @@ class OpenAICompatibleNpcGenerator:
         timer = CallTimer()
         content = ""
         err: str | None = None
+        tokens: dict[str, int | None] | None = None
         with trace_context(
             game_id=parse_game_id_from_phase_id(request.phase_id),
             phase=request.phase_id,
@@ -288,6 +290,7 @@ class OpenAICompatibleNpcGenerator:
             try:
                 resp = await client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
                 content = resp.choices[0].message.content or "{}"
+                tokens = extract_openai_tokens(resp)
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
                 log.exception(
@@ -316,6 +319,7 @@ class OpenAICompatibleNpcGenerator:
                 response=content,
                 latency_ms=timer.elapsed_ms,
                 error=None,
+                tokens=tokens,
                 file_stem=f"npc_{self._persona_key}",
             )
 

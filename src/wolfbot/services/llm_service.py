@@ -60,6 +60,8 @@ from wolfbot.llm.prompt_builder import (
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 from wolfbot.services.llm_trace import (
     CallTimer,
+    extract_gemini_vertex_tokens,
+    extract_openai_tokens,
     log_llm_call,
     trace_context,
 )
@@ -206,6 +208,7 @@ class XAILLMActionDecider:
         timer = CallTimer()
         content = ""
         err: str | None = None
+        tokens: dict[str, int | None] | None = None
         try:
             # xAI model IDs aren't in the openai SDK's Literal, hence the ignore.
             resp = await self.client.chat.completions.create(  # type: ignore[call-overload]
@@ -222,6 +225,7 @@ class XAILLMActionDecider:
             )
             message = resp.choices[0].message
             content = message.content or "{}"
+            tokens = extract_openai_tokens(resp)
             return LLMAction.model_validate_json(content)
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
@@ -236,6 +240,7 @@ class XAILLMActionDecider:
                 response=content if err is None else None,
                 latency_ms=timer.elapsed_ms,
                 error=err,
+                tokens=tokens,
             )
 
 
@@ -289,11 +294,13 @@ class DeepSeekLLMActionDecider:
         timer = CallTimer()
         content = ""
         err: str | None = None
+        tokens: dict[str, int | None] | None = None
         try:
             # DeepSeek model IDs aren't in the openai SDK's Literal, hence the ignore.
             resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
             message = resp.choices[0].message
             content = message.content or "{}"
+            tokens = extract_openai_tokens(resp)
             return LLMAction.model_validate_json(content)
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
@@ -308,6 +315,7 @@ class DeepSeekLLMActionDecider:
                 response=content if err is None else None,
                 latency_ms=timer.elapsed_ms,
                 error=err,
+                tokens=tokens,
                 extra={
                     "thinking": self.thinking,
                     "reasoning_effort": self.reasoning_effort
@@ -351,6 +359,7 @@ class GeminiLLMActionDecider:
         timer = CallTimer()
         content = ""
         err: str | None = None
+        tokens: dict[str, int | None] | None = None
         try:
             resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
                 model=self.model,
@@ -367,6 +376,7 @@ class GeminiLLMActionDecider:
                 ),
             )
             content = resp.text or "{}"
+            tokens = extract_gemini_vertex_tokens(resp)
             return LLMAction.model_validate_json(content)
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
@@ -381,6 +391,7 @@ class GeminiLLMActionDecider:
                 response=content if err is None else None,
                 latency_ms=timer.elapsed_ms,
                 error=err,
+                tokens=tokens,
                 extra={"thinking_level": self.thinking_level},
             )
 
