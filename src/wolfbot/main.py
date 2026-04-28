@@ -215,6 +215,67 @@ async def _run() -> None:
             finally:
                 master_vc_ref[0] = None
 
+    async def _push_private_state_snapshot(
+        npc_send: Any,
+        *,
+        npc_id: str,
+        game_id: str,
+        seat_no: int,
+        persona_key: str,
+    ) -> None:
+        """Build and push a `PrivateStateSnapshot` for the seat the NPC plays.
+
+        Called after `SeatAssigned` so the NPC bot has its full Phase-D
+        state (role, partner wolves, role-result histories) before any
+        decision is requested. Best-effort — a failed send is logged and
+        skipped; the NPC will see the historical empty-state behavior on
+        decision requests until the next snapshot opportunity (re-register).
+        """
+        from wolfbot.master.private_state import build_snapshot_for_seat
+
+        try:
+            game = await repo.load_game(game_id)
+            seats = await repo.load_seats(game_id)
+            players = await repo.load_players(game_id)
+        except Exception:
+            log.exception(
+                "private_state_snapshot_load_failed npc=%s seat=%d game=%s",
+                npc_id, seat_no, game_id,
+            )
+            return
+        if game is None:
+            log.warning(
+                "private_state_snapshot_skip_no_game npc=%s seat=%d game=%s",
+                npc_id, seat_no, game_id,
+            )
+            return
+        me = next((p for p in players if p.seat_no == seat_no), None)
+        if me is None or me.role is None:
+            log.warning(
+                "private_state_snapshot_skip_no_role npc=%s seat=%d game=%s",
+                npc_id, seat_no, game_id,
+            )
+            return
+        snapshot = build_snapshot_for_seat(
+            npc_id=npc_id,
+            game_id=game_id,
+            seat_no=seat_no,
+            persona_key=persona_key,
+            role=me.role,
+            day_number=game.day_number,
+            players=players,
+            seats=seats,
+            ts=int(asyncio.get_running_loop().time() * 1000),
+            trace_id=f"snapshot-{game_id}-{seat_no}",
+        )
+        try:
+            await npc_send(snapshot.model_dump_json())
+        except Exception:
+            log.exception(
+                "private_state_snapshot_send_failed npc=%s seat=%d",
+                npc_id, seat_no,
+            )
+
     async def _assign_online_npcs_to_seats(game_id: str) -> int:
         """Pair online NPC bots with unassigned LLM seats and tell them to
         join VC. Idempotent (already-assigned NPCs are skipped). Returns
@@ -264,6 +325,17 @@ async def _run() -> None:
                         npc_entry.npc_id,
                         seat.seat_no,
                     )
+                    continue
+                # Phase-D: push the seat's full private state right after
+                # SeatAssigned so the NPC bot can rebuild its in-memory
+                # game state before the first decision request lands.
+                await _push_private_state_snapshot(
+                    npc_entry.send,
+                    npc_id=npc_entry.npc_id,
+                    game_id=game_id,
+                    seat_no=seat.seat_no,
+                    persona_key=npc_entry.persona_key or "",
+                )
         return dispatched
 
     async def _wait_for_npcs_in_vc(expected_count: int, timeout: float = 5.0) -> None:

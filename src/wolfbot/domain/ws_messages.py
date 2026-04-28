@@ -212,6 +212,196 @@ class SpeakResult(BaseEnvelope):
     )
 
 
+# ------------------------- Phase D: per-seat decision delegation
+# Reactive_voice mode is migrating to "NPC bot is an embodied agent for its
+# seat". The bot owns its role + private results in-memory and decides
+# speech / vote / night-action via its own `NPC_LLM_*`. Master pushes the
+# private state at /wolf start (and on NPC re-register) and asks for
+# decisions when a phase needs them. None of these messages are required
+# for back-compat — Master falls back to the historical Master-decides
+# path (LLMAdapter / SpeakRequest) when the NPC bot is on an older build.
+
+
+class SeerResult(BaseModel):
+    """Past seer divination result a seer NPC needs to recall in speech."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    day: int
+    target_seat: int
+    target_name: str
+    is_wolf: bool
+
+
+class MediumResult(BaseModel):
+    """Past medium post-execution result."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    day: int
+    target_seat: int
+    target_name: str
+    is_wolf: bool | None = None  # None when no execution happened
+
+
+class GuardEntry(BaseModel):
+    """Past knight guard target. ``peaceful_morning`` lets the NPC tell a
+    truthful story about which guards led to which outcomes."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    day: int
+    target_seat: int
+    target_name: str
+    peaceful_morning: bool | None = None  # None until morning resolves
+
+
+class WolfChatLine(BaseModel):
+    """One line of the wolves-only chat history."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    day: int
+    speaker_seat: int
+    speaker_name: str
+    text: str
+
+
+class PrivateStateSnapshot(BaseEnvelope):
+    """Master → NPC: full private game state for the seat this NPC plays.
+
+    Sent at game start (after roles assigned) and on NPC re-register so the
+    NPC bot can rebuild its in-memory state without persisting anything to
+    disk locally. Idempotent — the NPC replaces its state for that game_id
+    with the snapshot's contents.
+    """
+
+    type: Literal["private_state_snapshot"] = "private_state_snapshot"
+    npc_id: str
+    game_id: str
+    seat_no: int
+    persona_key: str
+    role: str  # canonical Role enum value (VILLAGER / WEREWOLF / ...)
+    day_number: int = 0
+    alive_seats: tuple[tuple[int, str], ...] = ()
+    dead_seats: tuple[tuple[int, str], ...] = ()
+    # Wolf-only — empty for non-wolves.
+    partner_wolves: tuple[tuple[int, str], ...] = ()
+    # Role-specific result history. Empty for roles without these powers.
+    seer_results: tuple[SeerResult, ...] = ()
+    medium_results: tuple[MediumResult, ...] = ()
+    guard_history: tuple[GuardEntry, ...] = ()
+    wolf_chat_history: tuple[WolfChatLine, ...] = ()
+
+
+class PrivateStateUpdate(BaseEnvelope):
+    """Master → NPC: incremental update to the seat's private state.
+
+    Push semantics, append-only on the NPC's local state. ``payload`` shape
+    depends on ``update_kind``:
+
+    * ``seer_result`` → SeerResult-shaped fields
+    * ``medium_result`` → MediumResult-shaped fields
+    * ``guard_entry`` → GuardEntry-shaped fields
+    * ``guard_resolved`` → ``{"day": int, "peaceful_morning": bool}`` —
+      retroactively fills the previous night's `peaceful_morning` flag.
+    * ``wolf_chat`` → WolfChatLine-shaped fields
+    * ``alive_changed`` → ``{"alive_seats": [...], "dead_seats": [...]}``
+    * ``day_advanced`` → ``{"day_number": int}``
+    """
+
+    type: Literal["private_state_update"] = "private_state_update"
+    npc_id: str
+    game_id: str
+    seat_no: int
+    update_kind: Literal[
+        "seer_result",
+        "medium_result",
+        "guard_entry",
+        "guard_resolved",
+        "wolf_chat",
+        "alive_changed",
+        "day_advanced",
+    ]
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class DecideVoteRequest(BaseEnvelope):
+    """Master → NPC: decide a vote target for ``round_`` (0=regular, 1=runoff).
+
+    ``candidate_seats`` is the legal target set the state machine produced
+    (alive seats minus self). NPC may return ``target_seat=None`` to
+    abstain.
+    """
+
+    type: Literal["decide_vote_request"] = "decide_vote_request"
+    request_id: str
+    npc_id: str
+    seat_no: int
+    game_id: str
+    phase_id: str
+    round_: int = 0
+    candidate_seats: tuple[tuple[int, str], ...]
+    public_state_summary: str = ""
+    expires_at_ms: int
+
+
+class VoteDecision(BaseEnvelope):
+    """NPC → Master: vote target choice. ``target_seat=None`` = abstain."""
+
+    type: Literal["vote_decision"] = "vote_decision"
+    request_id: str
+    npc_id: str
+    seat_no: int
+    target_seat: int | None
+    reason_summary: str = ""
+
+
+class DecideNightActionRequest(BaseEnvelope):
+    """Master → NPC: decide a night action target.
+
+    ``action_kind`` determines the seat universe: wolf_attack / seer_divine
+    / knight_guard. ``candidate_seats`` is the legal target set.
+    """
+
+    type: Literal["decide_night_action_request"] = "decide_night_action_request"
+    request_id: str
+    npc_id: str
+    seat_no: int
+    game_id: str
+    phase_id: str
+    action_kind: Literal["wolf_attack", "seer_divine", "knight_guard"]
+    candidate_seats: tuple[tuple[int, str], ...]
+    public_state_summary: str = ""
+    expires_at_ms: int
+
+
+class NightActionDecision(BaseEnvelope):
+    """NPC → Master: night-action target choice. ``target_seat=None`` =
+    skip. Master writes the action to ``night_actions`` and applies the
+    rules at phase resolution."""
+
+    type: Literal["night_action_decision"] = "night_action_decision"
+    request_id: str
+    npc_id: str
+    seat_no: int
+    action_kind: Literal["wolf_attack", "seer_divine", "knight_guard"]
+    target_seat: int | None
+    reason_summary: str = ""
+
+
+class WolfChatSend(BaseEnvelope):
+    """NPC (wolf seat only) → Master: post a line to the wolves' private
+    chat. Master persists it as a `WOLF_CHAT` private LogEntry and pushes
+    a `wolf_chat` PrivateStateUpdate to every other live wolf seat's NPC."""
+
+    type: Literal["wolf_chat_send"] = "wolf_chat_send"
+    npc_id: str
+    seat_no: int
+    game_id: str
+    text: str
+
+
 class PlaybackAuthorized(BaseEnvelope):
     type: Literal["playback_authorized"] = "playback_authorized"
     request_id: str

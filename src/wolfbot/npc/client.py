@@ -23,21 +23,28 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from wolfbot.domain.ws_messages import (
+    DecideNightActionRequest,
+    DecideVoteRequest,
     Heartbeat,
     LogicPacket,
+    NightActionDecision,
     NpcRegister,
     NpcRegistered,
     PlaybackAuthorized,
     PlaybackFailed,
     PlaybackFinished,
     PlaybackRejected,
+    PrivateStateSnapshot,
+    PrivateStateUpdate,
     SeatAssigned,
     SeatReleased,
     SetMuteState,
     SpeakRequest,
     TtsFailed,
     TtsFinished,
+    VoteDecision,
 )
+from wolfbot.npc.game_state import NpcGameState, apply_update, state_from_snapshot
 from wolfbot.npc.playback import (
     VoicePlayback,
     VoicePlaybackError,
@@ -109,6 +116,11 @@ class NpcClient:
     assigned_seat: int | None = None
     assigned_game_id: str | None = None
     assigned_phase_id: str | None = None
+    # Phase-D: per-(game_id) private state mirror. Master pushes via
+    # PrivateStateSnapshot (full replace) at game start + NPC re-register,
+    # then PrivateStateUpdate (append/patch) for incremental events. The
+    # NPC bot uses this in vote / night / speech decision handlers.
+    game_states: dict[str, NpcGameState] = field(default_factory=dict)
 
     # ---------------------------------------------------------- registration
 
@@ -157,6 +169,22 @@ class NpcClient:
             await self._on_playback_authorized(PlaybackAuthorized.model_validate(payload))
         elif t == "playback_rejected":
             self._on_playback_rejected(PlaybackRejected.model_validate(payload))
+        elif t == "private_state_snapshot":
+            self._on_private_state_snapshot(
+                PrivateStateSnapshot.model_validate(payload)
+            )
+        elif t == "private_state_update":
+            self._on_private_state_update(
+                PrivateStateUpdate.model_validate(payload)
+            )
+        elif t == "decide_vote_request":
+            await self._on_decide_vote_request(
+                DecideVoteRequest.model_validate(payload)
+            )
+        elif t == "decide_night_action_request":
+            await self._on_decide_night_action_request(
+                DecideNightActionRequest.model_validate(payload)
+            )
         else:
             log.info("npc_client_unhandled_type type=%s", t)
 
@@ -363,6 +391,107 @@ class NpcClient:
             msg.request_id,
             msg.failure_reason,
         )
+
+    # ---------------------------------------------------------- phase-D state
+
+    def _on_private_state_snapshot(self, snapshot: PrivateStateSnapshot) -> None:
+        """Replace the per-game state for ``snapshot.game_id`` wholesale.
+
+        Targeted at this NPC only — Master sends one snapshot per NPC at
+        game start and on re-register. Receiving one for a different
+        ``npc_id`` is a routing bug; we log and drop.
+        """
+        if snapshot.npc_id != self.config.npc_id:
+            log.warning(
+                "npc_private_state_snapshot_misrouted self=%s got=%s",
+                self.config.npc_id, snapshot.npc_id,
+            )
+            return
+        self.game_states[snapshot.game_id] = state_from_snapshot(snapshot)
+        log.info(
+            "npc_private_state_snapshot game=%s seat=%d role=%s persona=%s "
+            "alive=%d wolf_partners=%d seer=%d medium=%d guards=%d wolf_chat=%d",
+            snapshot.game_id,
+            snapshot.seat_no,
+            snapshot.role,
+            snapshot.persona_key,
+            len(snapshot.alive_seats),
+            len(snapshot.partner_wolves),
+            len(snapshot.seer_results),
+            len(snapshot.medium_results),
+            len(snapshot.guard_history),
+            len(snapshot.wolf_chat_history),
+        )
+
+    def _on_private_state_update(self, update: PrivateStateUpdate) -> None:
+        """Mutate the per-game state for ``update.game_id`` in place.
+
+        A missing snapshot for that game is treated as a Master-side bug
+        (snapshot must precede every update). We log and drop rather than
+        synthesize state from incomplete information.
+        """
+        if update.npc_id != self.config.npc_id:
+            log.warning(
+                "npc_private_state_update_misrouted self=%s got=%s",
+                self.config.npc_id, update.npc_id,
+            )
+            return
+        state = self.game_states.get(update.game_id)
+        if state is None:
+            log.warning(
+                "npc_private_state_update_no_snapshot game=%s kind=%s",
+                update.game_id, update.update_kind,
+            )
+            return
+        apply_update(state, update)
+        log.info(
+            "npc_private_state_update game=%s kind=%s",
+            update.game_id, update.update_kind,
+        )
+
+    async def _on_decide_vote_request(self, req: DecideVoteRequest) -> None:
+        """Phase-D: NPC decides its own vote target.
+
+        This first cut is a placeholder — it returns ``target_seat=None``
+        (abstain) so the wire is fully exercised end-to-end before the
+        LLM-backed decision logic lands. Master records the abstention and
+        the viewer surfaces the seat as silent for that vote.
+        """
+        if req.npc_id != self.config.npc_id:
+            return
+        decision = VoteDecision(
+            ts=self.now_ms(),
+            trace_id=req.trace_id,
+            request_id=req.request_id,
+            npc_id=self.config.npc_id,
+            seat_no=req.seat_no,
+            target_seat=None,
+            reason_summary="phase_d_stub_abstain",
+        )
+        await self.send(decision.model_dump_json())
+
+    async def _on_decide_night_action_request(
+        self, req: DecideNightActionRequest
+    ) -> None:
+        """Phase-D: NPC decides its own night action.
+
+        Stub identical to the vote handler — returns ``target_seat=None``
+        (skip) so Master's resolution path can be wired up first. The
+        LLM-backed decision lands in a follow-up commit.
+        """
+        if req.npc_id != self.config.npc_id:
+            return
+        decision = NightActionDecision(
+            ts=self.now_ms(),
+            trace_id=req.trace_id,
+            request_id=req.request_id,
+            npc_id=self.config.npc_id,
+            seat_no=req.seat_no,
+            action_kind=req.action_kind,
+            target_seat=None,
+            reason_summary="phase_d_stub_skip",
+        )
+        await self.send(decision.model_dump_json())
 
 
 __all__ = ["NpcClient", "NpcClientConfig"]
