@@ -39,8 +39,10 @@ def trace_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _make_wav(payload_size: int = 4_000) -> bytes:
-    """A minimal blob shaped like 16kHz mono WAV (44-byte header + zeros)."""
-    return b"\x00" * (44 + payload_size)
+    """An opaque PCM-shaped blob. Tests don't parse the actual bytes —
+    the mock httpx layer just echoes a canned response. Defaults to
+    4 000 zero bytes (~20 ms of Discord-native 48 kHz stereo PCM)."""
+    return b"\x00" * payload_size
 
 
 def _read_voice_stt_trace(trace_dir: Path, game_id: str = "g_groq") -> list[dict]:
@@ -149,8 +151,9 @@ async def test_full_pipeline_success_propagates_structured_fields(
     assert result.summary == "席3への投票表明"
     assert result.co_declaration is None
     assert result.addressed_name is None
-    # 4000 PCM bytes / 32000 bytes/sec = 0.125s
-    assert 100 < result.duration_ms < 200
+    # 4000 PCM bytes at Discord's native 48 kHz stereo 16-bit
+    # (192_000 bytes/sec) ≈ 20 ms.
+    assert 15 < result.duration_ms < 30
 
     rows = _read_voice_stt_trace(trace_dir)
     assert len(rows) == 2
@@ -288,6 +291,39 @@ async def test_whisper_429_raises_stt_provider_error(patch_httpx: Any) -> None:
     assert exc_info.value.failure_reason == "groq_http_429"
 
 
+async def test_whisper_4xx_response_body_recorded_in_trace(
+    trace_dir: Path, patch_httpx: Any
+) -> None:
+    """A non-200 from Groq must surface its response body in the trace
+    so a recurring failure mode (e.g. 'audio decode failed') is
+    diagnosable from the JSONL alone — the original HTTP-400 incident
+    only logged the status code, masking the real cause."""
+    patch_httpx({
+        "https://api.groq.com/": {
+            "status": 400,
+            "text": "audio decode failed: invalid wav header",
+        },
+        "https://api.x.ai/": {"status": 200, "json": _analyzer_json({})},
+    })
+    a = GroqWhisperAudioAnalyzer(
+        groq_api_key="g", groq_model="m",
+        analyzer_api_key="x", analyzer_model="grok",
+    )
+    from wolfbot.services.llm_trace import trace_context
+
+    with (
+        trace_context(game_id="g_groq"),
+        pytest.raises(SttProviderError),
+    ):
+        await a.transcribe(audio=_make_wav(), language="ja-JP", timeout_s=5)
+
+    rows = _read_voice_stt_trace(trace_dir)
+    transcribe_row = next(r for r in rows if r["metadata"]["step"] == "transcribe")
+    assert transcribe_row["error"] == "groq_http_400"
+    assert transcribe_row["response"] is not None
+    assert "audio decode failed" in transcribe_row["response"]
+
+
 async def test_whisper_timeout_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     def raiser(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("slow")
@@ -378,6 +414,50 @@ async def test_analyzer_returns_garbage_json_soft_fails(
     assert analyze_row["response"] == "not-json{"
 
 
+async def test_raw_pcm_is_wrapped_to_wav_before_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: production sends Discord-native raw PCM. Without the
+    WAV wrapper, Groq returns ``HTTP 400`` because ffmpeg can't demux a
+    headerless byte stream — observed in the 2026-04-28 game with 15
+    consecutive ``groq_http_400`` failures. Assert the multipart
+    payload contains a real RIFF/WAV header."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "groq" in url:
+            captured["body"] = request.read()
+            return httpx.Response(200, json={"text": "テスト"})
+        return httpx.Response(200, json=_analyzer_json({}))
+
+    transport = httpx.MockTransport(handler)
+    real = httpx.AsyncClient
+
+    class _M(real):  # type: ignore[misc, valid-type]
+        def __init__(self, *a: Any, **k: Any) -> None:
+            k["transport"] = transport
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _M)
+
+    raw_pcm = b"\x00" * 9_600  # 50 ms of 48 kHz stereo
+    a = GroqWhisperAudioAnalyzer(
+        groq_api_key="g",
+        groq_model="m",
+        analyzer_api_key="x",
+        analyzer_model="grok",
+    )
+    await a.transcribe(audio=raw_pcm, language="ja-JP", timeout_s=5)
+
+    body = captured["body"]
+    # Multipart form contains the file part; the wrapped audio MUST start
+    # with the standard ``RIFF`` magic and contain a ``WAVE`` marker.
+    assert b"RIFF" in body
+    assert b"WAVE" in body
+    # And the configured sample rate (48000 = 0x0000BB80 little-endian)
+    # appears in the fmt chunk.
+    assert b"\x80\xbb\x00\x00" in body
+
+
 async def test_language_strips_region_for_whisper(patch_httpx: Any) -> None:
     """Whisper accepts BCP-47 short codes (``ja``) not regional ones
     (``ja-JP``); the adapter must strip before sending."""
@@ -417,16 +497,36 @@ async def test_language_strips_region_for_whisper(patch_httpx: Any) -> None:
     assert b"ja-JP" not in body
 
 
-async def test_duration_ms_estimated_from_pcm_size(patch_httpx: Any) -> None:
-    """A 1-second WAV (16000 samples * 2 bytes + 44-byte header) → ~1000 ms."""
+async def test_duration_ms_estimated_from_pcm_format(patch_httpx: Any) -> None:
+    """``duration_ms`` is computed from the configured PCM format (default
+    Discord native: 48 kHz stereo 16-bit). 1 second of audio = 192 000
+    bytes."""
     patch_httpx({
         "https://api.groq.com/": {"status": 200, "json": {"text": "短く"}},
         "https://api.x.ai/": {"status": 200, "json": _analyzer_json({})},
     })
-    one_second = b"\x00" * (44 + 16_000 * 2)
+    one_second_native = b"\x00" * (48_000 * 2 * 2)
     a = GroqWhisperAudioAnalyzer(
         groq_api_key="g", groq_model="m",
         analyzer_api_key="x", analyzer_model="grok",
     )
-    r = await a.transcribe(audio=one_second, language="ja-JP", timeout_s=5)
+    r = await a.transcribe(audio=one_second_native, language="ja-JP", timeout_s=5)
+    assert 950 <= r.duration_ms <= 1050
+
+
+async def test_duration_ms_honors_overridden_pcm_format(patch_httpx: Any) -> None:
+    """A caller feeding 16 kHz mono PCM (e.g. a future down-mixer)
+    overrides the format kwargs and gets a correct duration."""
+    patch_httpx({
+        "https://api.groq.com/": {"status": 200, "json": {"text": "短く"}},
+        "https://api.x.ai/": {"status": 200, "json": _analyzer_json({})},
+    })
+    one_second_16k_mono = b"\x00" * (16_000 * 2)
+    a = GroqWhisperAudioAnalyzer(
+        groq_api_key="g", groq_model="m",
+        analyzer_api_key="x", analyzer_model="grok",
+        pcm_sample_rate=16_000,
+        pcm_channels=1,
+    )
+    r = await a.transcribe(audio=one_second_16k_mono, language="ja-JP", timeout_s=5)
     assert 950 <= r.duration_ms <= 1050

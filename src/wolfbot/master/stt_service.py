@@ -35,6 +35,35 @@ def _seat_range_label() -> str:
     return f"1〜{VILLAGE_SIZE}"
 
 
+def _pcm_to_wav(
+    pcm: bytes,
+    *,
+    sample_rate: int = 48_000,
+    channels: int = 2,
+    sample_width: int = 2,
+) -> bytes:
+    """Wrap raw PCM in a minimal RIFF/WAV header.
+
+    Groq's ``audio/transcriptions`` endpoint runs ffmpeg under the hood
+    and rejects raw PCM with ``HTTP 400`` even when the multipart
+    ``Content-Type`` claims ``audio/wav``. The fix is to give it a real
+    WAV file. Defaults match ``discord-ext-voice_recv``'s opus decoder
+    output (48 kHz, stereo, 16-bit signed little-endian) so callers
+    feeding straight from :class:`WolfbotAudioSink` need not pass
+    explicit format kwargs.
+    """
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(sample_width)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
 @dataclass(frozen=True)
 class SttResult:
     """Outcome of a single STT call.
@@ -426,6 +455,13 @@ class GroqWhisperAudioAnalyzer:
         analyzer_model: str,
         analyzer_base_url: str = "https://api.x.ai/v1",
         timeout_s: float = 15.0,
+        # Format of the raw PCM bytes ``transcribe()`` receives. Defaults
+        # match discord-ext-voice_recv's opus decoder so the typical
+        # caller (``WolfbotAudioSink`` → ``VoiceIngestService``) needs no
+        # configuration. Override only when feeding pre-processed audio.
+        pcm_sample_rate: int = 48_000,
+        pcm_channels: int = 2,
+        pcm_sample_width: int = 2,
     ) -> None:
         self.groq_api_key = groq_api_key
         self.groq_model = groq_model
@@ -434,6 +470,9 @@ class GroqWhisperAudioAnalyzer:
         self.analyzer_model = analyzer_model
         self.analyzer_base_url = analyzer_base_url.rstrip("/")
         self.timeout_s = timeout_s
+        self.pcm_sample_rate = pcm_sample_rate
+        self.pcm_channels = pcm_channels
+        self.pcm_sample_width = pcm_sample_width
 
     async def transcribe(
         self,
@@ -443,11 +482,23 @@ class GroqWhisperAudioAnalyzer:
         timeout_s: float,
     ) -> SttResult:
         effective_timeout = min(timeout_s, self.timeout_s)
-        # Estimate duration from raw 16kHz 16-bit mono PCM (matches Gemini path).
-        data_bytes = max(0, len(audio) - 44)
-        duration_ms = int(data_bytes / (16_000 * 2) * 1000)
+        bytes_per_sec = (
+            self.pcm_sample_rate * self.pcm_channels * self.pcm_sample_width
+        )
+        duration_ms = (
+            int(len(audio) / bytes_per_sec * 1000) if bytes_per_sec else 0
+        )
+        # Groq's whisper endpoint rejects headerless PCM. Wrap to WAV
+        # using the configured PCM format so ffmpeg on Groq's side can
+        # demux the stream.
+        wav_audio = _pcm_to_wav(
+            audio,
+            sample_rate=self.pcm_sample_rate,
+            channels=self.pcm_channels,
+            sample_width=self.pcm_sample_width,
+        )
 
-        transcript = await self._whisper(audio, language, effective_timeout)
+        transcript = await self._whisper(wav_audio, language, effective_timeout)
         if not transcript:
             return SttResult(
                 text="",
@@ -523,12 +574,17 @@ class GroqWhisperAudioAnalyzer:
         timer = CallTimer()
         transcript = ""
         err: str | None = None
+        # Capture the upstream error body so a recurring 400/4xx is
+        # diagnosable from the trace alone (status code by itself didn't
+        # tell us "audio decode failed" the first time around).
+        err_body: str | None = None
         tokens: dict[str, int | None] | None = None
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, headers=headers, files=files)
                 if resp.status_code != 200:
                     err = f"groq_http_{resp.status_code}"
+                    err_body = resp.text[:1000] if resp.text else None
                     raise SttProviderError(err)
                 resp_json = resp.json()
                 transcript = (resp_json.get("text") or "").strip()
@@ -552,7 +608,7 @@ class GroqWhisperAudioAnalyzer:
                 model=self.groq_model,
                 system_prompt=None,
                 user_prompt=f"[audio bytes={len(audio)} mime=audio/wav lang={lang_code}]",
-                response=transcript or None,
+                response=transcript if err is None else err_body,
                 latency_ms=timer.elapsed_ms,
                 error=err,
                 tokens=tokens,
