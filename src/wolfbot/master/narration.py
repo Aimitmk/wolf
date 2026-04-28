@@ -118,8 +118,10 @@ def _narrate_phase_change(entry: LogEntry, ctx: NarrationContext) -> NarrationOu
                 f"制限時間は {secs} 秒でございます。"
             )
         else:
+            # Day 2+: the MORNING entry already announced "夜が明けました" with
+            # day_number + casualty info. Skip the duplicate dawn line here.
             voice = (
-                f"夜が明けました。{ctx.day_number} 日目の議論を開始致します。"
+                f"{ctx.day_number} 日目の議論を開始致します。"
                 f"制限時間は {secs} 秒でございます。"
             )
         return NarrationOutput(voice_text=voice)
