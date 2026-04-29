@@ -280,9 +280,178 @@ class GeminiTextAnalyzer:
             return {}
 
 
+class OpenAICompatibleTextAnalyzer:
+    """OpenAI Chat Completions-compatible text analyzer.
+
+    Mirrors :class:`GeminiTextAnalyzer` but POSTs to an OpenAI-compatible
+    ``/chat/completions`` endpoint (xAI Grok / OpenAI / Together / vLLM
+    / Ollama / etc.). Used by `main.py` when
+    ``VOICE_STT_PROVIDER=groq``: in that mode the voice path already
+    splits STT (Groq Whisper) from the analyzer step (xAI Grok via the
+    gameplay LLM key), and the text path should follow the same split
+    instead of round-tripping through Gemini. Without this, a user with
+    Groq-mode voice still saw their typed messages fail with
+    ``gemini_http_429`` whenever the shared Gemini key got rate-limited.
+
+    Schema and prompt are identical to :class:`GeminiTextAnalyzer` so
+    the two providers are interchangeable from the caller's POV.
+    """
+
+    _SYSTEM_PROMPT: str = GeminiTextAnalyzer._SYSTEM_PROMPT
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api.x.ai/v1",
+        timeout_s: float = 8.0,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout_s = timeout_s
+
+    async def analyze(self, *, text: str, timeout_s: float) -> TextAnalysis:
+        import httpx
+
+        from wolfbot.services.llm_trace import (
+            CallTimer,
+            log_llm_call,
+        )
+
+        def _usage_from_dict(
+            resp_json: dict[str, object],
+        ) -> dict[str, int | None] | None:
+            usage = resp_json.get("usage")
+            if not isinstance(usage, dict):
+                return None
+            def _int_or_none(v: object) -> int | None:
+                return int(v) if isinstance(v, int) else None
+            return {
+                "prompt": _int_or_none(usage.get("prompt_tokens")),
+                "completion": _int_or_none(usage.get("completion_tokens")),
+                "total": _int_or_none(usage.get("total_tokens")),
+            }
+
+        effective_timeout = min(timeout_s, self.timeout_s)
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": self._SYSTEM_PROMPT},
+                {"role": "user", "content": f"発言:\n{text}"},
+            ],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+        }
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        timer = CallTimer()
+        raw_text = ""
+        tokens: dict[str, int | None] | None = None
+        err: str | None = None
+        provider_tag = "openai-compat"
+        try:
+            async with httpx.AsyncClient(timeout=effective_timeout) as client:
+                resp = await client.post(url, json=body, headers=headers)
+                if resp.status_code != 200:
+                    err = f"openai_http_{resp.status_code}"
+                    await log_llm_call(
+                        role="text_analysis",
+                        provider=provider_tag,
+                        model=self.model,
+                        system_prompt=self._SYSTEM_PROMPT,
+                        user_prompt=text,
+                        response=None,
+                        latency_ms=timer.elapsed_ms,
+                        error=err,
+                    )
+                    raise TextAnalyzerError(err)
+                resp_json = resp.json()
+                raw_text = (
+                    resp_json.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                ) or ""
+                tokens = _usage_from_dict(resp_json)
+                parsed = GeminiTextAnalyzer._parse_response(raw_text)
+        except TextAnalyzerError:
+            raise
+        except httpx.TimeoutException as exc:
+            err = "openai_timeout"
+            await log_llm_call(
+                role="text_analysis",
+                provider=provider_tag,
+                model=self.model,
+                system_prompt=self._SYSTEM_PROMPT,
+                user_prompt=text,
+                response=None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+            )
+            raise TextAnalyzerError(err) from exc
+        except httpx.ConnectError as exc:
+            err = "openai_connection_refused"
+            await log_llm_call(
+                role="text_analysis",
+                provider=provider_tag,
+                model=self.model,
+                system_prompt=self._SYSTEM_PROMPT,
+                user_prompt=text,
+                response=None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+            )
+            raise TextAnalyzerError(err) from exc
+        except Exception as exc:
+            err = f"openai_unexpected_{type(exc).__name__}"
+            await log_llm_call(
+                role="text_analysis",
+                provider=provider_tag,
+                model=self.model,
+                system_prompt=self._SYSTEM_PROMPT,
+                user_prompt=text,
+                response=None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+            )
+            raise TextAnalyzerError(err) from exc
+
+        await log_llm_call(
+            role="text_analysis",
+            provider=provider_tag,
+            model=self.model,
+            system_prompt=self._SYSTEM_PROMPT,
+            user_prompt=text,
+            response=raw_text,
+            latency_ms=timer.elapsed_ms,
+            error=None,
+            tokens=tokens,
+        )
+
+        co_raw = parsed.get("co_claim")
+        co_declaration = co_raw if co_raw in CO_CLAIM_VALUES else None
+        addressed_raw = parsed.get("addressed_name")
+        addressed_name: str | None = None
+        if isinstance(addressed_raw, str):
+            stripped = addressed_raw.strip()
+            addressed_name = stripped or None
+        callout_raw = parsed.get("role_callout")
+        role_callout = callout_raw if callout_raw in CO_CLAIM_VALUES else None
+        return TextAnalysis(
+            addressed_name=addressed_name,
+            co_declaration=co_declaration,
+            role_callout=role_callout,
+        )
+
+
 __all__ = [
     "FakeTextAnalyzer",
     "GeminiTextAnalyzer",
+    "OpenAICompatibleTextAnalyzer",
     "TextAnalysis",
     "TextAnalyzer",
     "TextAnalyzerError",

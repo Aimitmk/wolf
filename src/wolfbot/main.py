@@ -661,14 +661,36 @@ async def _run() -> None:
     if (
         settings.LLM_DISCUSSION_MODE == "reactive_voice"
         and settings.MASTER_NPC_PSK is not None
-        and settings.VOICE_LLM_API_KEY is not None
     ):
-        from wolfbot.master.text_analyzer import GeminiTextAnalyzer
+        # Pick the analyzer that matches the voice path. When the user has
+        # ``VOICE_STT_PROVIDER=groq`` the voice ingest already splits STT
+        # (Groq Whisper) from the analyzer step (xAI Grok via the
+        # gameplay LLM key), and the text path should follow the same
+        # split — otherwise typed messages keep round-tripping through
+        # Gemini and 429 the moment that key gets rate-limited (the bug
+        # observed in game 58a3243a9fb8 where every ``role_callout`` came
+        # back NULL because Gemini was throttled).
+        if (
+            settings.VOICE_STT_PROVIDER == "groq"
+            and settings.GAMEPLAY_LLM_API_KEY is not None
+        ):
+            from wolfbot.master.text_analyzer import OpenAICompatibleTextAnalyzer
 
-        text_analyzer = GeminiTextAnalyzer(
-            api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
-            model=settings.VOICE_LLM_MODEL,
-        )
+            analyzer_base_url = (
+                settings.GAMEPLAY_LLM_BASE_URL or "https://api.x.ai/v1"
+            )
+            text_analyzer = OpenAICompatibleTextAnalyzer(
+                api_key=settings.GAMEPLAY_LLM_API_KEY.get_secret_value(),
+                model=settings.GAMEPLAY_LLM_MODEL,
+                base_url=analyzer_base_url,
+            )
+        elif settings.VOICE_LLM_API_KEY is not None:
+            from wolfbot.master.text_analyzer import GeminiTextAnalyzer
+
+            text_analyzer = GeminiTextAnalyzer(
+                api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
+                model=settings.VOICE_LLM_MODEL,
+            )
 
     cog = WolfCog(
         bot=bot,

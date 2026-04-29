@@ -187,8 +187,12 @@ def _build_user(
         # Surface outstanding role-callouts as their own block so the
         # model treats them as a 1st-class signal rather than a token
         # buried in the dense status string. Real role holders should
-        # take this as a CO trigger; wolf-side NPCs should weigh whether
-        # to fake CO. Wording stays neutral so persona / strategy decide.
+        # take this as a CO trigger; wolf-side NPCs should fake CO
+        # unless there's a specific reason not to (the previous wording
+        # said "選択肢として参照" which the model treated as fully
+        # optional, and wolves stayed silent even after explicit human
+        # callouts). The role-strategy block carries the deeper
+        # reasoning; this prompt block surfaces the trigger.
         callout_ja = {
             "seer": "占い師",
             "medium": "霊媒師",
@@ -201,8 +205,12 @@ def _build_user(
         lines.append("## 未回答の役職呼びかけ")
         lines.append(
             f"次の役職に名乗り出が求められているがまだ誰も応答していない: {labels}。"
-            "あなたが該当役職なら CO の判断材料に、"
-            "人狼/狂人で騙りを検討中なら呼びかけに応じる選択肢として参照すること。"
+            "あなたが該当役職なら**直ちに CO する**ことを最優先で検討する。"
+            "人狼/狂人なら、対抗 CO がまだ出ていない場合は**原則として騙りに出る**方を選ぶ。"
+            "単独 CO の放置は『単独 CO = 真寄り』ルールにより真役職を村に真置きさせる結果になり、"
+            "狼陣営の判定撹乱手段が失われる。"
+            "潜伏を選ぶのは、相方が既に危険位置・CO 数が過密で誤爆/ローラー必至、等の"
+            "具体的かつ強い理由があるときに限り、漠然とした『村が勝手に吊ってくれそう』で潜伏しない。"
         )
     # Phase-D: prefer the bot's own NpcGameState mirror over the stale
     # SpeakRequest fields. The state carries role + alive/dead + private
