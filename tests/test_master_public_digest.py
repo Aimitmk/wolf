@@ -73,8 +73,13 @@ def test_digest_renders_co_claims_with_names() -> None:
         state=state, recent_events=[],
         seat_names={1: "Alice", 2: "Bob", 4: "Dave"},
     )
-    assert "席2 Bob: seer" in out
-    assert "席4 Dave: medium" in out
+    # New naming policy: digest renders by display_name only (seat
+    # numbers are intentionally NOT in this block — the full mapping
+    # lives in the user-prompt's `## 参加者` roster, not here).
+    assert "Bob: seer" in out
+    assert "Dave: medium" in out
+    assert "席2" not in out
+    assert "席4" not in out
 
 
 def test_digest_lists_silent_seats() -> None:
@@ -84,7 +89,10 @@ def test_digest_lists_silent_seats() -> None:
         seat_names={3: "Carol", 4: "Dave"},
     )
     assert "## 未発言の生存席" in out
-    assert "席3 Carol" in out and "席4 Dave" in out
+    assert "Carol" in out and "Dave" in out
+    # Seat numbers stripped — the roster header upstream is the single
+    # source of truth.
+    assert "席3" not in out and "席4" not in out
 
 
 def test_digest_aggregates_addressed_counts_descending() -> None:
@@ -100,10 +108,10 @@ def test_digest_aggregates_addressed_counts_descending() -> None:
         seat_names={2: "Bob", 4: "Dave"},
     )
     assert "## 名指しされた回数 (多い順)" in out
-    seat2_idx = out.find("席2 Bob: 3回")
-    seat4_idx = out.find("席4 Dave: 1回")
-    assert seat2_idx != -1 and seat4_idx != -1
-    assert seat2_idx < seat4_idx  # higher count first
+    bob_idx = out.find("Bob: 3回")
+    dave_idx = out.find("Dave: 1回")
+    assert bob_idx != -1 and dave_idx != -1
+    assert bob_idx < dave_idx  # higher count first
 
 
 def test_digest_renders_last_addressed_block() -> None:
@@ -117,7 +125,7 @@ def test_digest_renders_last_addressed_block() -> None:
         seat_names={1: "Alice", 2: "Bob"},
     )
     assert "## 直近の名指し" in out
-    assert "席1 Alice → 席2 Bob" in out
+    assert "Alice → Bob" in out
     assert "信用できない" in out
 
 
@@ -146,7 +154,7 @@ def test_digest_skips_phase_baseline_in_addressed_counts() -> None:
     out = build_public_digest(
         state=state, recent_events=events, seat_names={2: "Bob"},
     )
-    assert "席2 Bob: 1回" in out
+    assert "Bob: 1回" in out
 
 
 def test_digest_renders_recent_speech_block_so_vote_llm_sees_seer_results() -> None:
@@ -171,10 +179,12 @@ def test_digest_renders_recent_speech_block_so_vote_llm_sees_seer_results() -> N
         seat_names={3: "Rakio", 9: "Yuriko"},
     )
     assert "## 直近の発言 (古い順)" in out
-    assert "席9 Yuriko" in out
+    assert "Yuriko" in out
     assert "SQ黒" in out
-    assert "席3 Rakio" in out
+    assert "Rakio" in out
     assert "シゲミチ狼" in out
+    # Seat numbers no longer appear in the digest body (roster-only).
+    assert "席9" not in out and "席3" not in out
 
 
 def test_digest_renders_past_votes_when_provided() -> None:
@@ -194,5 +204,9 @@ def test_digest_renders_past_votes_when_provided() -> None:
     )
     assert "## 公開された投票履歴" in out
     assert "day1 投票" in out
-    assert "席1 Alice → 席7 Frank" in out
-    assert "席5 Eve → 棄権" in out
+    assert "Alice → Frank" in out
+    assert "Eve → 棄権" in out
+    # Seat numbers don't appear in the body — only the roster header
+    # (which `build_public_digest` doesn't render; the upstream user
+    # prompt does).
+    assert "席1" not in out and "席7" not in out

@@ -146,11 +146,17 @@ def _build_system(
         "「あの白判定、無理に庇ってる気がする」「昨夜守ったのは◯◯」"
         "「もう 1 人組んでそうな人」「あと処刑できる回数を考えると…」 のように。\n"
         "- **`text` 内で席番号 (席1, 席2, ..., 席9 や Seat3 等) を絶対に書かない。**"
-        "他のプレイヤーを呼ぶときは必ず生存者リストの display_name (キャラ名) を使う。"
+        "プロンプトの `## 参加者` ブロックで席番号 → 名前のマッピングが冒頭に提示されており、"
+        "それ以外のブロックは display_name のみで人物を参照している。"
+        "あなたも他者を呼ぶときは必ず display_name (キャラ名) を使う。"
         "data 層 (`addressed_seat_nos` 等) には正しい席番号を入れて構わないが、"
-        "発話そのものは「ジナさん」「ラキオ」のような自然な呼び方にする。\n"
-        "  禁止例: 「席3はどう思う?」「席4のラキオが…」「Seat 9、答えて」\n"
-        "  推奨例: 「ジョナスさんはどう思う?」「ラキオが…」「ユリコ、答えて」\n"
+        "発話そのものは「ジナさん」「ラキオ」のような自然な呼び方にする。"
+        "状況整理を発話で行うときも『占いCO は ジョナスとsakura、霊媒CO はユリコとセツ』のように"
+        "名前で並べる。`席4` `席1` のような数字並列は禁止。\n"
+        "  禁止例: 「席3はどう思う?」「席4のラキオが…」「Seat 9、答えて」"
+        "「席4と席1の占い主張、席9と席7の霊媒主張」\n"
+        "  推奨例: 「ジョナスさんはどう思う?」「ラキオが…」「ユリコ、答えて」"
+        "「ジョナスとsakuraの占い主張、ユリコとセツの霊媒主張」\n"
         "- 役職 CO (占い師・霊媒師・騎士として名乗る) をするときは、"
         "`co_declaration` を `\"seer\" / \"medium\" / \"knight\"` のいずれかに設定し、"
         "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
@@ -175,24 +181,67 @@ def _build_user(
     request: SpeakRequest,
     state: object | None = None,
 ) -> str:
+    """Compose the speech LLM's user prompt.
+
+    Naming policy: 席番号は冒頭の `## 参加者` ロスター 1 ブロックに
+    集約し、それ以外の入力ブロックでは display_name のみで参照する。
+    プロンプト全体に席番号が散らばっていると LLM が出力でも `席N` を
+    引き写すドリフトが起きるため (game a3bbac5ca3e0 day5 で観測)、
+    席番号は data 層 (`addressed_seat_nos` / `target_seat`) でだけ
+    使う。
+    """
+    # Phase-D: prefer the bot's own NpcGameState mirror over the stale
+    # SpeakRequest fields. The state carries role + alive/dead + private
+    # results + wolf chat that the speech LLM needs to be in character.
+    alive_seats = (
+        getattr(state, "alive_seats", None)
+        or list(request.alive_seats)
+    )
+    dead_seats = (
+        getattr(state, "dead_seats", None)
+        or list(request.dead_seats)
+    )
+    cause_map = (getattr(state, "dead_seat_causes", None) or {}) if state else {}
+
+    def _cause_tag(seat_no: int) -> str:
+        cause = cause_map.get(seat_no)
+        if cause == "EXECUTION":
+            return " (処刑)"
+        if cause == "ATTACK":
+            return " (襲撃)"
+        return ""
+
+    own_name: str | None = None
+    for seat_no, name in alive_seats:
+        if seat_no == request.seat_no:
+            own_name = name
+            break
+    own_label = f"{own_name} (席{request.seat_no})" if own_name else f"席{request.seat_no}"
+
     lines = [
         f"フェイズ: {request.phase_id}",
-        f"あなたの席: 席{request.seat_no}",
+        f"あなた: {own_label}",
         f"提案意図: {request.suggested_intent}",
-        "",
-        "## 場の状況",
-        logic.public_state_summary or "(情報なし)",
     ]
+
+    # Roster header — the ONLY block where seat numbers explicitly
+    # appear. All other blocks below reference players by display_name.
+    if alive_seats or dead_seats:
+        lines.append("")
+        lines.append("## 参加者 (席番号 → 名前)")
+        if alive_seats:
+            lines.append("生存中:")
+            for seat_no, name in alive_seats:
+                lines.append(f"  席{seat_no} {name}")
+        if dead_seats:
+            lines.append("死亡:")
+            for seat_no, name in dead_seats:
+                lines.append(f"  席{seat_no} {name}{_cause_tag(seat_no)}")
+
+    lines.append("")
+    lines.append("## 場の状況")
+    lines.append(logic.public_state_summary or "(情報なし)")
     if logic.pending_role_callouts:
-        # Surface outstanding role-callouts as their own block so the
-        # model treats them as a 1st-class signal rather than a token
-        # buried in the dense status string. Real role holders should
-        # take this as a CO trigger; wolf-side NPCs should fake CO
-        # unless there's a specific reason not to (the previous wording
-        # said "選択肢として参照" which the model treated as fully
-        # optional, and wolves stayed silent even after explicit human
-        # callouts). The role-strategy block carries the deeper
-        # reasoning; this prompt block surfaces the trigger.
         callout_ja = {
             "seer": "占い師",
             "medium": "霊媒師",
@@ -212,46 +261,11 @@ def _build_user(
             "潜伏を選ぶのは、相方が既に危険位置・CO 数が過密で誤爆/ローラー必至、等の"
             "具体的かつ強い理由があるときに限り、漠然とした『村が勝手に吊ってくれそう』で潜伏しない。"
         )
-    # Phase-D: prefer the bot's own NpcGameState mirror over the stale
-    # SpeakRequest fields. The state carries role + alive/dead + private
-    # results + wolf chat that the speech LLM needs to be in character.
-    alive_seats = (
-        getattr(state, "alive_seats", None)
-        or list(request.alive_seats)
-    )
-    dead_seats = (
-        getattr(state, "dead_seats", None)
-        or list(request.dead_seats)
-    )
-    if alive_seats:
-        alive_str = "、".join(
-            f"席{seat_no} {name}" for seat_no, name in alive_seats
-        )
-        lines.append("")
-        lines.append(f"## 生存者\n{alive_str}")
-    if dead_seats:
-        # Tag each dead seat with the death cause so the model never
-        # confuses "executed yesterday" with "killed last night".
-        cause_map = (getattr(state, "dead_seat_causes", None) or {}) if state else {}
-
-        def _cause_tag(seat_no: int) -> str:
-            cause = cause_map.get(seat_no)
-            if cause == "EXECUTION":
-                return " (処刑)"
-            if cause == "ATTACK":
-                return " (襲撃)"
-            return ""
-
-        dead_str = "、".join(
-            f"席{seat_no} {name}{_cause_tag(seat_no)}"
-            for seat_no, name in dead_seats
-        )
-        lines.append(f"## 死亡者\n{dead_str}")
     # Private state — only present when Phase-D snapshot was received.
     if state is not None:
         partner_wolves = getattr(state, "partner_wolves", []) or []
         if partner_wolves:
-            partners = "、".join(f"席{s} {n}" for s, n in partner_wolves)
+            partners = "、".join(n for _s, n in partner_wolves)
             lines.append(f"## 仲間の人狼 (非公開)\n{partners}")
         seer_results = getattr(state, "seer_results", []) or []
         if seer_results:
@@ -259,7 +273,7 @@ def _build_user(
             for sr in seer_results:
                 verdict = "黒 (人狼)" if sr.is_wolf else "白 (人狼ではない)"
                 lines.append(
-                    f"  day{sr.day}: 席{sr.target_seat} {sr.target_name} → {verdict}"
+                    f"  day{sr.day}: {sr.target_name} → {verdict}"
                 )
         medium_results = getattr(state, "medium_results", []) or []
         if medium_results:
@@ -272,7 +286,7 @@ def _build_user(
                 else:
                     verdict = "人狼ではない"
                 lines.append(
-                    f"  day{mr.day}: 席{mr.target_seat} {mr.target_name} → {verdict}"
+                    f"  day{mr.day}: {mr.target_name} → {verdict}"
                 )
         guard_history = getattr(state, "guard_history", []) or []
         if guard_history:
@@ -284,14 +298,14 @@ def _build_user(
                     else "(結果未確定)"
                 )
                 lines.append(
-                    f"  day{g.day}: 席{g.target_seat} {g.target_name} を護衛 {outcome}"
+                    f"  day{g.day}: {g.target_name} を護衛 {outcome}"
                 )
         wolf_chat_history = getattr(state, "wolf_chat_history", []) or []
         if wolf_chat_history:
             lines.append("## 人狼チャット履歴 (狼/狂人にのみ見える)")
             for wc in wolf_chat_history[-15:]:
                 lines.append(
-                    f"  day{wc.day} 席{wc.speaker_seat} {wc.speaker_name}: {wc.text}"
+                    f"  day{wc.day} {wc.speaker_name}: {wc.text}"
                 )
     if logic.past_votes:
         # Public vote history. Each NPC saw the EXECUTION public log when
@@ -301,8 +315,6 @@ def _build_user(
         # own vote target.
         lines.append("")
         lines.append("## 公開された投票履歴")
-        # Build a name lookup from alive + dead so dead voters still get
-        # a display name.
         seat_name_lookup = {
             seat_no: name
             for seat_no, name in (
@@ -310,37 +322,51 @@ def _build_user(
             )
         }
 
-        def _seat_label(seat: int | None) -> str:
+        def _voter_label(seat: int | None) -> str:
             if seat is None:
                 return "棄権"
-            name = seat_name_lookup.get(seat, "?")
-            return f"席{seat} {name}" if name and name != "?" else f"席{seat}"
+            name = seat_name_lookup.get(seat)
+            return name if name else "?"
 
         for day, round_, pairs in logic.past_votes:
             label = "決選投票" if round_ >= 1 else "投票"
             lines.append(f"- day{day} {label}:")
             for voter, target in pairs:
                 lines.append(
-                    f"    {_seat_label(voter)} → {_seat_label(target)}"
+                    f"    {_voter_label(voter)} → {_voter_label(target)}"
                 )
     if logic.recent_speeches:
         lines.append("")
         lines.append("## 直近の発言 (古い順)")
         for sp in logic.recent_speeches:
             tag = _SOURCE_TAG.get(sp.source, sp.source)
-            lines.append(f"- 席{sp.seat_no} {sp.display_name} [{tag}]: {sp.text}")
+            lines.append(f"- {sp.display_name} [{tag}]: {sp.text}")
     if logic.logic_candidates:
         lines.append("")
         lines.append("## 論点候補")
         for c in logic.logic_candidates:
             lines.append(_format_candidate(c))
     if logic.pressure:
+        # MVP code paths leave this empty; rendered as name → score so
+        # the seat-number column doesn't reappear here either.
+        seat_name_lookup_p = {
+            seat_no: name
+            for seat_no, name in (
+                list(alive_seats) + list(dead_seats)
+            )
+        }
         lines.append("")
-        lines.append("## 圧力マップ (席番号 → 疑い度)")
+        lines.append("## 圧力マップ (疑い度)")
         for seat, val in sorted(logic.pressure.items()):
-            lines.append(f"  席{seat}: {val:.2f}")
+            label = seat_name_lookup_p.get(seat) or f"席{seat}"
+            lines.append(f"  {label}: {val:.2f}")
     lines.append("")
-    lines.append("上記を踏まえ、キャラクターとして自然な短い発言を生成してください。")
+    lines.append(
+        "上記を踏まえ、キャラクターとして自然な短い発言を生成してください。"
+        "他者を呼ぶときは display_name (例: 「セツさん」「ラキオ」) を使い、"
+        "発話文中で席番号 (席1 等) は絶対に書かない。"
+        "席番号は data 層 (`addressed_seat_nos`) にだけ入れる。"
+    )
     return "\n".join(lines)
 
 

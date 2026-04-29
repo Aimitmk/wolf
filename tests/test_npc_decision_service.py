@@ -45,8 +45,14 @@ def test_build_vote_prompt_includes_state_and_candidates() -> None:
     )
     system, user = build_vote_prompt(state=_state(), persona=persona, request=req)
     assert "JSON" in system
-    assert "あなたの席: 席3" in user
+    # Own identity now leads with display_name; seat number is
+    # appended in parens so the LLM still has the data-layer mapping.
+    assert "あなた: セツ (席3)" in user
     assert "あなたの役職: WEREWOLF" in user
+    # Roster header is the only block where 席N appears alongside the
+    # name; the candidate list keeps 席N because the LLM emits a
+    # numeric `target_seat`.
+    assert "## 参加者 (席番号 → 名前)" in user
     assert "席1 Alice" in user and "席5 Bob" in user
     assert "通常投票" in user
     # Persona name surfaces verbatim so the LLM stays in character.

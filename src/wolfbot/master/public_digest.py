@@ -65,18 +65,21 @@ def build_public_digest(
     """
     lines: list[str] = []
 
+    def _name(seat: int) -> str:
+        """Best-effort display_name lookup; falls back to ``席N`` only
+        when the roster doesn't carry a name (recovery edge cases)."""
+        return seat_names.get(seat) or f"席{seat}"
+
     co_lines: list[str] = []
     if state.co_claims:
         for c in state.co_claims:
-            name = seat_names.get(c.seat, f"席{c.seat}")
-            co_lines.append(f"  席{c.seat} {name}: {c.role_claim}")
+            co_lines.append(f"  {_name(c.seat)}: {c.role_claim}")
     lines.append("## CO 状況")
     lines.extend(co_lines or ["  (まだ誰も CO していない)"])
 
     if state.silent_seats:
         silent_str = "、".join(
-            f"席{s} {seat_names.get(s, f'席{s}')}"
-            for s in sorted(state.silent_seats)
+            _name(s) for s in sorted(state.silent_seats)
         )
         lines.append(f"## 未発言の生存席\n  {silent_str}")
     else:
@@ -99,7 +102,7 @@ def build_public_digest(
             addressed_counts.items(), key=lambda kv: (-kv[1], kv[0])
         )
         rank_lines = [
-            f"  席{seat_no} {seat_names.get(seat_no, f'席{seat_no}')}: {count}回"
+            f"  {_name(seat_no)}: {count}回"
             for seat_no, count in ranked
         ]
         lines.append("## 名指しされた回数 (多い順)")
@@ -117,15 +120,8 @@ def build_public_digest(
             if state.last_addressed_speaker_seat is not None
             else None
         )
-        speaker_label = (
-            f"席{speaker} {seat_names.get(speaker, f'席{speaker}')}"
-            if speaker is not None
-            else "人間"
-        )
-        target_label = "、".join(
-            f"席{t} {seat_names.get(t, f'席{t}')}"
-            for t in sorted(addressed_set)
-        )
+        speaker_label = _name(speaker) if speaker is not None else "人間"
+        target_label = "、".join(_name(t) for t in sorted(addressed_set))
         snippet = state.last_addressed_text.strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:120] + "…"
@@ -142,14 +138,10 @@ def build_public_digest(
             continue
         if ev.speaker_seat is None or not ev.text:
             continue
-        seat_label = (
-            f"席{ev.speaker_seat} "
-            f"{seat_names.get(ev.speaker_seat, f'席{ev.speaker_seat}')}"
-        )
         snippet = ev.text.strip().replace("\n", " ")
         if len(snippet) > _SNIPPET_CAP:
             snippet = snippet[:_SNIPPET_CAP] + "…"
-        speech_lines.append(f"  {seat_label}: 「{snippet}」")
+        speech_lines.append(f"  {_name(ev.speaker_seat)}: 「{snippet}」")
     if speech_lines:
         lines.append("## 直近の発言 (古い順)")
         lines.extend(speech_lines[-_RECENT_SPEECH_CAP:])
@@ -160,15 +152,8 @@ def build_public_digest(
             label = "決選投票" if round_ >= 1 else "投票"
             lines.append(f"- day{day} {label}:")
             for voter, target in pairs:
-                voter_label = (
-                    f"席{voter} {seat_names.get(voter, f'席{voter}')}"
-                )
-                if target is None:
-                    target_label = "棄権"
-                else:
-                    target_label = (
-                        f"席{target} {seat_names.get(target, f'席{target}')}"
-                    )
+                voter_label = _name(voter)
+                target_label = "棄権" if target is None else _name(target)
                 lines.append(f"    {voter_label} → {target_label}")
 
     return "\n".join(lines)

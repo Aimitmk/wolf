@@ -332,13 +332,21 @@ def test_build_user_prompt_renders_recent_speeches_and_seats() -> None:
         dead_seats=((4, "故人"),),
     )
     user_msg = _build_user(logic, request)
+    # Recent speeches now render by display_name only — seat numbers
+    # live exclusively in the `## 参加者` roster header upstream.
     assert "## 直近の発言" in user_msg
-    assert "席1 Alice" in user_msg and "占いの結果が気になる" in user_msg
-    assert "席3 🌙セツ" in user_msg and "まだ静かですね" in user_msg
+    assert "Alice" in user_msg and "占いの結果が気になる" in user_msg
+    assert "🌙セツ" in user_msg and "まだ静かですね" in user_msg
     assert "[テキスト]" in user_msg and "[NPC発話]" in user_msg
-    assert "## 生存者" in user_msg
-    assert "席1 Alice、席2 Bob、席3 🌙セツ" in user_msg
-    assert "## 死亡者" in user_msg and "席4 故人" in user_msg
+    # Roster header is the single source of seat→name mapping.
+    assert "## 参加者 (席番号 → 名前)" in user_msg
+    assert "席1 Alice" in user_msg and "席2 Bob" in user_msg
+    assert "席3 🌙セツ" in user_msg
+    assert "席4 故人" in user_msg
+    # The `生存者` / `死亡者` blocks were folded into the unified
+    # roster — assert recent-speech lines no longer carry the seat
+    # prefix that used to leak into NPC output ("席4と席1の占い…").
+    assert "席1 Alice [テキスト]" not in user_msg
 
 
 def test_build_user_prompt_uses_npc_state_over_request_fields() -> None:
@@ -482,8 +490,9 @@ def test_build_user_prompt_renders_past_votes_with_names() -> None:
     out = _build_user(logic, request)
     assert "## 公開された投票履歴" in out
     assert "day1 投票" in out
-    assert "席1 Alice → 席3 ラキオ" in out
-    assert "席2 ジナ → 席4 セツ" in out
+    # New naming policy: ballot ledger uses display_name only.
+    assert "Alice → ラキオ" in out
+    assert "ジナ → セツ" in out
 
 
 def test_build_user_prompt_handles_past_vote_abstain() -> None:
@@ -502,7 +511,7 @@ def test_build_user_prompt_handles_past_vote_abstain() -> None:
         dead_seats=(),
     )
     out = _build_user(logic, request)
-    assert "席1 Alice → 棄権" in out
+    assert "Alice → 棄権" in out
 
 
 def test_build_user_prompt_renders_pending_role_callouts() -> None:

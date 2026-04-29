@@ -113,28 +113,49 @@ _NIGHT_SCHEMA: dict[str, object] = {
 
 
 def _build_state_block(state: NpcGameState) -> str:
-    """Render the bot's private state mirror as a Japanese prompt block."""
-    lines = [f"あなたの席: 席{state.seat_no}", f"あなたの役職: {state.role}"]
-    if state.alive_seats:
-        alive = "、".join(f"席{s} {n}" for s, n in state.alive_seats)
-        lines.append(f"生存者: {alive}")
-    if state.dead_seats:
-        causes = state.dead_seat_causes
-        def _cause(seat_no: int) -> str:
-            c = causes.get(seat_no)
-            return " (処刑)" if c == "EXECUTION" else " (襲撃)" if c == "ATTACK" else ""
-        dead = "、".join(
-            f"席{s} {n}{_cause(s)}" for s, n in state.dead_seats
-        )
-        lines.append(f"死亡者: {dead}")
+    """Render the bot's private state mirror as a Japanese prompt block.
+
+    Naming policy: 席番号は冒頭の `## 参加者` ロスター 1 ブロックだけに
+    集約し、ここから下は display_name のみで参照する。data 層 (vote
+    target_seat 等) には数字を入れる。
+    """
+    own_name: str | None = None
+    for s, n in state.alive_seats:
+        if s == state.seat_no:
+            own_name = n
+            break
+    own_label = (
+        f"{own_name} (席{state.seat_no})" if own_name else f"席{state.seat_no}"
+    )
+    lines: list[str] = [
+        f"あなた: {own_label}",
+        f"あなたの役職: {state.role}",
+    ]
+    causes = state.dead_seat_causes
+
+    def _cause(seat_no: int) -> str:
+        c = causes.get(seat_no)
+        return " (処刑)" if c == "EXECUTION" else " (襲撃)" if c == "ATTACK" else ""
+
+    if state.alive_seats or state.dead_seats:
+        lines.append("")
+        lines.append("## 参加者 (席番号 → 名前)")
+        if state.alive_seats:
+            lines.append("生存中:")
+            for s, n in state.alive_seats:
+                lines.append(f"  席{s} {n}")
+        if state.dead_seats:
+            lines.append("死亡:")
+            for s, n in state.dead_seats:
+                lines.append(f"  席{s} {n}{_cause(s)}")
     if state.partner_wolves:
-        partners = "、".join(f"席{s} {n}" for s, n in state.partner_wolves)
+        partners = "、".join(n for _s, n in state.partner_wolves)
         lines.append(f"仲間の人狼 (非公開): {partners}")
     if state.seer_results:
         lines.append("## 自分の占い結果 (非公開)")
         for sr in state.seer_results:
             verdict = "黒 (人狼)" if sr.is_wolf else "白 (人狼ではない)"
-            lines.append(f"  day{sr.day}: 席{sr.target_seat} {sr.target_name} → {verdict}")
+            lines.append(f"  day{sr.day}: {sr.target_name} → {verdict}")
     if state.medium_results:
         lines.append("## 自分の霊媒結果 (非公開)")
         for mr in state.medium_results:
@@ -144,7 +165,7 @@ def _build_state_block(state: NpcGameState) -> str:
                 verdict = "人狼"
             else:
                 verdict = "人狼ではない"
-            lines.append(f"  day{mr.day}: 席{mr.target_seat} {mr.target_name} → {verdict}")
+            lines.append(f"  day{mr.day}: {mr.target_name} → {verdict}")
     if state.guard_history:
         lines.append("## 自分の護衛履歴 (非公開)")
         for g in state.guard_history:
@@ -154,13 +175,13 @@ def _build_state_block(state: NpcGameState) -> str:
                 else "(結果未確定)"
             )
             lines.append(
-                f"  day{g.day}: 席{g.target_seat} {g.target_name} を護衛 {outcome}"
+                f"  day{g.day}: {g.target_name} を護衛 {outcome}"
             )
     if state.wolf_chat_history:
         lines.append("## 人狼チャット履歴 (狼/狂人にのみ見える)")
         for line in state.wolf_chat_history[-20:]:
             lines.append(
-                f"  day{line.day} 席{line.speaker_seat} {line.speaker_name}: {line.text}"
+                f"  day{line.day} {line.speaker_name}: {line.text}"
             )
     return "\n".join(lines)
 

@@ -1834,9 +1834,36 @@ def test_logic_packet_builder_includes_co_claims_in_summary() -> None:
         recipient_npc_id="npc_p3",
         expires_at_ms=2000,
         now_ms=1500,
+        seat_names={1: "Alice", 2: "Bob", 3: "Carol"},
     )
     assert packet.recipient_npc_id == "npc_p3"
     assert packet.expires_at_ms == 2000
     assert any(c.id == "co-2-seer" for c in packet.logic_candidates)
+    # Naming policy: summary renders by display_name when ``seat_names``
+    # is supplied (production wiring always supplies it).
+    assert "Bob=seer" in packet.public_state_summary
+    assert "silent_seats=[Carol]" in packet.public_state_summary
+    # Without `seat_names` (legacy / unit-test fallback) the summary
+    # falls back to 席N — covered by the next test.
+
+
+def test_logic_packet_summary_falls_back_to_seat_when_no_names_supplied() -> None:
+    state = PublicDiscussionState(
+        game_id="g",
+        phase_id="g::day1::DAY_DISCUSSION::1",
+        day=1,
+        alive_seat_nos=frozenset({1, 2, 3}),
+    )
+    from wolfbot.domain.discussion import CoClaim
+
+    state.co_claims = (CoClaim(seat=2, role_claim="seer", declared_at_event_id="e1"),)
+    state.silent_seats = frozenset({3})
+    packet = build_logic_packet(
+        state=state,
+        recipient_npc_id="npc_p3",
+        expires_at_ms=2000,
+        now_ms=1500,
+    )
+    # No seat_names → legacy 席N rendering preserved for back-compat.
     assert "席2=seer" in packet.public_state_summary
-    assert "silent_seats=[3]" in packet.public_state_summary
+    assert "silent_seats=[席3]" in packet.public_state_summary

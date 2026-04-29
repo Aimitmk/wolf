@@ -316,6 +316,9 @@ class SpeakArbiter:
             await self._collect_request_context(state, seat_no)
         )
         past_votes = await self._load_past_votes(game_id, state.day)
+        seat_names_lookup: dict[int, str] = {
+            seat: name for seat, name in (list(alive_seats) + list(dead_seats))
+        }
 
         # Build LogicPacket (sent first so the NPC has context for the
         # subsequent speak_request).
@@ -326,6 +329,7 @@ class SpeakArbiter:
             now_ms=now,
             recent_speeches=recent_speeches,
             past_votes=past_votes,
+            seat_names=seat_names_lookup,
         )
         try:
             await entry.send(packet.model_dump_json())

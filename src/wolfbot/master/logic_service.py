@@ -43,28 +43,45 @@ def build_logic_packet(
     past_votes: Iterable[
         tuple[int, int, tuple[tuple[int, int | None], ...]]
     ] = (),
+    seat_names: dict[int, str] | None = None,
 ) -> LogicPacket:
     """Construct a `LogicPacket` for `recipient_npc_id`.
 
     The packet is deterministic given the same `state` + `now_ms` save for
     the random `packet_id`. Tests should pin `now_ms` and inspect the rest of
     the payload directly.
+
+    ``seat_names`` is a seat → display_name lookup so the rendered
+    summary can refer to players by name instead of ``席N``. Optional
+    for back-compat (older callers / tests pass nothing and get the
+    legacy seat-only rendering); production callers in
+    `SpeakArbiter.dispatch_request` always pass it.
     """
+    name_map = seat_names or {}
+
+    def _name(seat: int) -> str:
+        return name_map.get(seat) or f"席{seat}"
+
     candidates: list[LogicCandidate] = []
     for claim in state.co_claims:
         candidates.append(
             LogicCandidate(
                 id=f"co-{claim.seat}-{claim.role_claim}",
-                claim=f"席{claim.seat} {claim.role_claim}CO",
+                claim=f"{_name(claim.seat)} {claim.role_claim}CO",
             )
         )
     candidates.extend(additional_candidates)
 
+    silent_names = (
+        "、".join(_name(s) for s in sorted(state.silent_seats))
+        if state.silent_seats
+        else ""
+    )
     silent_repr = (
-        f"silent_seats={sorted(state.silent_seats)}" if state.silent_seats else "silent_seats=[]"
+        f"silent_seats=[{silent_names}]" if silent_names else "silent_seats=[]"
     )
     co_repr = (
-        ", ".join(f"席{c.seat}={c.role_claim}" for c in state.co_claims)
+        ", ".join(f"{_name(c.seat)}={c.role_claim}" for c in state.co_claims)
         if state.co_claims
         else "(none)"
     )
@@ -83,7 +100,7 @@ def build_logic_packet(
         addressed_seats = frozenset({state.last_addressed_seat})
     if addressed_seats:
         speaker_repr = (
-            f"席{state.last_addressed_speaker_seat}"
+            _name(state.last_addressed_speaker_seat)
             if state.last_addressed_speaker_seat is not None
             else "human"
         )
@@ -93,13 +110,11 @@ def build_logic_packet(
         if len(utter) > 160:
             utter = utter[:160] + "…"
         sorted_seats = sorted(addressed_seats)
-        if len(sorted_seats) == 1:
-            # Singular case keeps the legacy ``last_address=席N`` shape
-            # so existing log scrapers / NPC-side parsers don't see a
-            # surprise format change.
-            addr_repr = f"席{sorted_seats[0]}"
-        else:
-            addr_repr = "[" + ",".join(f"席{s}" for s in sorted_seats) + "]"
+        addr_repr = (
+            _name(sorted_seats[0])
+            if len(sorted_seats) == 1
+            else "[" + "、".join(_name(s) for s in sorted_seats) + "]"
+        )
         summary += (
             f" last_address={addr_repr}"
             f" from={speaker_repr} text=\"{utter}\""
