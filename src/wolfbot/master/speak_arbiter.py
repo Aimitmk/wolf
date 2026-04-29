@@ -28,7 +28,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from wolfbot.domain.discussion import (
     PublicDiscussionState,
@@ -184,6 +184,8 @@ class SpeakArbiter:
         seat_no: int,
         game_id: str,
         suggested_intent: str = "speak",
+        selection_reason: str | None = None,
+        public_state_snapshot: dict[str, Any] | None = None,
     ) -> tuple[SpeakRequest | None, str | None]:
         """Try to send a SpeakRequest to `candidate_npc_id`.
 
@@ -273,6 +275,8 @@ class SpeakArbiter:
             priority=0,
             expires_at_ms=request.expires_at_ms,
             created_at_ms=now,
+            selection_reason=selection_reason,
+            public_state_snapshot=public_state_snapshot,
         )
         try:
             await entry.send(request.model_dump_json())
@@ -639,16 +643,40 @@ class SpeakArbiter:
             in_silent = 0 if seat in state.silent_seats else 1
             return (is_addressed, in_silent, seat)
 
+        online_npc_seats = sorted(
+            e.assigned_seat
+            for e in online
+            if e.assigned_seat is not None and e.game_id == game_id
+        )
+        snapshot: dict[str, Any] = {
+            "phase_id": state.phase_id,
+            "day": state.day,
+            "phase": game.phase.value,
+            "last_addressed_seat": addressed,
+            "silent_seats": sorted(state.silent_seats),
+            "alive_seat_nos": sorted(state.alive_seat_nos),
+            "online_npc_seats": online_npc_seats,
+        }
+
         for entry in sorted(online, key=_pick_key):
             if entry.assigned_seat is None or entry.game_id != game_id:
                 continue
             if entry.assigned_seat not in state.alive_seat_nos:
                 continue
+            seat = entry.assigned_seat
+            if addressed is not None and seat == addressed:
+                reason = "addressed"
+            elif seat in state.silent_seats:
+                reason = "silent_rotation"
+            else:
+                reason = "seat_tiebreak"
             await self.dispatch_request(
                 state=state,
                 candidate_npc_id=entry.npc_id,
-                seat_no=entry.assigned_seat,
+                seat_no=seat,
                 game_id=game_id,
+                selection_reason=reason,
+                public_state_snapshot=snapshot,
             )
             return
 

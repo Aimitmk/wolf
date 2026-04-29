@@ -965,14 +965,17 @@ class SqliteRepo:
         priority: int,
         expires_at_ms: int,
         created_at_ms: int,
+        selection_reason: str | None = None,
+        public_state_snapshot: dict[str, Any] | None = None,
     ) -> None:
         await self._db.execute(
             """
             INSERT INTO npc_speak_requests (
                 request_id, game_id, phase_id, npc_id, seat_no,
                 logic_packet_id, suggested_intent, max_chars, max_duration_ms,
-                priority, expires_at_ms, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                priority, expires_at_ms, created_at_ms,
+                selection_reason, public_state_snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request_id,
@@ -987,6 +990,10 @@ class SqliteRepo:
                 priority,
                 expires_at_ms,
                 created_at_ms,
+                selection_reason,
+                json.dumps(public_state_snapshot, ensure_ascii=False)
+                if public_state_snapshot is not None
+                else None,
             ),
         )
         await self._db.commit()

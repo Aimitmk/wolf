@@ -66,6 +66,7 @@ export default function GameView({
               phase={phase}
               seats={data.seats}
               trace={data.trace}
+              arbiterDecisions={data.arbiter_decisions ?? []}
               onOpenTrace={setOpenTrace}
             />
           ))}

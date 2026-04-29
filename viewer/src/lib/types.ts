@@ -102,6 +102,42 @@ export interface TraceEntry {
   file_stem?: string;
 }
 
+/**
+ * One Master-side `SpeakRequest` dispatch — the "why this NPC, why now"
+ * breadcrumb the viewer surfaces alongside the resulting NPC speech.
+ *
+ * `selection_reason` is one of:
+ *   - "addressed":       state.last_addressed_seat matched this NPC's seat
+ *   - "silent_rotation": no addressed seat; this NPC hadn't yet spoken in the phase
+ *   - "seat_tiebreak":   all online NPCs already spoke this phase; lowest seat wins
+ *
+ * Older games (pre-migration) have `selection_reason=null`. Result and
+ * playback fields are LEFT-joined and may be `null` for in-flight or
+ * rejected requests.
+ */
+export interface ArbiterDecision {
+  request_id: string;
+  phase_id: string;
+  npc_id: string;
+  seat_no: number;
+  suggested_intent: string;
+  selection_reason: string | null;
+  public_state_snapshot: Record<string, unknown> | null;
+  logic_packet_id: string;
+  created_at_ms: number;
+  expires_at_ms: number;
+  result_status: string | null;
+  result_text: string | null;
+  result_intent: string | null;
+  result_failure_reason: string | null;
+  result_received_at_ms: number | null;
+  playback_outcome: string | null;
+  playback_failure_reason: string | null;
+  playback_finished_at_ms: number | null;
+  tts_outcome: string | null;
+  tts_duration_ms: number | null;
+}
+
 export interface GameSample {
   game: {
     id: string;
@@ -117,4 +153,5 @@ export interface GameSample {
   seats: Seat[];
   phases: PhaseSection[];
   trace: TraceEntry[];
+  arbiter_decisions?: ArbiterDecision[];
 }

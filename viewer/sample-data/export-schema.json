@@ -1,5 +1,200 @@
 {
   "$defs": {
+    "ArbiterDecisionEntry": {
+      "additionalProperties": false,
+      "description": "One Master-side `SpeakRequest` dispatch — the \"why this NPC, why now\"\nbreadcrumb the viewer surfaces alongside the resulting NPC speech.\n\nJoined from three persistence rows keyed by ``request_id``:\n\n* ``npc_speak_requests`` — the dispatch itself (Master → NPC)\n* ``npc_speak_results`` — NPC's reply (accepted / rejected / failed)\n* ``npc_playback_events`` — TTS + Discord playback outcome\n\nAny of the three may be missing for an in-flight or interrupted\nrequest; only ``request_id`` / ``phase_id`` / ``npc_id`` / ``seat_no``\n/ ``created_at_ms`` are guaranteed.",
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "phase_id": {
+          "title": "Phase Id",
+          "type": "string"
+        },
+        "npc_id": {
+          "title": "Npc Id",
+          "type": "string"
+        },
+        "seat_no": {
+          "title": "Seat No",
+          "type": "integer"
+        },
+        "suggested_intent": {
+          "title": "Suggested Intent",
+          "type": "string"
+        },
+        "selection_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Selection Reason"
+        },
+        "public_state_snapshot": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Public State Snapshot"
+        },
+        "logic_packet_id": {
+          "title": "Logic Packet Id",
+          "type": "string"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        },
+        "expires_at_ms": {
+          "title": "Expires At Ms",
+          "type": "integer"
+        },
+        "result_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Status"
+        },
+        "result_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Text"
+        },
+        "result_intent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Intent"
+        },
+        "result_failure_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Failure Reason"
+        },
+        "result_received_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Received At Ms"
+        },
+        "playback_outcome": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Playback Outcome"
+        },
+        "playback_failure_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Playback Failure Reason"
+        },
+        "playback_finished_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Playback Finished At Ms"
+        },
+        "tts_outcome": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tts Outcome"
+        },
+        "tts_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tts Duration Ms"
+        }
+      },
+      "required": [
+        "request_id",
+        "phase_id",
+        "npc_id",
+        "seat_no",
+        "suggested_intent",
+        "selection_reason",
+        "public_state_snapshot",
+        "logic_packet_id",
+        "created_at_ms",
+        "expires_at_ms"
+      ],
+      "title": "ArbiterDecisionEntry",
+      "type": "object"
+    },
     "GameMeta": {
       "additionalProperties": false,
       "properties": {
@@ -675,6 +870,14 @@
         "$ref": "#/$defs/TraceEntry"
       },
       "title": "Trace",
+      "type": "array"
+    },
+    "arbiter_decisions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ArbiterDecisionEntry"
+      },
+      "title": "Arbiter Decisions",
       "type": "array"
     }
   },

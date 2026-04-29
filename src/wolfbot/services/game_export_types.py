@@ -169,6 +169,49 @@ class TraceEntry(BaseModel):
     file_stem: str | None = None
 
 
+class ArbiterDecisionEntry(BaseModel):
+    """One Master-side `SpeakRequest` dispatch — the "why this NPC, why now"
+    breadcrumb the viewer surfaces alongside the resulting NPC speech.
+
+    Joined from three persistence rows keyed by ``request_id``:
+
+    * ``npc_speak_requests`` — the dispatch itself (Master → NPC)
+    * ``npc_speak_results`` — NPC's reply (accepted / rejected / failed)
+    * ``npc_playback_events`` — TTS + Discord playback outcome
+
+    Any of the three may be missing for an in-flight or interrupted
+    request; only ``request_id`` / ``phase_id`` / ``npc_id`` / ``seat_no``
+    / ``created_at_ms`` are guaranteed.
+    """
+
+    model_config = _StrictConfig
+
+    request_id: str
+    phase_id: str
+    npc_id: str
+    seat_no: int
+    suggested_intent: str
+    selection_reason: str | None
+    public_state_snapshot: dict[str, Any] | None
+    logic_packet_id: str
+    created_at_ms: int
+    expires_at_ms: int
+
+    # speak_results join (None if NPC never replied / TTL expired)
+    result_status: str | None = None
+    result_text: str | None = None
+    result_intent: str | None = None
+    result_failure_reason: str | None = None
+    result_received_at_ms: int | None = None
+
+    # playback_events join (None if request was rejected before TTS)
+    playback_outcome: str | None = None
+    playback_failure_reason: str | None = None
+    playback_finished_at_ms: int | None = None
+    tts_outcome: str | None = None
+    tts_duration_ms: int | None = None
+
+
 class GameExport(BaseModel):
     """Top-level shape of one ``viewer/games/{id}.json`` file."""
 
@@ -178,9 +221,11 @@ class GameExport(BaseModel):
     seats: list[SeatExport]
     phases: list[PhaseSection]
     trace: list[TraceEntry]
+    arbiter_decisions: list[ArbiterDecisionEntry] = []
 
 
 __all__ = [
+    "ArbiterDecisionEntry",
     "CoDeclaration",
     "DeathCause",
     "DiscussionMode",

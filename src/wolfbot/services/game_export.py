@@ -33,6 +33,7 @@ import aiosqlite
 from pydantic import ValidationError
 
 from wolfbot.services.game_export_types import (
+    ArbiterDecisionEntry,
     DeathCause,
     DiscussionMode,
     GameExport,
@@ -83,11 +84,12 @@ async def export_game(
         encoding="utf-8",
     )
     log.info(
-        "game_exported game=%s path=%s phases=%d trace_lines=%d",
+        "game_exported game=%s path=%s phases=%d trace_lines=%d arbiter_decisions=%d",
         game_id,
         out_path,
         len(payload.phases),
         len(payload.trace),
+        len(payload.arbiter_decisions),
     )
     return out_path.resolve()
 
@@ -155,6 +157,35 @@ async def _build_payload(
             "ORDER BY created_at_ms ASC",
             (game_id,),
         )]
+        # Arbiter decision timeline — joined LEFT-OUTER from requests so
+        # in-flight or rejected dispatches still appear (results /
+        # playback may legitimately be missing).
+        arbiter_rows = [dict(r) for r in await _fetch_all(
+            db,
+            """
+            SELECT
+                req.request_id, req.phase_id, req.npc_id, req.seat_no,
+                req.suggested_intent, req.selection_reason,
+                req.public_state_snapshot_json, req.logic_packet_id,
+                req.created_at_ms, req.expires_at_ms,
+                res.status AS result_status,
+                res.text AS result_text,
+                res.intent AS result_intent,
+                res.failure_reason AS result_failure_reason,
+                res.received_at_ms AS result_received_at_ms,
+                pb.outcome AS playback_outcome,
+                pb.failure_reason AS playback_failure_reason,
+                pb.finished_at_ms AS playback_finished_at_ms,
+                pb.tts_outcome AS tts_outcome,
+                pb.tts_duration_ms AS tts_duration_ms
+            FROM npc_speak_requests req
+            LEFT JOIN npc_speak_results res ON res.request_id = req.request_id
+            LEFT JOIN npc_playback_events pb ON pb.request_id = req.request_id
+            WHERE req.game_id = ?
+            ORDER BY req.created_at_ms ASC
+            """,
+            (game_id,),
+        )]
 
     return GameExport(
         game=_build_game_meta(game_row, public_log_rows),
@@ -163,6 +194,7 @@ async def _build_payload(
             public_log_rows, speech_event_rows, vote_rows, night_action_rows
         ),
         trace=_load_trace(trace_root, game_id),
+        arbiter_decisions=[_build_arbiter_decision(r) for r in arbiter_rows],
     )
 
 
@@ -196,6 +228,51 @@ def _build_game_meta(
         victory=_infer_victory(public_logs),
         main_text_channel_id=row["main_text_channel_id"],
         main_vc_channel_id=row["main_vc_channel_id"],
+    )
+
+
+def _build_arbiter_decision(row: dict[str, Any]) -> ArbiterDecisionEntry:
+    """Build one ArbiterDecisionEntry from the joined query row.
+
+    Older games (pre-selection_reason migration) have NULL in both
+    ``selection_reason`` and ``public_state_snapshot_json``; we surface
+    them as ``None`` rather than back-fill heuristics so the viewer can
+    distinguish "we don't know why" from "we know it was X".
+    """
+    raw_snapshot = row.get("public_state_snapshot_json")
+    snapshot: dict[str, Any] | None = None
+    if raw_snapshot:
+        try:
+            parsed = json.loads(raw_snapshot)
+        except json.JSONDecodeError:
+            log.warning(
+                "skipping malformed public_state_snapshot_json for request %s",
+                row.get("request_id"),
+            )
+            parsed = None
+        if isinstance(parsed, dict):
+            snapshot = parsed
+    return ArbiterDecisionEntry(
+        request_id=row["request_id"],
+        phase_id=row["phase_id"],
+        npc_id=row["npc_id"],
+        seat_no=row["seat_no"],
+        suggested_intent=row["suggested_intent"],
+        selection_reason=row.get("selection_reason"),
+        public_state_snapshot=snapshot,
+        logic_packet_id=row["logic_packet_id"],
+        created_at_ms=row["created_at_ms"],
+        expires_at_ms=row["expires_at_ms"],
+        result_status=row.get("result_status"),
+        result_text=row.get("result_text"),
+        result_intent=row.get("result_intent"),
+        result_failure_reason=row.get("result_failure_reason"),
+        result_received_at_ms=row.get("result_received_at_ms"),
+        playback_outcome=row.get("playback_outcome"),
+        playback_failure_reason=row.get("playback_failure_reason"),
+        playback_finished_at_ms=row.get("playback_finished_at_ms"),
+        tts_outcome=row.get("tts_outcome"),
+        tts_duration_ms=row.get("tts_duration_ms"),
     )
 
 

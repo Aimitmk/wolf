@@ -21,6 +21,7 @@ import {
   sourceJa,
 } from "@/lib/format";
 import type {
+  ArbiterDecision,
   PhaseSection as PhaseSectionType,
   Seat,
   SpeechEvent,
@@ -32,14 +33,16 @@ export default function PhaseSection({
   phase,
   seats,
   trace,
+  arbiterDecisions,
   onOpenTrace,
 }: {
   phase: PhaseSectionType;
   seats: Seat[];
   trace: TraceEntry[];
+  arbiterDecisions: ArbiterDecision[];
   onOpenTrace: (entry: TraceEntry) => void;
 }) {
-  const events = buildTimeline(phase, seats, trace);
+  const events = buildTimeline(phase, seats, trace, arbiterDecisions);
 
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
@@ -91,7 +94,13 @@ export default function PhaseSection({
 
 type TimelineEvent =
   | { kind: "log"; ts: number; data: PhaseSectionType["public_logs"][number] }
-  | { kind: "speech"; ts: number; data: SpeechEvent; trace: TraceEntry | null }
+  | {
+      kind: "speech";
+      ts: number;
+      data: SpeechEvent;
+      trace: TraceEntry | null;
+      arbiter: ArbiterDecision | null;
+    }
   | { kind: "vote"; ts: number; data: Vote; trace: TraceEntry | null }
   | {
       kind: "night_action";
@@ -104,6 +113,7 @@ function buildTimeline(
   phase: PhaseSectionType,
   seats: Seat[],
   trace: TraceEntry[],
+  arbiterDecisions: ArbiterDecision[],
 ): TimelineEvent[] {
   const events: TimelineEvent[] = [];
   for (const log of phase.public_logs) {
@@ -115,6 +125,7 @@ function buildTimeline(
       ts: sp.created_at_ms,
       data: sp,
       trace: matchTraceForSpeech(sp, phase, trace),
+      arbiter: matchArbiterForSpeech(sp, phase, arbiterDecisions),
     });
   }
   for (const v of phase.votes) {
@@ -135,6 +146,46 @@ function buildTimeline(
   }
   events.sort((a, b) => a.ts - b.ts);
   return events;
+}
+
+/**
+ * Match an `npc_generated` SpeechEvent back to the Master-side
+ * `SpeakRequest` dispatch that produced it. The DB doesn't carry a
+ * direct foreign key (request_id is in `npc_speak_results`, not in
+ * `speech_events`), so we match on:
+ *
+ *   1. phase_id (canonical {gid}::dayN::PHASE::seq)
+ *   2. seat_no — the NPC's assigned seat
+ *   3. result_text equality with the spoken utterance — disambiguates
+ *      multiple dispatches to the same seat in the same phase
+ *
+ * Falls back to the most recent dispatch for the seat in the phase
+ * when text doesn't match (text may differ slightly: leading whitespace,
+ * the NPC's first/last words trimmed, etc.). Returns `null` when the
+ * speech is from a human / text channel, since arbiter dispatch only
+ * fires for `npc_generated`.
+ */
+function matchArbiterForSpeech(
+  sp: SpeechEvent,
+  phase: PhaseSectionType,
+  decisions: ArbiterDecision[],
+): ArbiterDecision | null {
+  if (sp.source !== "npc_generated" || sp.speaker_seat == null) return null;
+  const phaseMatches = (d: ArbiterDecision) =>
+    d.phase_id.includes(`::day${phase.day}::${phase.phase}`);
+  const seatMatches = (d: ArbiterDecision) => d.seat_no === sp.speaker_seat;
+  const exactText =
+    decisions.find(
+      (d) =>
+        phaseMatches(d) && seatMatches(d) && d.result_text === sp.text,
+    ) ?? null;
+  if (exactText) return exactText;
+  const sameSeat = decisions.filter((d) => phaseMatches(d) && seatMatches(d));
+  if (sameSeat.length === 0) return null;
+  // Latest dispatch for the seat in this phase, by created_at_ms.
+  return sameSeat.reduce((best, cur) =>
+    cur.created_at_ms > best.created_at_ms ? cur : best,
+  );
 }
 
 function matchTraceForSpeech(
@@ -326,6 +377,7 @@ function EventRow({
                 />
               </Tooltip>
             )}
+            {event.arbiter && <ArbiterChip decision={event.arbiter} />}
           </Stack>
           <Typography variant="body2">{event.data.text}</Typography>
           {event.data.summary && (
@@ -333,6 +385,7 @@ function EventRow({
               要約: {event.data.summary}
             </Typography>
           )}
+          {event.arbiter && <ArbiterDetail decision={event.arbiter} />}
         </Box>
         <TraceButton entry={event.trace} onOpen={onOpenTrace} />
       </Box>
@@ -391,6 +444,105 @@ function TimeCell({ time }: { time: string }) {
     >
       {time}
     </Typography>
+  );
+}
+
+const ARBITER_REASON_JA: Record<string, string> = {
+  addressed: "指名",
+  silent_rotation: "未発言ローテ",
+  seat_tiebreak: "席順",
+};
+
+const ARBITER_REASON_TIP: Record<string, string> = {
+  addressed:
+    "直前の発言で addressed_seat_no がこの NPC の席だったため最優先で選ばれた",
+  silent_rotation:
+    "このフェーズでまだ発言していない NPC を優先して選んだ",
+  seat_tiebreak:
+    "全員が一度発言済み — 席番号の若い順で選んだ",
+};
+
+function ArbiterChip({ decision }: { decision: ArbiterDecision }) {
+  const label = decision.selection_reason
+    ? ARBITER_REASON_JA[decision.selection_reason] ?? decision.selection_reason
+    : "発話選定";
+  const tip =
+    decision.selection_reason &&
+    ARBITER_REASON_TIP[decision.selection_reason]
+      ? ARBITER_REASON_TIP[decision.selection_reason]
+      : "Master が SpeakRequest を送出した記録";
+  return (
+    <Tooltip title={tip}>
+      <Chip
+        label={`発話選定: ${label}`}
+        size="small"
+        color="info"
+        variant="outlined"
+        sx={{ height: 18, fontSize: 10 }}
+      />
+    </Tooltip>
+  );
+}
+
+function ArbiterDetail({ decision }: { decision: ArbiterDecision }) {
+  const snap = decision.public_state_snapshot;
+  const addressed =
+    snap && typeof snap.last_addressed_seat === "number"
+      ? `席${snap.last_addressed_seat}`
+      : "なし";
+  const silent = Array.isArray(snap?.silent_seats)
+    ? `[${(snap!.silent_seats as number[]).join(", ")}]`
+    : "—";
+  const onlineNpcs = Array.isArray(snap?.online_npc_seats)
+    ? `[${(snap!.online_npc_seats as number[]).join(", ")}]`
+    : "—";
+  const latencyMs =
+    decision.result_received_at_ms != null
+      ? decision.result_received_at_ms - decision.created_at_ms
+      : null;
+  const playbackMs =
+    decision.playback_finished_at_ms != null &&
+    decision.result_received_at_ms != null
+      ? decision.playback_finished_at_ms - decision.result_received_at_ms
+      : null;
+  const status = decision.result_status ?? "in-flight";
+  const failure =
+    decision.result_failure_reason ??
+    decision.playback_failure_reason ??
+    null;
+  return (
+    <Box
+      sx={{
+        mt: 0.5,
+        pl: 1,
+        borderLeft: "2px solid",
+        borderColor: "info.light",
+        fontSize: 11,
+      }}
+    >
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", lineHeight: 1.6 }}
+      >
+        addressed={addressed} silent={silent} online_npcs={onlineNpcs}
+      </Typography>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", lineHeight: 1.6 }}
+      >
+        result={status}
+        {latencyMs != null && ` (LLM ${latencyMs}ms)`}
+        {playbackMs != null && ` / 再生 ${playbackMs}ms`}
+        {decision.tts_outcome && ` / TTS ${decision.tts_outcome}`}
+        {failure && (
+          <Box component="span" sx={{ color: "error.main", ml: 0.5 }}>
+            ・失敗理由: {failure}
+          </Box>
+        )}
+      </Typography>
+    </Box>
   );
 }
 

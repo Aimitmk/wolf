@@ -193,7 +193,9 @@ DDL: list[str] = [
         max_duration_ms INTEGER NOT NULL,
         priority INTEGER NOT NULL DEFAULT 0,
         expires_at_ms INTEGER NOT NULL,
-        created_at_ms INTEGER NOT NULL
+        created_at_ms INTEGER NOT NULL,
+        selection_reason TEXT,
+        public_state_snapshot_json TEXT
     )
     """,
     """
@@ -299,5 +301,16 @@ async def migrate(db_path: str | Path) -> None:
         if "addressed_seat_no" not in cols:
             await db.execute(
                 "ALTER TABLE speech_events ADD COLUMN addressed_seat_no INTEGER"
+            )
+        async with db.execute("PRAGMA table_info(npc_speak_requests)") as cur:
+            cols = {row[1] async for row in cur}
+        if "selection_reason" not in cols:
+            await db.execute(
+                "ALTER TABLE npc_speak_requests ADD COLUMN selection_reason TEXT"
+            )
+        if "public_state_snapshot_json" not in cols:
+            await db.execute(
+                "ALTER TABLE npc_speak_requests "
+                "ADD COLUMN public_state_snapshot_json TEXT"
             )
         await db.commit()

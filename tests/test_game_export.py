@@ -289,6 +289,130 @@ async def test_export_game_filters_player_speech_logs(
     assert "PLAYER_SPEECH" not in all_log_kinds
 
 
+async def test_export_game_inlines_arbiter_decisions(
+    fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
+) -> None:
+    """Arbiter decisions (Master-side `SpeakRequest` dispatches) are joined
+    from the three NPC orchestration tables and emitted under the new
+    ``arbiter_decisions`` key. The viewer uses this to render the "why this
+    NPC, why now" breadcrumb alongside each NPC speech event.
+    """
+    repo, db_path = fixture_repo
+    await _seed_minimal_game(repo)
+
+    # Insert one full request → result → playback chain.
+    await repo.insert_npc_speak_request(
+        request_id="sr_t1",
+        game_id=GAME_ID,
+        phase_id=f"{GAME_ID}::day1::DAY_DISCUSSION::1",
+        npc_id="npc_setsu",
+        seat_no=2,
+        logic_packet_id="lp_t1",
+        suggested_intent="speak",
+        max_chars=80,
+        max_duration_ms=12_000,
+        priority=0,
+        expires_at_ms=1_700_000_300_000,
+        created_at_ms=1_700_000_200_000,
+        selection_reason="addressed",
+        public_state_snapshot={
+            "last_addressed_seat": 2,
+            "silent_seats": [1, 2],
+            "alive_seat_nos": [1, 2],
+            "online_npc_seats": [2],
+        },
+    )
+    await repo.insert_npc_speak_result(
+        request_id="sr_t1",
+        game_id=GAME_ID,
+        phase_id=f"{GAME_ID}::day1::DAY_DISCUSSION::1",
+        npc_id="npc_setsu",
+        status="accepted",
+        text="占い師COします",
+        used_logic_ids=["co-1-seer"],
+        intent="speak",
+        estimated_duration_ms=2_500,
+        failure_reason=None,
+        received_at_ms=1_700_000_205_000,
+    )
+    await repo.open_npc_playback(
+        request_id="sr_t1",
+        game_id=GAME_ID,
+        phase_id=f"{GAME_ID}::day1::DAY_DISCUSSION::1",
+        npc_id="npc_setsu",
+        speech_event_id="se_t1",
+        authorized_at_ms=1_700_000_205_500,
+        playback_deadline_ms=1_700_000_217_500,
+    )
+    await repo.close_npc_playback(
+        "sr_t1",
+        finished_at_ms=1_700_000_208_000,
+        outcome="success",
+        failure_reason=None,
+    )
+
+    # And a second request that was rejected before TTS — verifies
+    # LEFT JOIN behavior (no playback row, but result row with status).
+    await repo.insert_npc_speak_request(
+        request_id="sr_t2",
+        game_id=GAME_ID,
+        phase_id=f"{GAME_ID}::day1::DAY_DISCUSSION::1",
+        npc_id="npc_gina",
+        seat_no=3,
+        logic_packet_id="lp_t2",
+        suggested_intent="speak",
+        max_chars=80,
+        max_duration_ms=12_000,
+        priority=0,
+        expires_at_ms=1_700_000_320_000,
+        created_at_ms=1_700_000_220_000,
+        selection_reason="silent_rotation",
+        public_state_snapshot={"silent_seats": [3]},
+    )
+    await repo.insert_npc_speak_result(
+        request_id="sr_t2",
+        game_id=GAME_ID,
+        phase_id=f"{GAME_ID}::day1::DAY_DISCUSSION::1",
+        npc_id="npc_gina",
+        status="rejected",
+        text=None,
+        used_logic_ids=None,
+        intent=None,
+        estimated_duration_ms=None,
+        failure_reason="stale_phase",
+        received_at_ms=1_700_000_225_000,
+    )
+
+    out = await export_game(
+        game_id=GAME_ID,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=tmp_path / "out",
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    decisions = payload["arbiter_decisions"]
+    assert len(decisions) == 2
+
+    # Chronological order — sr_t1 first, sr_t2 second.
+    d1, d2 = decisions
+    assert d1["request_id"] == "sr_t1"
+    assert d1["selection_reason"] == "addressed"
+    assert d1["public_state_snapshot"]["last_addressed_seat"] == 2
+    assert d1["result_status"] == "accepted"
+    assert d1["result_text"] == "占い師COします"
+    assert d1["playback_outcome"] == "success"
+    assert d1["playback_finished_at_ms"] == 1_700_000_208_000
+
+    # Rejected request: result populated but playback fields all None.
+    assert d2["request_id"] == "sr_t2"
+    assert d2["selection_reason"] == "silent_rotation"
+    assert d2["result_status"] == "rejected"
+    assert d2["result_failure_reason"] == "stale_phase"
+    assert d2["playback_outcome"] is None
+    assert d2["playback_finished_at_ms"] is None
+
+
 async def test_export_game_raises_for_unknown_game(
     fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
 ) -> None:
