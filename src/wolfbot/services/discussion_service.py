@@ -36,6 +36,7 @@ from typing import Any, Protocol, runtime_checkable
 import aiosqlite
 
 from wolfbot.domain.discussion import (
+    CoClaim,
     PublicDiscussionState,
     SpeakerKind,
     SpeechEvent,
@@ -446,6 +447,14 @@ class DiscussionService:
     async def load_phase(self, game_id: str, phase_id: str) -> Sequence[SpeechEvent]:
         return await self._store.load_phase(game_id, phase_id)
 
+    async def load_for_game(self, game_id: str) -> Sequence[SpeechEvent]:
+        """All non-baseline speech events for `game_id`, ordered by time.
+
+        Exposed so the arbiter can extract historical CO claims across
+        phase boundaries without going around the store interface.
+        """
+        return await self._store.load_for_game(game_id)
+
 
 # ---------------------------------------------------------------------- Rebuild
 
@@ -698,3 +707,38 @@ def _resolve_co_role(event: SpeechEvent) -> str | None:
         if marker in event.text:
             return role_key
     return None
+
+
+def extract_co_claims_from_events(
+    events: Sequence[SpeechEvent],
+) -> tuple[CoClaim, ...]:
+    """Walk events of a single game and return the de-duplicated CO claims.
+
+    Used by SpeakArbiter to carry CO claims across phase boundaries so the
+    NPC's prompt still shows "席4 seerCO" on day 2 even though the day-2
+    PublicDiscussionState fold only sees day-2 events. De-dup key is
+    ``(speaker_seat, role_claim)`` — the earliest event wins, matching
+    the in-phase fold semantics.
+    """
+    claims: list[CoClaim] = []
+    seen: set[tuple[int, str]] = set()
+    for event in events:
+        if event.source == SpeechSource.PHASE_BASELINE:
+            continue
+        if event.speaker_seat is None:
+            continue
+        role_key = _resolve_co_role(event)
+        if role_key is None:
+            continue
+        key = (event.speaker_seat, role_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        claims.append(
+            CoClaim(
+                seat=event.speaker_seat,
+                role_claim=role_key,
+                declared_at_event_id=event.event_id,
+            )
+        )
+    return tuple(claims)

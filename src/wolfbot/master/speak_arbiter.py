@@ -838,15 +838,30 @@ class SpeakArbiter:
         """Re-fold `speech_events` for the active phase.
 
         Used after Master restart to seed the in-memory `PublicDiscussionState`
-        before re-entering the arbitration loop.
+        before re-entering the arbitration loop. CO claims are layered on
+        top from a *game-wide* event scan so day-2+ NPC prompts still show
+        the day-1 seer CO etc.; without that carry, the per-phase fold
+        starts each new day with empty `co_claims` and wolves miss the
+        chance to counter-CO.
         """
         from wolfbot.services.discussion_service import (
+            extract_co_claims_from_events,
             rebuild_public_state_from_events,
         )
 
         phase_id = make_phase_id(game_id, day, phase)
         events: Sequence[SpeechEvent] = await self.discussion.load_phase(game_id, phase_id)
-        return rebuild_public_state_from_events(events)
+        state = rebuild_public_state_from_events(events)
+        if state is None:
+            return None
+        try:
+            all_events = await self.discussion.load_for_game(game_id)
+        except Exception:
+            log.exception("co_claim_history_load_failed game=%s", game_id)
+            all_events = ()
+        if all_events:
+            state.co_claims = extract_co_claims_from_events(all_events)
+        return state
 
 
 __all__ = ["SpeakArbiter", "SpeakArbiterConfig"]

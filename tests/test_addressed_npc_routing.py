@@ -786,6 +786,90 @@ def test_unrelated_npc_speech_does_not_clear_pending_address() -> None:
     )
 
 
+async def test_co_claims_carry_across_phase_boundaries(repo: SqliteRepo) -> None:
+    """Day-1 seer CO must still be visible in day-2's PublicDiscussionState
+    so a wolf NPC can decide to counter-CO on day 2. Previously the fold
+    rebuilt per-phase and the day-2 prompt showed `co_claims=[(none)]`
+    even though day 1 had a clear seer CO.
+    """
+    g = Game(
+        id="rv-co-carry",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=2,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="Alice", discord_user_id="u1",
+             is_llm=False, persona_key=None),
+        Seat(seat_no=4, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 4, Role.SEER)
+
+    day1_phase = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    day2_phase = make_phase_id(g.id, 2, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+
+    # Day-1: Raqio CO's as seer.
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=day1_phase, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 4], created_at_ms=1,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=day1_phase, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=4, text="実は僕、占い師だ。",
+            co_declaration="seer",
+            created_at_ms=10,
+        )
+    )
+    # Day-2: only baseline + a non-CO speech (no fresh CO this phase).
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=day2_phase, day=2,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 4], created_at_ms=100,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=day2_phase, day=2,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="昨日のことだけど",
+            created_at_ms=110,
+        )
+    )
+
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=InMemoryNpcRegistry(),
+        discussion=discussion,
+        now_ms=lambda: 200,
+    )
+    state = await arb.rebuild_public_state(
+        game_id=g.id, day=2, phase=Phase.DAY_DISCUSSION,
+    )
+    assert state is not None
+    assert any(
+        c.seat == 4 and c.role_claim == "seer" for c in state.co_claims
+    ), f"day-2 state must carry day-1 seer CO, got co_claims={state.co_claims}"
+
+
 def test_addressed_npc_reply_consumes_the_address() -> None:
     """When the addressed NPC actually replies (speaker_seat == prior
     last_addressed_seat) without naming a new target, the address is
