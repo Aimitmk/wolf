@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -565,6 +566,22 @@ class NpcClient:
             )
             return None, "llm_error"
         result = parse_decision(raw, legal_seats=legal)
+        # Forbid abstention in voting. The schema disallows null and the
+        # prompt explicitly says "棄権禁止", but if the model still drops
+        # back (parse error, out-of-set target, persona inertia) we pick
+        # a deterministic-but-uniform fallback so the seat doesn't end
+        # up in the silent-abstain bucket.
+        if result.target_seat is None and legal:
+            rng = random.Random(
+                f"{req.game_id}:{req.seat_no}:{req.round_}".__hash__()
+            )
+            fallback = rng.choice(sorted(legal))
+            log.info(
+                "npc_vote_abstain_fallback game=%s seat=%d -> %d reason=%s",
+                req.game_id, req.seat_no, fallback,
+                result.reason_summary or "(none)",
+            )
+            return fallback, f"abstain_fallback:{result.reason_summary or ''}"
         return result.target_seat, result.reason_summary
 
     async def _on_decide_night_action_request(

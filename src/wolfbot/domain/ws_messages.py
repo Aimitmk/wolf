@@ -190,6 +190,17 @@ class SpeakRequest(BaseEnvelope):
             "story as `alive_seats`."
         ),
     )
+    dead_seat_causes: tuple[tuple[int, str], ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Per-seat death cause tag for the dead_seats list, e.g. "
+            "((2, 'EXECUTION'), (8, 'ATTACK')). Lets the NPC distinguish "
+            "yesterday's vote victim from last night's attack victim "
+            "without parsing the morning text. Optional — empty for "
+            "back-compat with older Master builds; the NPC's prompt "
+            "builder falls back to an unlabelled list when missing."
+        ),
+    )
 
 
 class SpeakResult(BaseEnvelope):
@@ -297,6 +308,7 @@ class PrivateStateSnapshot(BaseEnvelope):
     day_number: int = 0
     alive_seats: tuple[tuple[int, str], ...] = ()
     dead_seats: tuple[tuple[int, str], ...] = ()
+    dead_seat_causes: tuple[tuple[int, str], ...] = ()
     # Wolf-only — empty for non-wolves.
     partner_wolves: tuple[tuple[int, str], ...] = ()
     # Role-specific result history. Empty for roles without these powers.

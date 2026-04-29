@@ -306,6 +306,63 @@ async def test_client_drops_update_when_no_snapshot_seen() -> None:
 
 
 @pytest.mark.asyncio
+async def test_vote_target_falls_back_to_random_when_llm_returns_null() -> None:
+    """Even though the schema forbids null, defensive coverage: if the
+    decision LLM returns ``target_seat=None`` (parse error, persona
+    inertia, etc.) the NPC must still vote — pick a deterministic-but-
+    pseudo-random candidate from the legal set, never abstain.
+    """
+    client, sent = _make_client_with_capture()
+    await client.process_message(_snapshot().model_dump_json())
+
+    class _StubDecisionLLM:
+        async def decide_json(
+            self, *, system_prompt: str, user_prompt: str,
+            schema: dict[str, object],
+        ) -> str:
+            # Simulate an abstain response slipping through.
+            return '{"target_seat": null, "reason": "情報不足"}'
+
+    client.decision_llm = _StubDecisionLLM()  # type: ignore[assignment]
+
+    vote_req = DecideVoteRequest(
+        ts=3000, trace_id="t-vote",
+        request_id="rv-fallback", npc_id="npc_setsu", seat_no=3,
+        game_id="g1", phase_id="g1::day1::DAY_VOTE::1",
+        candidate_seats=((1, "Alice"), (5, "Bob")),
+        expires_at_ms=10_000,
+    )
+    await client.process_message(vote_req.model_dump_json())
+    decisions = [VoteDecision.model_validate_json(m) for m in sent if '"vote_decision"' in m]
+    assert len(decisions) == 1
+    assert decisions[0].target_seat in {1, 5}, (
+        "abstain must be replaced by a legal candidate via the fallback"
+    )
+    assert decisions[0].reason_summary is not None
+    assert "abstain_fallback" in decisions[0].reason_summary
+
+
+@pytest.mark.asyncio
+async def test_alive_changed_update_carries_dead_seat_causes() -> None:
+    """`alive_changed` payload now propagates per-seat death cause so
+    the NPC prompt can label dead seats as 処刑/襲撃."""
+    client, _sent = _make_client_with_capture()
+    await client.process_message(_snapshot().model_dump_json())
+    upd = PrivateStateUpdate(
+        ts=2000, trace_id="t", npc_id="npc_setsu", game_id="g1", seat_no=3,
+        update_kind="alive_changed",
+        payload={
+            "alive_seats": [[1, "Alice"], [3, "セツ"]],
+            "dead_seats": [[5, "Bob"], [8, "Stella"]],
+            "dead_seat_causes": [[5, "EXECUTION"], [8, "ATTACK"]],
+        },
+    )
+    await client.process_message(upd.model_dump_json())
+    state = client.game_states["g1"]
+    assert state.dead_seat_causes == {5: "EXECUTION", 8: "ATTACK"}
+
+
+@pytest.mark.asyncio
 async def test_seat_released_drops_per_game_state_and_logic_cache() -> None:
     """`_on_seat_released` is the long-term cleanup hook for an NPC bot
     that plays many games in one process. Without it `game_states` and

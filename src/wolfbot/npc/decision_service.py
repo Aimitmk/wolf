@@ -73,8 +73,12 @@ _VOTE_SCHEMA: dict[str, object] = {
     "required": ["target_seat", "reason"],
     "properties": {
         "target_seat": {
-            "type": ["integer", "null"],
-            "description": "Seat number of the vote target, or null to abstain.",
+            "type": "integer",
+            "description": (
+                "Seat number of the vote target. Must be one of the "
+                "supplied candidate seats. Abstaining (null) is forbidden — "
+                "every alive voter has to pick someone."
+            ),
         },
         "reason": {
             "type": "string",
@@ -108,7 +112,13 @@ def _build_state_block(state: NpcGameState) -> str:
         alive = "、".join(f"席{s} {n}" for s, n in state.alive_seats)
         lines.append(f"生存者: {alive}")
     if state.dead_seats:
-        dead = "、".join(f"席{s} {n}" for s, n in state.dead_seats)
+        causes = state.dead_seat_causes
+        def _cause(seat_no: int) -> str:
+            c = causes.get(seat_no)
+            return " (処刑)" if c == "EXECUTION" else " (襲撃)" if c == "ATTACK" else ""
+        dead = "、".join(
+            f"席{s} {n}{_cause(s)}" for s, n in state.dead_seats
+        )
         lines.append(f"死亡者: {dead}")
     if state.partner_wolves:
         partners = "、".join(f"席{s} {n}" for s, n in state.partner_wolves)
@@ -217,8 +227,10 @@ def build_vote_prompt(
         f"## 投票候補席\n{candidates_str}",
         "",
         "上記すべてを踏まえ、この投票で誰に票を入れるかを決めてください。"
-        "投票しない場合 (棄権) は target_seat を null。"
-        "JSON は {\"target_seat\": <席番号 | null>, \"reason\": \"<短い理由>\"} の形。",
+        "**棄権は禁止**: 必ず候補席の中から1人を選んで `target_seat` に入れる。"
+        "情報が薄くても、最も怪しい/役割上吊りたい/相方ライン以外の中から相対的に最も票を入れたい1人を選ぶこと。"
+        "JSON は {\"target_seat\": <候補席番号>, \"reason\": \"<短い理由>\"} の形 "
+        "(`target_seat` は必ず整数、null 不可)。",
     ]
     return system, "\n".join(p for p in user_parts if p is not None)
 

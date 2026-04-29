@@ -424,6 +424,42 @@ def test_build_user_prompt_falls_back_to_request_when_state_none() -> None:
     assert "## 自分の占い結果" not in out
 
 
+def test_build_user_prompt_tags_dead_seats_with_death_cause() -> None:
+    """Dead seat list must distinguish executions from attacks so the
+    NPC stops calling yesterday's executed player "昨夜の犠牲者"."""
+    from wolfbot.npc.game_state import NpcGameState
+
+    logic = LogicPacket(
+        ts=1, trace_id="t", packet_id="lp", phase_id="ph",
+        recipient_npc_id="npc_1",
+        public_state_summary="(d)", expires_at_ms=9999,
+    )
+    request = SpeakRequest(
+        ts=1, trace_id="t", request_id="sr", npc_id="npc_1",
+        phase_id="ph", seat_no=2, logic_packet_id="lp",
+        suggested_intent="speak", max_chars=80, expires_at_ms=5000,
+    )
+    state = NpcGameState(
+        game_id="g1", seat_no=2, persona_key="setsu", role="VILLAGER",
+        day_number=2,
+        alive_seats=[(1, "Alice"), (2, "セツ")],
+        dead_seats=[(3, "コメット"), (8, "ステラ")],
+        dead_seat_causes={3: "EXECUTION", 8: "ATTACK"},
+    )
+    out = _build_user(logic, request, state)
+    assert "席3 コメット (処刑)" in out
+    assert "席8 ステラ (襲撃)" in out
+
+
+def test_system_prompt_forbids_seat_numbers_in_text() -> None:
+    """The NPC speech rule must explicitly forbid 席N references in the
+    free-text payload — otherwise the model leaks "席3はどう?" patterns."""
+    persona = PERSONAS_BY_KEY["setsu"]
+    sys = _build_system(persona, max_chars=80)
+    assert "席番号" in sys
+    assert "display_name" in sys.lower() or "display_name" in sys
+
+
 def test_build_user_prompt_no_candidates_no_pressure() -> None:
     logic = LogicPacket(
         ts=1,

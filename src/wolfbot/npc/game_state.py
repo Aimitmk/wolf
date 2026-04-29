@@ -75,6 +75,11 @@ class NpcGameState:
     day_number: int = 0
     alive_seats: list[tuple[int, str]] = field(default_factory=list)
     dead_seats: list[tuple[int, str]] = field(default_factory=list)
+    # Per-dead-seat death cause label ("EXECUTION" | "ATTACK"), keyed by
+    # seat_no. Lets the prompt builder distinguish yesterday's vote
+    # victims from last night's attack victims so the NPC stops saying
+    # 「昨夜の犠牲者は◯◯」 about a player who was actually executed.
+    dead_seat_causes: dict[int, str] = field(default_factory=dict)
     partner_wolves: list[tuple[int, str]] = field(default_factory=list)
     seer_results: list[SeerResult] = field(default_factory=list)
     medium_results: list[MediumResult] = field(default_factory=list)
@@ -92,6 +97,9 @@ def state_from_snapshot(snapshot: PrivateStateSnapshot) -> NpcGameState:
         day_number=snapshot.day_number,
         alive_seats=list(snapshot.alive_seats),
         dead_seats=list(snapshot.dead_seats),
+        dead_seat_causes={
+            seat_no: cause for seat_no, cause in snapshot.dead_seat_causes
+        },
         partner_wolves=list(snapshot.partner_wolves),
         seer_results=list(snapshot.seer_results),
         medium_results=list(snapshot.medium_results),
@@ -160,6 +168,7 @@ def apply_update(state: NpcGameState, update: PrivateStateUpdate) -> None:
         elif kind == "alive_changed":
             alive = payload.get("alive_seats", [])
             dead = payload.get("dead_seats", [])
+            causes = payload.get("dead_seat_causes", [])
             if isinstance(alive, list):
                 state.alive_seats = [
                     (_as_int(s[0]), _as_str(s[1]))
@@ -172,6 +181,12 @@ def apply_update(state: NpcGameState, update: PrivateStateUpdate) -> None:
                     for s in dead
                     if isinstance(s, (list, tuple)) and len(s) >= 2
                 ]
+            if isinstance(causes, list):
+                state.dead_seat_causes = {
+                    _as_int(s[0]): _as_str(s[1])
+                    for s in causes
+                    if isinstance(s, (list, tuple)) and len(s) >= 2
+                }
         elif kind == "day_advanced":
             state.day_number = _as_int(payload["day_number"])
         # Unknown kinds: silently skip for forward-compat.

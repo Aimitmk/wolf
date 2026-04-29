@@ -139,16 +139,25 @@ def _build_system(
         "  代わりに状況描写や感情で言う: "
         "「あの白判定、無理に庇ってる気がする」「昨夜守ったのは◯◯」"
         "「もう 1 人組んでそうな人」「あと処刑できる回数を考えると…」 のように。\n"
+        "- **`text` 内で席番号 (席1, 席2, ..., 席9 や Seat3 等) を絶対に書かない。**"
+        "他のプレイヤーを呼ぶときは必ず生存者リストの display_name (キャラ名) を使う。"
+        "data 層 (`addressed_seat_no` 等) には正しい席番号を入れて構わないが、"
+        "発話そのものは「ジナさん」「ラキオ」のような自然な呼び方にする。\n"
+        "  禁止例: 「席3はどう思う?」「席4のラキオが…」「Seat 9、答えて」\n"
+        "  推奨例: 「ジョナスさんはどう思う?」「ラキオが…」「ユリコ、答えて」\n"
         "- 役職 CO (占い師・霊媒師・騎士として名乗る) をするときは、"
         "`co_declaration` を `\"seer\" / \"medium\" / \"knight\"` のいずれかに設定し、"
         "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
         "CO しないなら `co_declaration=null`。"
         "「占いCO」のような語そのものは `text` に書かない。\n"
-        "- 特定の席に向けて話す場合は `addressed_seat_no` にその席番号を入れる "
-        "(例: 席3 に問いかけるなら `3`)。"
+        "- 特定の席に向けて話す場合は `addressed_seat_no` にその席番号 (整数) を入れる。"
         "誰宛でもない一般的な発言や全体への呼びかけは `null`。"
         "自分の席を指定しても無効化されるので、相手の席を必ず入れること。"
-        "`text` 中で席番号や名前を呼んだ場合はそれと一致させる。\n"
+        "`text` 中で名前を呼んだ場合はその人の席番号を `addressed_seat_no` に設定する。\n"
+        "- 死亡者リストには (処刑) または (襲撃) の死因タグが付く。"
+        "前日の処刑死を「昨夜の犠牲者」と混同しない。逆も同様。"
+        "発言で死を語るときはタグに合わせた表現を使う"
+        "(例: 処刑死は「昨日処刑された」、襲撃死は「昨夜襲われた」)。\n"
     )
 
 
@@ -183,8 +192,21 @@ def _build_user(
         lines.append("")
         lines.append(f"## 生存者\n{alive_str}")
     if dead_seats:
+        # Tag each dead seat with the death cause so the model never
+        # confuses "executed yesterday" with "killed last night".
+        cause_map = (getattr(state, "dead_seat_causes", None) or {}) if state else {}
+
+        def _cause_tag(seat_no: int) -> str:
+            cause = cause_map.get(seat_no)
+            if cause == "EXECUTION":
+                return " (処刑)"
+            if cause == "ATTACK":
+                return " (襲撃)"
+            return ""
+
         dead_str = "、".join(
-            f"席{seat_no} {name}" for seat_no, name in dead_seats
+            f"席{seat_no} {name}{_cause_tag(seat_no)}"
+            for seat_no, name in dead_seats
         )
         lines.append(f"## 死亡者\n{dead_str}")
     # Private state — only present when Phase-D snapshot was received.
@@ -291,7 +313,7 @@ _DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
 
 例:
 {"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null, "addressed_seat_no": null}
-{"text": "席3、それは矛盾してるよ。", "intent": "accuse", "used_logic_ids": [], "co_declaration": null, "addressed_seat_no": 3}
+{"text": "ジョナスさん、それは矛盾してるよ。", "intent": "accuse", "used_logic_ids": [], "co_declaration": null, "addressed_seat_no": 3}
 """
 
 

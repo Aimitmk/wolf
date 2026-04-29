@@ -106,6 +106,16 @@ def build_snapshot_for_seat(
 ) -> PrivateStateSnapshot:
     """Compose the full snapshot the NPC bot rebuilds its state from."""
     seats_by_no = {s.seat_no: s for s in seats}
+    # Death-cause tag per dead seat so the NPC prompt can distinguish
+    # yesterday's executions from last night's attacks. Players with no
+    # cause (= still alive, or some imported state) are skipped.
+    dead_causes = tuple(
+        sorted(
+            (p.seat_no, p.death_cause.value)
+            for p in players
+            if not p.alive and p.death_cause is not None
+        )
+    )
     return PrivateStateSnapshot(
         ts=ts,
         trace_id=trace_id,
@@ -117,6 +127,7 @@ def build_snapshot_for_seat(
         day_number=day_number,
         alive_seats=_seat_pairs(players, seats_by_no, alive=True),
         dead_seats=_seat_pairs(players, seats_by_no, alive=False),
+        dead_seat_causes=dead_causes,
         partner_wolves=(
             _partner_wolves(players, seats_by_no, self_seat=seat_no)
             if role is Role.WEREWOLF
@@ -521,6 +532,15 @@ def make_alive_changed_update(
             "dead_seats": [
                 [pair[0], pair[1]]
                 for pair in _seat_pairs(players, seats_by_no, alive=False)
+            ],
+            # Death-cause tag per dead seat. NPC prompt uses this to
+            # distinguish 「昨日処刑された」 from 「昨夜襲われた」 — without
+            # it the model regularly conflates yesterday's vote victim
+            # with last night's attack victim.
+            "dead_seat_causes": [
+                [p.seat_no, p.death_cause.value]
+                for p in players
+                if not p.alive and p.death_cause is not None
             ],
         },
     )
