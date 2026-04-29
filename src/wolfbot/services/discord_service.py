@@ -682,13 +682,31 @@ class WolfCog(commands.Cog):
             return
         channel_id = str(message.channel.id)
         is_main = channel_id == game.main_text_channel_id
+        # In reactive_voice mode Master posts narration into the VC's
+        # attached text chat (`main_vc_channel_id`), which is where
+        # players naturally end up typing replies — see `_post_to_vc_chat`
+        # in `main.py`. Accept that channel as a speech surface too,
+        # otherwise the human's typed message never enters the
+        # SpeechEvent pipeline and NPCs never react to it.
+        is_vc_chat = (
+            game.discussion_mode == "reactive_voice"
+            and channel_id == game.main_vc_channel_id
+        )
         is_wolves = game.wolves_channel_id is not None and channel_id == game.wolves_channel_id
-        if not (is_main or is_wolves):
+        if not (is_main or is_vc_chat or is_wolves):
             return
         author_seat = await self.repo.seat_of_user(game.id, str(message.author.id))
         players = await self.repo.load_players(game.id)
+        log.info(
+            "on_message_accepted game=%s seat=%s channel=%s "
+            "phase=%s is_main=%s is_vc_chat=%s is_wolves=%s",
+            game.id, author_seat, channel_id,
+            game.phase.value, is_main, is_vc_chat, is_wolves,
+        )
 
-        if is_main and game.phase in (Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH):
+        if (is_main or is_vc_chat) and game.phase in (
+            Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH
+        ):
             if not _main_channel_should_llm_react(author_seat, players):
                 return
             if self._discussion_service is not None and author_seat is not None:

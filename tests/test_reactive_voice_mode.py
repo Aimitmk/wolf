@@ -362,6 +362,94 @@ async def test_on_message_seeds_phase_baseline_before_text_event(repo: SqliteRep
     assert len(non_baseline) == 2
 
 
+async def test_on_message_accepts_vc_chat_in_reactive_voice(repo: SqliteRepo) -> None:
+    """In reactive_voice mode, Master narration goes to the VC's
+    attached text chat (`main_vc_channel_id`), so players naturally
+    type replies in that channel rather than the main text channel.
+    `on_message` must accept those messages and feed them through the
+    SpeechEvent pipeline — otherwise the human's typed input is dropped
+    silently and NPCs never react. Regression: in the live test the
+    user's typed message produced zero PLAYER_SPEECH log entries.
+    """
+    from wolfbot.domain.discussion import SpeechSource, make_phase_id
+
+    game, store, ds = await _make_discussion_game(
+        repo, human_seats=[1], discussion_mode="reactive_voice"
+    )
+
+    cog = WolfCog(
+        bot=MagicMock(),
+        repo=repo,
+        game_service=MagicMock(),
+        discord_adapter=MagicMock(),
+        llm_adapter=MagicMock(),
+        registry=MagicMock(),
+        settings=MagicMock(MAIN_TEXT_CHANNEL_ID=100, MAIN_VOICE_CHANNEL_ID=200),
+        discussion_service=ds,
+    )
+
+    msg = MagicMock()
+    msg.author.bot = False
+    msg.author.id = "user1"
+    msg.guild.id = game.guild_id
+    # The user typed in the VC's attached text chat — same channel id
+    # as `main_vc_channel_id`, NOT `main_text_channel_id`.
+    msg.channel.id = 200
+    msg.content = "私は占い師です"
+
+    await WolfCog.on_message(cog, msg)
+
+    phase_id = make_phase_id(game.id, 1, Phase.DAY_DISCUSSION)
+    events = await store.load_phase(game.id, phase_id)
+    non_baseline = [e for e in events if e.source != SpeechSource.PHASE_BASELINE]
+    assert len(non_baseline) == 1, (
+        "VC-chat input in reactive_voice mode must produce a SpeechEvent"
+    )
+    assert non_baseline[0].source == SpeechSource.TEXT
+    assert non_baseline[0].speaker_seat == 1
+    assert non_baseline[0].text == "私は占い師です"
+
+
+async def test_on_message_rejects_vc_chat_in_rounds_mode(repo: SqliteRepo) -> None:
+    """Rounds mode keeps the legacy gating: VC-chat is NOT a speech
+    surface, only the main text channel is. The new VC-chat acceptance
+    is reactive_voice-only so existing rounds-mode games don't change
+    behavior.
+    """
+    from wolfbot.domain.discussion import SpeechSource, make_phase_id
+
+    game, store, ds = await _make_discussion_game(
+        repo, human_seats=[1], discussion_mode="rounds"
+    )
+
+    cog = WolfCog(
+        bot=MagicMock(),
+        repo=repo,
+        game_service=MagicMock(),
+        discord_adapter=MagicMock(),
+        llm_adapter=MagicMock(),
+        registry=MagicMock(),
+        settings=MagicMock(MAIN_TEXT_CHANNEL_ID=100, MAIN_VOICE_CHANNEL_ID=200),
+        discussion_service=ds,
+    )
+
+    msg = MagicMock()
+    msg.author.bot = False
+    msg.author.id = "user1"
+    msg.guild.id = game.guild_id
+    msg.channel.id = 200  # VC text chat
+    msg.content = "ignored in rounds mode"
+
+    await WolfCog.on_message(cog, msg)
+
+    phase_id = make_phase_id(game.id, 1, Phase.DAY_DISCUSSION)
+    events = await store.load_phase(game.id, phase_id)
+    non_baseline = [e for e in events if e.source != SpeechSource.PHASE_BASELINE]
+    assert non_baseline == [], (
+        "rounds-mode VC-chat must remain non-speech (main-text only)"
+    )
+
+
 async def test_llm_adapter_seeds_baseline_for_all_human_game(repo: SqliteRepo) -> None:
     """submit_llm_discussion_rounds must seed the phase baseline even when there
     are zero LLM seats so an all-human game gets a sentinel row."""
