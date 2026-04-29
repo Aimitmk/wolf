@@ -43,6 +43,9 @@ class TextAnalysis:
 
     addressed_name: str | None = None
     co_declaration: str | None = None
+    # Role the utterance is calling for (e.g. "占い師の方どうぞ" → "seer").
+    # None for non-callouts. Mirrors `SttResult.role_callout`.
+    role_callout: str | None = None
 
 
 class TextAnalyzerError(RuntimeError):
@@ -107,7 +110,8 @@ class GeminiTextAnalyzer:
         "```json\n"
         "{\n"
         '  "co_claim": null,\n'
-        '  "addressed_name": null\n'
+        '  "addressed_name": null,\n'
+        '  "role_callout": null\n'
         "}\n"
         "```\n\n"
         "フィールド説明:\n"
@@ -115,7 +119,12 @@ class GeminiTextAnalyzer:
         "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
         "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。"
         "発言内で他プレイヤーに言及するだけ(例: 『セツの判定が気になる』)は呼びかけではないので null。"
-        "明確な宛先のある呼びかけ(例: 『セツさん、どう思う』)のみ設定。"
+        "明確な宛先のある呼びかけ(例: 『セツさん、どう思う』)のみ設定。\n"
+        "- role_callout: 特定の役職に名乗り出を求める呼びかけがあれば "
+        "\"seer\"/\"medium\"/\"knight\" のいずれか、なければ null。"
+        "例: 「占い師の方は名乗り出てください」「霊媒師いますか?」「騎士は誰?」 → 該当役職。"
+        "ただし役職名を単に話題にしただけ (例: 「占い師の判定が気になる」) は null。"
+        "明確な「出てきて/名乗って/CO して/いますか」のような請求が含まれる場合のみ設定する。"
     )
 
     def __init__(
@@ -249,9 +258,12 @@ class GeminiTextAnalyzer:
         if isinstance(addressed_raw, str):
             stripped = addressed_raw.strip()
             addressed_name = stripped or None
+        callout_raw = parsed.get("role_callout")
+        role_callout = callout_raw if callout_raw in CO_CLAIM_VALUES else None
         return TextAnalysis(
             addressed_name=addressed_name,
             co_declaration=co_declaration,
+            role_callout=role_callout,
         )
 
     @staticmethod

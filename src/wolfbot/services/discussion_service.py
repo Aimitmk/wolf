@@ -95,8 +95,8 @@ class SqliteSpeechEventStore:
                 event_id, game_id, phase_id, day, phase, source, speaker_kind,
                 speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                 alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                role_callout, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.event_id,
@@ -115,6 +115,7 @@ class SqliteSpeechEventStore:
                 event.summary,
                 event.co_declaration,
                 event.addressed_seat_no,
+                event.role_callout,
                 event.created_at_ms,
             ),
         )
@@ -126,7 +127,7 @@ class SqliteSpeechEventStore:
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                    alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                   created_at_ms
+                   role_callout, created_at_ms
               FROM speech_events
              WHERE game_id=? AND phase_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -142,7 +143,7 @@ class SqliteSpeechEventStore:
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                    alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                   created_at_ms
+                   role_callout, created_at_ms
               FROM speech_events
              WHERE game_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -171,7 +172,8 @@ def _row_to_event(row: Any) -> SpeechEvent:
         summary=row[13],
         co_declaration=row[14],
         addressed_seat_no=row[15],
-        created_at_ms=row[16],
+        role_callout=row[16],
+        created_at_ms=row[17],
     )
 
 
@@ -231,6 +233,7 @@ def make_human_text_event(
     text: str,
     co_declaration: str | None = None,
     addressed_seat_no: int | None = None,
+    role_callout: str | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -245,6 +248,7 @@ def make_human_text_event(
         text=text,
         co_declaration=co_declaration,
         addressed_seat_no=addressed_seat_no,
+        role_callout=role_callout,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -259,6 +263,7 @@ def make_npc_generated_event(
     text: str,
     co_declaration: str | None = None,
     addressed_seat_no: int | None = None,
+    role_callout: str | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -273,6 +278,7 @@ def make_npc_generated_event(
         text=text,
         co_declaration=co_declaration,
         addressed_seat_no=addressed_seat_no,
+        role_callout=role_callout,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -565,6 +571,20 @@ def apply_speech_event(
     if speaker is not None:
         summary.append((speaker, is_new_co))
         summary = summary[-6:]
+    # Track outstanding role-callouts (e.g. "占い師の方どうぞ"). A request
+    # adds the role to the pending set; a matching CO consumes it
+    # (= the call was answered). Wolf-side NPCs and real role holders
+    # both react to this in their speech prompt.
+    pending_role_callouts = set(state.pending_role_callouts)
+    if event.role_callout is not None:
+        pending_role_callouts.add(event.role_callout)
+    if is_new_co:
+        # `_resolve_co_role` returned a role; remove it from the pending
+        # set even if it wasn't explicitly requested — anyone CO'ing
+        # implicitly answers any outstanding call.
+        for role_key in tuple(pending_role_callouts):
+            if event.co_declaration == role_key or _resolve_co_role(event) == role_key:
+                pending_role_callouts.discard(role_key)
     return PublicDiscussionState(
         game_id=state.game_id,
         phase_id=state.phase_id,
@@ -581,6 +601,7 @@ def apply_speech_event(
         last_addressed_text=last_addressed_text,
         last_speaker_seat=last_speaker_seat,
         recent_speech_summary=tuple(summary),
+        pending_role_callouts=frozenset(pending_role_callouts),
     )
 
 
@@ -629,6 +650,7 @@ def rebuild_public_state_from_events(
     recent_ids: list[str] = []
     summary: list[tuple[int, bool]] = []
     seen_co: set[tuple[int, str]] = set()
+    pending_role_callouts: set[str] = set()
     last_addressed_seat: int | None = None
     last_addressed_speaker_seat: int | None = None
     last_addressed_text: str = ""
@@ -658,6 +680,10 @@ def rebuild_public_state_from_events(
             last_addressed_text = ""
         if event.speaker_seat is None:
             continue
+        # Track outstanding role-callouts (request → pending; matching
+        # CO consumes from the set). Per-event update mirror.
+        if event.role_callout is not None:
+            pending_role_callouts.add(event.role_callout)
         # `is_new_co` flag goes into `recent_speech_summary` so the arbiter
         # can detect "two seats arguing without new information" — a
         # repeated CO from the same seat does NOT count as info.
@@ -670,6 +696,8 @@ def rebuild_public_state_from_events(
         summary.append((event.speaker_seat, is_new_co))
         if role_key is None:
             continue
+        if is_new_co:
+            pending_role_callouts.discard(role_key)
         if (event.speaker_seat, role_key) in seen_co:
             continue
         seen_co.add((event.speaker_seat, role_key))
@@ -689,6 +717,7 @@ def rebuild_public_state_from_events(
     state.last_addressed_text = last_addressed_text
     state.last_speaker_seat = last_speaker_seat
     state.recent_speech_summary = tuple(summary[-6:])
+    state.pending_role_callouts = frozenset(pending_role_callouts)
     return state
 
 

@@ -160,6 +160,17 @@ class LogicPacket(BaseEnvelope):
             "vote, round 1 = runoff."
         ),
     )
+    pending_role_callouts: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Roles that some speaker has called out for in the current "
+            "phase but no one has CO'd as yet (e.g. ``('seer',)`` after "
+            "「占い師の方は名乗り出てください」). Real role holders should "
+            "treat this as a CO trigger; wolf-side NPCs should consider "
+            "whether to fake CO. Cleared on the Master side when a "
+            "matching CO arrives."
+        ),
+    )
 
 
 class SpeakRequest(BaseEnvelope):
@@ -587,6 +598,17 @@ class SpeechEventPayload(BaseEnvelope):
             "``Seat.display_name`` and fails when the bot's live VC "
             "nickname diverges from the persona handle. None when the "
             "analyzer wasn't grounded or couldn't pick a seat."
+        ),
+    )
+    role_callout: CoDeclaration | None = Field(
+        default=None,
+        description=(
+            "Role the utterance is calling out for (e.g. \"占い師いますか?\" "
+            "→ ``seer``). Mirrors the human-side STT field so wolf-side "
+            "NPCs and real role holders can react. None for the vast "
+            "majority of utterances; only set when the analyzer detects "
+            "an explicit role-callout intent (not mere mentions of a "
+            "role name in unrelated context)."
         ),
     )
 

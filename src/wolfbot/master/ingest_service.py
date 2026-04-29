@@ -280,6 +280,7 @@ class MasterIngestService:
             summary=payload.summary,
             co_declaration=payload.co_declaration,
             addressed_seat_no=addressed_seat_no,
+            role_callout=payload.role_callout,
             created_at_ms=default_now_ms(),
         )
         await self.discussion.record(event)

@@ -169,6 +169,7 @@ DDL: list[str] = [
         summary TEXT,
         co_declaration TEXT,
         addressed_seat_no INTEGER,
+        role_callout TEXT,
         created_at_ms INTEGER NOT NULL
     )
     """,
@@ -301,6 +302,10 @@ async def migrate(db_path: str | Path) -> None:
         if "addressed_seat_no" not in cols:
             await db.execute(
                 "ALTER TABLE speech_events ADD COLUMN addressed_seat_no INTEGER"
+            )
+        if "role_callout" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events ADD COLUMN role_callout TEXT"
             )
         async with db.execute("PRAGMA table_info(npc_speak_requests)") as cur:
             cols = {row[1] async for row in cur}

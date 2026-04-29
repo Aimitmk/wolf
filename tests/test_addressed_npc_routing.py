@@ -786,6 +786,84 @@ def test_unrelated_npc_speech_does_not_clear_pending_address() -> None:
     )
 
 
+def test_pending_role_callout_added_by_voice_event() -> None:
+    """A voice STT event carrying ``role_callout="seer"`` adds 'seer' to the
+    PublicDiscussionState's `pending_role_callouts` set so downstream NPC
+    prompts can show the outstanding request."""
+    phase_id = make_phase_id("g", 1, Phase.DAY_DISCUSSION)
+    events = [
+        make_phase_baseline(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        ),
+        make_human_text_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="占い師の方は名乗り出てください",
+            role_callout="seer", created_at_ms=10,
+        ),
+    ]
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.pending_role_callouts == frozenset({"seer"})
+
+
+def test_pending_role_callout_cleared_when_seer_co_arrives() -> None:
+    """When a CO matching the outstanding callout role arrives, the role
+    is removed from `pending_role_callouts` (= the call was answered)."""
+    phase_id = make_phase_id("g", 1, Phase.DAY_DISCUSSION)
+    events = [
+        make_phase_baseline(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        ),
+        make_human_text_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="占い師の方は名乗り出てください",
+            role_callout="seer", created_at_ms=10,
+        ),
+        make_npc_generated_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=2, text="実は私、占い師なんだ",
+            co_declaration="seer", created_at_ms=20,
+        ),
+    ]
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.pending_role_callouts == frozenset()
+
+
+def test_pending_role_callout_unanswered_stays_pending() -> None:
+    """Speeches without a matching CO must NOT clear the pending callout."""
+    phase_id = make_phase_id("g", 1, Phase.DAY_DISCUSSION)
+    events = [
+        make_phase_baseline(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        ),
+        make_human_text_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="占い師の方は名乗り出てください",
+            role_callout="seer", created_at_ms=10,
+        ),
+        make_npc_generated_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=2, text="まだ様子を見たい",
+            created_at_ms=20,
+        ),
+    ]
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.pending_role_callouts == frozenset({"seer"})
+
+
 async def test_co_claims_carry_across_phase_boundaries(repo: SqliteRepo) -> None:
     """Day-1 seer CO must still be visible in day-2's PublicDiscussionState
     so a wolf NPC can decide to counter-CO on day 2. Previously the fold

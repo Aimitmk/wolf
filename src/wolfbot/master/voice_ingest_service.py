@@ -500,6 +500,11 @@ class VoiceIngestService:
             if result.co_declaration in CO_CLAIM_VALUES
             else None
         )
+        role_callout = (
+            result.role_callout
+            if result.role_callout in CO_CLAIM_VALUES
+            else None
+        )
         if dump_enabled:
             await dump_segment(
                 _build_dump(result=result, failure_reason=None), pcm_snapshot
@@ -522,6 +527,7 @@ class VoiceIngestService:
                 co_declaration=co_decl,  # type: ignore[arg-type]
                 addressed_name=result.addressed_name,
                 addressed_seat_no=result.addressed_seat_no,
+                role_callout=role_callout,  # type: ignore[arg-type]
             )
         )
 

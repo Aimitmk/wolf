@@ -69,6 +69,12 @@ def build_logic_packet(
         else "(none)"
     )
     summary = f"phase_id={state.phase_id} day={state.day} co_claims=[{co_repr}] {silent_repr}"
+    if state.pending_role_callouts:
+        # Outstanding "誰か占い師?" / "霊媒師の方どうぞ" requests that no
+        # one has answered yet. Real role holders should treat this as a
+        # CO trigger; wolf-side NPCs should consider whether to fake CO.
+        callouts_repr = ", ".join(sorted(state.pending_role_callouts))
+        summary += f" pending_role_callouts=[{callouts_repr}]"
     if state.last_addressed_seat is not None:
         speaker_repr = (
             f"席{state.last_addressed_speaker_seat}"
@@ -97,6 +103,7 @@ def build_logic_packet(
         expires_at_ms=expires_at_ms,
         recent_speeches=tuple(recent_speeches),
         past_votes=tuple(past_votes),
+        pending_role_callouts=tuple(sorted(state.pending_role_callouts)),
     )
 
 

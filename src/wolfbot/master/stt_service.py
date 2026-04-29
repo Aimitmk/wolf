@@ -177,6 +177,12 @@ class SttResult:
     # the legacy resolver knows). ``None`` when no roster was given
     # or the analyzer couldn't pick a seat.
     addressed_seat_no: int | None = None
+    # `role_callout` flags speeches that explicitly call for a specific
+    # role to come out (e.g. "占い師の方は名乗り出てください"). The
+    # downstream arbiter / NPC prompt builder uses this so real role
+    # holders and wolf-side fakers can react. ``None`` for the vast
+    # majority of utterances.
+    role_callout: str | None = None
     raw_analysis: dict[str, Any] | None = None
 
 
@@ -329,7 +335,8 @@ class GeminiAudioAnalyzer:
         '  "vote_target_seat": null,\n'
         '  "stance": {},\n'
         '  "addressed_name": null,\n'
-        '  "addressed_seat_no": null\n'
+        '  "addressed_seat_no": null,\n'
+        '  "role_callout": null\n'
         "}\n"
         "```\n\n"
         "フィールド説明:\n"
@@ -342,6 +349,12 @@ class GeminiAudioAnalyzer:
         "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
         "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。\n"
         "- addressed_seat_no: 上の addressed_name と同じ人物の席番号(整数)、または null。roster が与えられているときは必ず埋める。\n"
+        "- role_callout: 特定の役職に名乗り出を求める呼びかけがあれば "
+        "\"seer\"/\"medium\"/\"knight\" のいずれか、なければ null。"
+        "例: 「占い師の方は名乗り出てください」「霊媒師いますか?」「騎士は誰?」"
+        "「占いCO お願いします」 → 該当役職を返す。"
+        "ただし役職名を単に話題にしただけ (例: 「占い師の判定が気になる」「霊媒師の信用は?」) は呼びかけではないので null。"
+        "明確な「出てきて/名乗って/CO して/いますか」のような請求が含まれる場合のみ設定する。\n"
         "\n音声が不明瞭な場合は confidence を低くし、transcript は聞き取れた範囲で。"
     )
 
@@ -460,6 +473,11 @@ class GeminiAudioAnalyzer:
                     addressed_name = stripped or None
                 addressed_seat_no = _coerce_seat_no(parsed.get("addressed_seat_no"))
 
+                callout_raw = parsed.get("role_callout")
+                role_callout = (
+                    callout_raw if callout_raw in CO_CLAIM_VALUES else None
+                )
+
                 # Estimate duration from audio size (assume 16kHz 16-bit mono WAV)
                 data_bytes = max(0, len(audio) - 44)
                 duration_ms = int(data_bytes / (16_000 * 2) * 1000)
@@ -472,6 +490,7 @@ class GeminiAudioAnalyzer:
                     co_declaration=co_declaration,
                     addressed_name=addressed_name,
                     addressed_seat_no=addressed_seat_no,
+                    role_callout=role_callout,
                     raw_analysis=parsed or None,
                 )
 

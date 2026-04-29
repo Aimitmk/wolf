@@ -174,6 +174,27 @@ def _build_user(
         "## 場の状況",
         logic.public_state_summary or "(情報なし)",
     ]
+    if logic.pending_role_callouts:
+        # Surface outstanding role-callouts as their own block so the
+        # model treats them as a 1st-class signal rather than a token
+        # buried in the dense status string. Real role holders should
+        # take this as a CO trigger; wolf-side NPCs should weigh whether
+        # to fake CO. Wording stays neutral so persona / strategy decide.
+        callout_ja = {
+            "seer": "占い師",
+            "medium": "霊媒師",
+            "knight": "騎士",
+        }
+        labels = "、".join(
+            f"{callout_ja.get(c, c)} ({c})" for c in logic.pending_role_callouts
+        )
+        lines.append("")
+        lines.append("## 未回答の役職呼びかけ")
+        lines.append(
+            f"次の役職に名乗り出が求められているがまだ誰も応答していない: {labels}。"
+            "あなたが該当役職なら CO の判断材料に、"
+            "人狼/狂人で騙りを検討中なら呼びかけに応じる選択肢として参照すること。"
+        )
     # Phase-D: prefer the bot's own NpcGameState mirror over the stale
     # SpeakRequest fields. The state carries role + alive/dead + private
     # results + wolf chat that the speech LLM needs to be in character.

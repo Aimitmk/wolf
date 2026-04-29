@@ -716,6 +716,7 @@ class WolfCog(commands.Cog):
                     # broken analyzer must not block the SpeechEvent write.
                     addressed_seat_no: int | None = None
                     co_declaration: str | None = None
+                    role_callout: str | None = None
                     if self._text_analyzer is not None:
                         from wolfbot.services.llm_trace import trace_context
 
@@ -741,6 +742,7 @@ class WolfCog(commands.Cog):
                             )
                         else:
                             co_declaration = analysis.co_declaration
+                            role_callout = analysis.role_callout
                             if analysis.addressed_name:
                                 from wolfbot.master.ingest_service import (
                                     resolve_seat_by_name,
@@ -767,6 +769,7 @@ class WolfCog(commands.Cog):
                         text=message.content,
                         co_declaration=co_declaration,
                         addressed_seat_no=addressed_seat_no,
+                        role_callout=role_callout,
                     )
                     await self._discussion_service.record(event)
                     # Trigger arbiter dispatch so NPCs can respond to new text.

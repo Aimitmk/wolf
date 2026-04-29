@@ -505,6 +505,29 @@ def test_build_user_prompt_handles_past_vote_abstain() -> None:
     assert "席1 Alice → 棄権" in out
 
 
+def test_build_user_prompt_renders_pending_role_callouts() -> None:
+    """Outstanding role-callouts must surface as a dedicated section in
+    the NPC prompt so real role holders take it as a CO trigger and
+    wolf-side NPCs can decide to fake CO."""
+    logic = LogicPacket(
+        ts=1, trace_id="t", packet_id="lp", phase_id="ph",
+        recipient_npc_id="npc_1",
+        public_state_summary="(d)", expires_at_ms=9999,
+        pending_role_callouts=("seer",),
+    )
+    request = SpeakRequest(
+        ts=1, trace_id="t", request_id="sr", npc_id="npc_1",
+        phase_id="ph", seat_no=2, logic_packet_id="lp",
+        suggested_intent="speak", max_chars=80, expires_at_ms=5000,
+        alive_seats=((1, "Alice"), (2, "ジナ"), (3, "ラキオ")),
+        dead_seats=(),
+    )
+    out = _build_user(logic, request)
+    assert "## 未回答の役職呼びかけ" in out
+    assert "占い師" in out
+    assert "(seer)" in out
+
+
 def test_build_user_prompt_no_candidates_no_pressure() -> None:
     logic = LogicPacket(
         ts=1,

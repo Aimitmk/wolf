@@ -99,6 +99,18 @@ class SpeechEvent(BaseModel):
             "the next speaker."
         ),
     )
+    role_callout: str | None = Field(
+        default=None,
+        description=(
+            "Role the utterance is calling out for "
+            "('占い師の方どうぞ' → 'seer'). Stored alongside the speech so "
+            "the arbiter and NPC prompt builders can surface a 'pending "
+            "role callout' to every NPC: real role holders take it as a "
+            "CO trigger, wolf-side NPCs take it as a chance to fake CO. "
+            "Distinct from `co_declaration` (= self-declaration). Values "
+            "are the canonical CoDeclaration enum strings."
+        ),
+    )
     created_at_ms: int
 
     def is_baseline(self) -> bool:
@@ -171,3 +183,10 @@ class PublicDiscussionState(BaseModel):
     # but big enough to cover both the pair-volley check (last 4) and the
     # consecutive-speaker cap (last 3).
     recent_speech_summary: tuple[tuple[int, bool], ...] = ()
+    # Set of role names ("seer" / "medium" / "knight") that some speaker
+    # has explicitly called for in this phase but no one has CO'd as yet.
+    # Cleared when a matching CO arrives (= the call was answered) and
+    # reset per phase. Surfaces in the NPC prompt so real role holders
+    # take it as a CO trigger and wolf-side NPCs can decide whether to
+    # fake CO.
+    pending_role_callouts: frozenset[str] = frozenset()
