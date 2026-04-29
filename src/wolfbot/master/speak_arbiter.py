@@ -111,7 +111,15 @@ def _compute_demoted_seats(
 
 @dataclass
 class SpeakArbiterConfig:
-    max_chars_reactive: int = 80
+    # Per-utterance hard cap. Was 80 originally — too tight: the LLM
+    # routinely hit the limit mid-sentence (e.g. ending with 「それが気」
+    # when about to say 「気になって」), and VOICEVOX then read the
+    # truncated fragment aloud. 140 leaves room for a complete thought
+    # while keeping playback under the 12s deadline (≈8s of audio at
+    # VOICEVOX's default speed). The system prompt also instructs the
+    # model to finish a sentence even if it has to be shorter than this
+    # cap, so 140 is the ceiling, not the target length.
+    max_chars_reactive: int = 140
     request_ttl_ms: int = 8000
     playback_deadline_ms: int = 12_000
     heartbeat_timeout_ms: int = 5000
