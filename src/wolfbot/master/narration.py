@@ -178,6 +178,19 @@ def _narrate_execution(entry: LogEntry, ctx: NarrationContext) -> NarrationOutpu
     headline, tally = _split_headline_and_tally(entry.text)
     target = _seat_label(ctx.seats_by_no, entry.actor_seat)
     voice = f"{target} の処刑が確定致しました。"
+    # The state-machine path emits no PHASE_CHANGE log between the EXECUTION
+    # row and the NIGHT phase entry, so role-holders would otherwise get
+    # silent DMs without any "夜です" cue. Append the same line that
+    # `_narrate_phase_change` would have voiced for Phase.NIGHT — but only
+    # when the next phase is actually NIGHT (when execution triggers a
+    # victory the game flips to GAME_OVER and the VICTORY narration takes
+    # over instead).
+    if ctx.phase is Phase.NIGHT:
+        durations = current_phase_durations()
+        voice += (
+            f"夜のフェイズへ移行致します。制限時間は {durations.night} 秒でございます。"
+            "役職を持つ参加者の方は、DM の選択 UI から行動をお願い致します。"
+        )
     # Strip the headline from the chat post — we voice it. Keep the tally so
     # the audit trail of who voted whom stays in the channel.
     chat = tally if tally else None

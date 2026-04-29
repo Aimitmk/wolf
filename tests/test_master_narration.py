@@ -180,6 +180,32 @@ def test_execution_voices_only_headline_chat_keeps_tally() -> None:
     assert "席1: セツ → 席3 Alice" in out.chat_text
 
 
+def test_execution_voice_appends_night_phase_cue_when_next_phase_is_night() -> None:
+    """state_machine emits no PHASE_CHANGE between EXECUTION and NIGHT entry,
+    so the EXECUTION narration must announce the night transition itself —
+    otherwise role-holders get DMs with no spoken context that night began.
+    """
+    full_text = "席1 セツ が処刑されました。\n\n席1: セツ → 席3 Alice"
+    entry = _entry("EXECUTION", text=full_text, actor_seat=1)
+    out = render_master_narration(entry, _ctx(phase=Phase.NIGHT))
+    assert out.voice_text is not None
+    assert "処刑が確定" in out.voice_text
+    assert "夜のフェイズへ移行" in out.voice_text
+    assert "役職を持つ参加者" in out.voice_text
+
+
+def test_execution_voice_omits_night_cue_on_victory() -> None:
+    """When execution triggers victory the live game.phase has flipped to
+    GAME_OVER; the VICTORY narration takes over and the EXECUTION line must
+    NOT also announce a night transition that will never happen."""
+    full_text = "席1 セツ が処刑されました。\n\n席1: セツ → 席3 Alice"
+    entry = _entry("EXECUTION", text=full_text, actor_seat=1)
+    out = render_master_narration(entry, _ctx(phase=Phase.GAME_OVER))
+    assert out.voice_text is not None
+    assert "処刑が確定" in out.voice_text
+    assert "夜のフェイズへ移行" not in out.voice_text
+
+
 def test_no_execution_with_runoff_tie_branches_voice_text() -> None:
     full_text = "決選投票も同票のため、本日は処刑なしで夜を迎えます。\n\n席1: 棄権"
     entry = _entry("NO_EXECUTION", text=full_text)
