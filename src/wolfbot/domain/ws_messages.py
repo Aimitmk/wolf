@@ -210,6 +210,18 @@ class SpeakResult(BaseEnvelope):
             "generator. Authoritative — Master persists it on SpeechEvent."
         ),
     )
+    addressed_seat_no: int | None = Field(
+        default=None,
+        description=(
+            "Seat number this utterance is directed at, mirroring the "
+            "field humans get via voice STT analysis. Master persists it "
+            "on SpeechEvent so the arbiter can prioritize the addressed "
+            "seat on the next dispatch (same code path as human address "
+            "routing). None for general remarks not aimed at a specific "
+            "seat. Self-address (==speaker_seat) is silently dropped on "
+            "the Master side."
+        ),
+    )
 
 
 # ------------------------- Phase D: per-seat decision delegation

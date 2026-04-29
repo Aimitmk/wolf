@@ -484,6 +484,32 @@ class SpeakArbiter:
             failure_reason=None,
             received_at_ms=now,
         )
+        # Pull `addressed_seat_no` from the NPC's structured output so the
+        # next dispatch can prioritize the named seat the same way human
+        # voice does (via the analyzer's addressed_name → seat resolve).
+        # Validate alive + non-self at the boundary so a hallucinated or
+        # out-of-roster seat number can't poison the address routing.
+        addressed_seat_no = result.addressed_seat_no
+        if addressed_seat_no is not None:
+            if addressed_seat_no == pending.seat_no:
+                addressed_seat_no = None
+            else:
+                try:
+                    alive_seats = await self.repo.load_players(pending.game_id)
+                    alive_set = {p.seat_no for p in alive_seats if p.alive}
+                except Exception:
+                    log.exception(
+                        "addressed_seat_alive_check_failed game=%s",
+                        pending.game_id,
+                    )
+                    alive_set = set()
+                if addressed_seat_no not in alive_set:
+                    log.info(
+                        "npc_addressed_seat_unknown game=%s seat=%d "
+                        "addressed=%s — dropped",
+                        pending.game_id, pending.seat_no, addressed_seat_no,
+                    )
+                    addressed_seat_no = None
         speech_event = SpeechEvent(
             event_id=new_event_id(),
             game_id=pending.game_id,
@@ -495,6 +521,7 @@ class SpeakArbiter:
             speaker_seat=pending.seat_no,
             text=result.text,
             co_declaration=result.co_declaration,
+            addressed_seat_no=addressed_seat_no,
             created_at_ms=now,
         )
         await self.discussion.record(speech_event)

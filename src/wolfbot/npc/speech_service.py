@@ -28,6 +28,7 @@ class NpcGeneratedSpeech:
     used_logic_ids: tuple[str, ...]
     estimated_duration_ms: int
     co_declaration: str | None = None
+    addressed_seat_no: int | None = None
 
 
 @runtime_checkable
@@ -123,6 +124,13 @@ class NpcSpeechService:
         co_declaration: CoDeclaration | None = None
         if speech.co_declaration in CO_CLAIM_VALUES:
             co_declaration = speech.co_declaration  # type: ignore[assignment]
+        # Drop self-address (==speaker_seat) defensively. We can't validate
+        # alive / on-roster here without seat data; Master applies the
+        # alive/self-filter when persisting, so a hallucinated seat number
+        # is filtered out at the boundary, not silently dropped here.
+        addressed_seat_no = speech.addressed_seat_no
+        if addressed_seat_no is not None and addressed_seat_no == request.seat_no:
+            addressed_seat_no = None
         return SpeakResult(
             ts=now_ms,
             trace_id=request.trace_id,
@@ -135,6 +143,7 @@ class NpcSpeechService:
             intent=speech.intent,
             estimated_duration_ms=speech.estimated_duration_ms,
             co_declaration=co_declaration,
+            addressed_seat_no=addressed_seat_no,
         )
 
 

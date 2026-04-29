@@ -257,6 +257,7 @@ def make_npc_generated_event(
     speaker_seat: int,
     text: str,
     co_declaration: str | None = None,
+    addressed_seat_no: int | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     return SpeechEvent(
@@ -270,6 +271,7 @@ def make_npc_generated_event(
         speaker_seat=speaker_seat,
         text=text,
         co_declaration=co_declaration,
+        addressed_seat_no=addressed_seat_no,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -507,21 +509,33 @@ def apply_speech_event(
 
     recent = [*state.recent_speech_event_ids, event.event_id][-10:]
 
-    # An NPC utterance answers any pending address; a fresh human address
-    # supersedes prior ones. Anything else (other human speech without an
-    # `addressed_seat_no`) keeps the standing address — humans often cluster
-    # short sentences and we don't want a generic follow-up to clear the hint.
+    # Address routing rules. The arbiter consumes `last_addressed_seat`
+    # to prioritize whoever was just called out, so we have to be careful
+    # about *when* it's cleared:
+    #
+    # - Human or NPC speech with its own `addressed_seat_no` always
+    #   supersedes the prior address (= a fresh call-out wins).
+    # - An NPC speaks but the prior addressee is themselves (= the
+    #   addressed seat replied) → consume the address.
+    # - Anything else keeps the standing address. Without this, e.g. a
+    #   silent_rotation pick that "jumps the line" before the addressed
+    #   NPC replies would silently clear the hint and the addressee
+    #   never gets prioritized.
     last_addressed_seat = state.last_addressed_seat
     last_addressed_speaker_seat = state.last_addressed_speaker_seat
     last_addressed_text = state.last_addressed_text
-    if event.source == SpeechSource.NPC_GENERATED:
-        last_addressed_seat = None
-        last_addressed_speaker_seat = None
-        last_addressed_text = ""
-    elif event.addressed_seat_no is not None:
+    if event.addressed_seat_no is not None:
         last_addressed_seat = event.addressed_seat_no
         last_addressed_speaker_seat = speaker
         last_addressed_text = event.text
+    elif (
+        event.source == SpeechSource.NPC_GENERATED
+        and speaker is not None
+        and speaker == state.last_addressed_seat
+    ):
+        last_addressed_seat = None
+        last_addressed_speaker_seat = None
+        last_addressed_text = ""
 
     last_speaker_seat = (
         speaker if speaker is not None else state.last_speaker_seat
@@ -599,14 +613,22 @@ def rebuild_public_state_from_events(
             spoken_seats.add(event.speaker_seat)
             last_speaker_seat = event.speaker_seat
         recent_ids.append(event.event_id)
-        if event.source == SpeechSource.NPC_GENERATED:
-            last_addressed_seat = None
-            last_addressed_speaker_seat = None
-            last_addressed_text = ""
-        elif event.addressed_seat_no is not None:
+        # Mirror the per-event update logic in `_apply_event_to_state`:
+        # only consume the standing address when the NPC speaker IS the
+        # previously addressed seat (= the addressee replied). A new
+        # `addressed_seat_no` always overrides the prior pointer.
+        if event.addressed_seat_no is not None:
             last_addressed_seat = event.addressed_seat_no
             last_addressed_speaker_seat = event.speaker_seat
             last_addressed_text = event.text
+        elif (
+            event.source == SpeechSource.NPC_GENERATED
+            and event.speaker_seat is not None
+            and event.speaker_seat == last_addressed_seat
+        ):
+            last_addressed_seat = None
+            last_addressed_speaker_seat = None
+            last_addressed_text = ""
         if event.speaker_seat is None:
             continue
         role_key = _resolve_co_role(event)

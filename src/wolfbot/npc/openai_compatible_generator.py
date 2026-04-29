@@ -56,7 +56,13 @@ _RESPONSE_SCHEMA: dict[str, object] = {
     "schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["text", "intent", "used_logic_ids", "co_declaration"],
+        "required": [
+            "text",
+            "intent",
+            "used_logic_ids",
+            "co_declaration",
+            "addressed_seat_no",
+        ],
         "properties": {
             "text": {"type": "string", "maxLength": 300},
             "intent": {
@@ -70,6 +76,16 @@ _RESPONSE_SCHEMA: dict[str, object] = {
             "co_declaration": {
                 "type": ["string", "null"],
                 "enum": [*CO_CLAIM_VALUES, None],
+            },
+            "addressed_seat_no": {
+                "type": ["integer", "null"],
+                "description": (
+                    "Seat number this utterance is directed at. Mirror the "
+                    "field human voice analysis emits so Master can route "
+                    "the next dispatch via the same arbiter priority "
+                    "(addressed > silent_rotation > lru_rotation > seat). "
+                    "Use null for general remarks aimed at the whole table."
+                ),
             },
         },
     },
@@ -128,6 +144,11 @@ def _build_system(
         "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
         "CO しないなら `co_declaration=null`。"
         "「占いCO」のような語そのものは `text` に書かない。\n"
+        "- 特定の席に向けて話す場合は `addressed_seat_no` にその席番号を入れる "
+        "(例: 席3 に問いかけるなら `3`)。"
+        "誰宛でもない一般的な発言や全体への呼びかけは `null`。"
+        "自分の席を指定しても無効化されるので、相手の席を必ず入れること。"
+        "`text` 中で席番号や名前を呼んだ場合はそれと一致させる。\n"
     )
 
 
@@ -266,9 +287,11 @@ _DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
 - "intent": "speak" | "agree" | "disagree" | "question" | "accuse" | "defend" | "skip"
 - "used_logic_ids": string の配列 (空配列でもよい)
 - "co_declaration": "seer" | "medium" | "knight" | null
+- "addressed_seat_no": integer | null (特定の席に向けて話すときその席番号、一般発言は null)
 
 例:
-{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null}
+{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null, "addressed_seat_no": null}
+{"text": "席3、それは矛盾してるよ。", "intent": "accuse", "used_logic_ids": [], "co_declaration": null, "addressed_seat_no": 3}
 """
 
 
@@ -574,6 +597,13 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
     )
     co_raw = data.get("co_declaration")
     co_declaration = co_raw if co_raw in CO_CLAIM_VALUES else None
+    # `addressed_seat_no` is optional on older provider responses (the
+    # field was added in 2026-04 to mirror human voice analysis); coerce
+    # to int|None and silently drop garbage rather than fail the speech.
+    raw_addr = data.get("addressed_seat_no")
+    addressed_seat_no: int | None = None
+    if isinstance(raw_addr, int) and not isinstance(raw_addr, bool):
+        addressed_seat_no = raw_addr
     # Rough estimate: ~150ms per character for TTS
     estimated_ms = max(500, len(text) * 150)
 
@@ -583,6 +613,7 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         used_logic_ids=used_ids,
         estimated_duration_ms=estimated_ms,
         co_declaration=co_declaration,
+        addressed_seat_no=addressed_seat_no,
     )
 
 

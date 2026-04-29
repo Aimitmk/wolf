@@ -718,3 +718,102 @@ async def test_end_to_end_addressed_dispatch(repo: SqliteRepo) -> None:
     assert any("ジナさん" in m for m in buf3)
 
 
+# -- Layer 5: NPC's own addressed_seat_no propagates through state ----
+
+
+def test_npc_speech_with_addressed_seat_sets_last_addressed() -> None:
+    """When an NPC's structured output sets `addressed_seat_no`, the
+    PublicDiscussionState fold must surface it as `last_addressed_seat`
+    so the next arbiter dispatch prioritizes the addressee. Reproduces
+    the production bug where Raqio (seat 1) said "席9 ユリコ…" 8 times
+    in a row because every NPC speech cleared the address pointer.
+    """
+    phase_id = make_phase_id("g", 1, Phase.DAY_DISCUSSION)
+    events = [
+        make_phase_baseline(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 9], created_at_ms=1,
+        ),
+        # NPC at seat 1 names seat 9 — this used to clear last_addressed.
+        make_npc_generated_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="席9ユリコ、君が処刑候補だ",
+            addressed_seat_no=9, created_at_ms=10,
+        ),
+    ]
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.last_addressed_seat == 9, (
+        "NPC's addressed_seat_no must propagate to last_addressed_seat"
+    )
+    assert state.last_addressed_speaker_seat == 1
+
+
+def test_unrelated_npc_speech_does_not_clear_pending_address() -> None:
+    """If NPC A addresses seat X and a different NPC B jumps in (without
+    naming anyone), the pending address must NOT be cleared — otherwise
+    the arbiter loses the cue to prioritize X next. Pre-fix, every NPC
+    speech wiped last_addressed_seat unconditionally.
+    """
+    phase_id = make_phase_id("g", 1, Phase.DAY_DISCUSSION)
+    events = [
+        make_phase_baseline(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 9], created_at_ms=1,
+        ),
+        make_npc_generated_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="席9ユリコ、説明しろ",
+            addressed_seat_no=9, created_at_ms=10,
+        ),
+        # Seat 2 jumps in without naming anyone — must not consume the
+        # address pending for seat 9.
+        make_npc_generated_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=2, text="一旦落ち着こう",
+            addressed_seat_no=None, created_at_ms=20,
+        ),
+    ]
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.last_addressed_seat == 9, (
+        "Unrelated NPC speech must not clear the pending address"
+    )
+
+
+def test_addressed_npc_reply_consumes_the_address() -> None:
+    """When the addressed NPC actually replies (speaker_seat == prior
+    last_addressed_seat) without naming a new target, the address is
+    consumed so the arbiter doesn't keep prioritizing them forever."""
+    phase_id = make_phase_id("g", 1, Phase.DAY_DISCUSSION)
+    events = [
+        make_phase_baseline(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 9], created_at_ms=1,
+        ),
+        make_npc_generated_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="席9ユリコ、答えろ",
+            addressed_seat_no=9, created_at_ms=10,
+        ),
+        # Yuriko (seat 9) replies — this consumes the address.
+        make_npc_generated_event(
+            game_id="g", phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=9, text="言いがかりだ",
+            addressed_seat_no=None, created_at_ms=20,
+        ),
+    ]
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.last_addressed_seat is None
+    assert state.last_addressed_speaker_seat is None
+
+
