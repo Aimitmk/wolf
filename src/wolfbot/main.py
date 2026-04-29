@@ -384,6 +384,10 @@ async def _run() -> None:
                 # Phase-D: push the seat's full private state right after
                 # SeatAssigned so the NPC bot can rebuild its in-memory
                 # game state before the first decision request lands.
+                # This may skip with `private_state_snapshot_skip_no_role`
+                # when called pre-SETUP (the `/wolf start` path runs before
+                # role assignment); the self-heal below re-pushes once
+                # roles are visible.
                 await _push_private_state_snapshot(
                     npc_entry.send,
                     npc_id=npc_entry.npc_id,
@@ -391,6 +395,32 @@ async def _run() -> None:
                     seat_no=seat.seat_no,
                     persona_key=npc_entry.persona_key or "",
                 )
+        # Self-heal: re-push snapshots for every NPC currently assigned to
+        # this game, not just the ones we touched above. The first push
+        # from `/wolf start`'s `_on_reactive_game_start` runs before
+        # `plan_setup` writes roles, so the snapshot is silently dropped
+        # by `_push_private_state_snapshot`'s "no role" guard. Without a
+        # second push the NPC's `game_states[game_id]` stays empty for
+        # the entire game — every DecideVoteRequest /
+        # DecideNightActionRequest / WolfChatRequest then falls back to
+        # `target=None` because the decision handler short-circuits on
+        # missing state. Re-pushing on every phase entry is idempotent
+        # (the NPC client overwrites `game_states[game_id]` from the new
+        # snapshot) and only adds one small WS frame per assigned NPC
+        # per phase change. Safe-by-default also covers Master restarts:
+        # a re-attached NPC gets fresh state at the next phase enter.
+        for npc_entry in npc_reg.all_online():
+            if npc_entry.assigned_seat is None or npc_entry.game_id != game_id:
+                continue
+            if npc_entry.send is None:
+                continue
+            await _push_private_state_snapshot(
+                npc_entry.send,
+                npc_id=npc_entry.npc_id,
+                game_id=game_id,
+                seat_no=npc_entry.assigned_seat,
+                persona_key=npc_entry.persona_key or "",
+            )
         return dispatched
 
     async def _wait_for_npcs_in_vc(expected_count: int, timeout: float = 5.0) -> None:
