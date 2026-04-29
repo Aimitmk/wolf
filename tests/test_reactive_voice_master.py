@@ -856,6 +856,57 @@ async def test_try_dispatch_next_records_selection_reason_silent_rotation(
     assert reason == "silent_rotation"
 
 
+async def test_arbiter_cleanup_game_drops_only_target_game(repo: SqliteRepo) -> None:
+    """`cleanup_game` is wired into `_on_reactive_game_end` so a long-lived
+    Master process doesn't carry stale `_pending` / `_active_playback` /
+    `_playback_deadlines` across games. Two-game scenario: seed pending
+    state for both, sweep g1, verify g2 untouched.
+    """
+    from wolfbot.master.speak_arbiter import _PendingRequest
+
+    discussion = DiscussionService(
+        store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    )
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=InMemoryNpcRegistry(),
+        discussion=discussion,
+        now_ms=lambda: 1_000,
+    )
+    # Seed: two pending requests in g1, one in g2 — plus mirroring entries
+    # in active_playback / playback_deadlines (the gates the user-facing
+    # serial-speech check inspects).
+    arb._pending["req-g1-a"] = _PendingRequest(
+        request_id="req-g1-a", npc_id="npc1", seat_no=2,
+        phase_id="g1::day1::DAY_DISCUSSION::1", game_id="g1",
+        expires_at_ms=10_000,
+    )
+    arb._pending["req-g1-b"] = _PendingRequest(
+        request_id="req-g1-b", npc_id="npc2", seat_no=3,
+        phase_id="g1::day1::DAY_DISCUSSION::1", game_id="g1",
+        expires_at_ms=10_000,
+    )
+    arb._pending["req-g2-c"] = _PendingRequest(
+        request_id="req-g2-c", npc_id="npc3", seat_no=4,
+        phase_id="g2::day1::DAY_DISCUSSION::1", game_id="g2",
+        expires_at_ms=10_000,
+    )
+    arb._active_playback.update({"req-g1-a", "req-g2-c"})
+    arb._playback_deadlines.update({"req-g1-a": 5_000, "req-g2-c": 5_000})
+
+    swept = arb.cleanup_game("g1")
+    assert swept == 2
+    # g1 entries gone everywhere.
+    assert "req-g1-a" not in arb._pending
+    assert "req-g1-b" not in arb._pending
+    assert "req-g1-a" not in arb._active_playback
+    assert "req-g1-a" not in arb._playback_deadlines
+    # g2 entries preserved.
+    assert "req-g2-c" in arb._pending
+    assert "req-g2-c" in arb._active_playback
+    assert arb._playback_deadlines["req-g2-c"] == 5_000
+
+
 def test_logic_packet_builder_includes_co_claims_in_summary() -> None:
     state = PublicDiscussionState(
         game_id="g",

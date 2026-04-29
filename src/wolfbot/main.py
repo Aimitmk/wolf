@@ -566,6 +566,29 @@ async def _run() -> None:
                     )
             npc_reg.unassign(entry.npc_id)
             log.info("npc_seat_unassigned npc=%s game=%s", entry.npc_id, game_id)
+        # Drop in-memory dispatcher / arbiter state for this game so a
+        # long-lived Master process doesn't accumulate stale pending
+        # futures + playback gates across many games. DB rows are kept
+        # (export / replay depends on them); only the live dicts are
+        # swept here. Best-effort: missing references (rounds-mode build
+        # without dispatcher / arbiter wired) are silent no-ops.
+        dispatcher = getattr(llm_adapter, "_npc_decision_dispatcher", None)
+        if dispatcher is not None and hasattr(dispatcher, "cleanup_game"):
+            try:
+                dispatcher.cleanup_game(game_id)
+            except Exception:
+                log.exception(
+                    "decision_dispatcher_cleanup_failed game=%s", game_id
+                )
+        if _reactive_phase_cb:
+            arbiter_ref = _reactive_phase_cb[0]
+            if hasattr(arbiter_ref, "cleanup_game"):
+                try:
+                    arbiter_ref.cleanup_game(game_id)
+                except Exception:
+                    log.exception(
+                        "speak_arbiter_cleanup_failed game=%s", game_id
+                    )
         # Drop Master's own VC connection too — keeps the bot out of the
         # voice channel between games. Reattaches at the next /wolf start.
         await _master_leave_vc()

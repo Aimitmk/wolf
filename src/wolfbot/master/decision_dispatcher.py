@@ -65,6 +65,7 @@ class _PendingDecision:
     seat_no: int
     npc_id: str
     request_id: str
+    game_id: str
 
 
 @dataclass
@@ -75,6 +76,7 @@ class _PendingWolfChat:
     seat_no: int
     npc_id: str
     request_id: str
+    game_id: str
 
 
 class NpcDecisionDispatcher:
@@ -335,6 +337,7 @@ class NpcDecisionDispatcher:
             request_id=request_id,
             seat_no=voter.seat_no,
             npc_id=entry.npc_id,
+            game_id=game_id,
             send=entry.send,
             payload_json=req.model_dump_json(),
             label="vote",
@@ -379,6 +382,7 @@ class NpcDecisionDispatcher:
         self._pending_wolf_chat[request_id] = _PendingWolfChat(
             future=future, seat_no=wolf.seat_no,
             npc_id=entry.npc_id, request_id=request_id,
+            game_id=game_id,
         )
         try:
             await entry.send(req.model_dump_json())
@@ -449,6 +453,7 @@ class NpcDecisionDispatcher:
             request_id=request_id,
             seat_no=actor.seat_no,
             npc_id=entry.npc_id,
+            game_id=game_id,
             send=entry.send,
             payload_json=req.model_dump_json(),
             label=f"night-{action_kind}",
@@ -460,6 +465,7 @@ class NpcDecisionDispatcher:
         request_id: str,
         seat_no: int,
         npc_id: str,
+        game_id: str,
         send: Callable[[str], Awaitable[None]],
         payload_json: str,
         label: str,
@@ -467,7 +473,11 @@ class NpcDecisionDispatcher:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[int | None] = loop.create_future()
         self._pending[request_id] = _PendingDecision(
-            future=future, seat_no=seat_no, npc_id=npc_id, request_id=request_id,
+            future=future,
+            seat_no=seat_no,
+            npc_id=npc_id,
+            request_id=request_id,
+            game_id=game_id,
         )
         try:
             await send(payload_json)
@@ -494,6 +504,39 @@ class NpcDecisionDispatcher:
             if entry.assigned_seat == seat_no and entry.game_id == game_id:
                 return entry
         return None
+
+    def cleanup_game(self, game_id: str) -> int:
+        """Cancel and drop every in-flight request belonging to ``game_id``.
+
+        Called from the game-end hook so a long-lived Master process
+        doesn't accumulate pending futures across games. Each cancelled
+        future resolves to ``None`` (= abstain / skip text), matching the
+        timeout fall-back the in-flight code already handles.
+
+        Returns the number of pending entries swept (vote/night +
+        wolf-chat combined) for log visibility.
+        """
+        swept = 0
+        for rid, pending in list(self._pending.items()):
+            if pending.game_id != game_id:
+                continue
+            if not pending.future.done():
+                pending.future.set_result(None)
+            self._pending.pop(rid, None)
+            swept += 1
+        for rid, pending_wc in list(self._pending_wolf_chat.items()):
+            if pending_wc.game_id != game_id:
+                continue
+            if not pending_wc.future.done():
+                pending_wc.future.set_result(None)
+            self._pending_wolf_chat.pop(rid, None)
+            swept += 1
+        if swept:
+            log.info(
+                "decision_dispatcher_cleanup_game game=%s swept=%d",
+                game_id, swept,
+            )
+        return swept
 
 
 __all__ = ["DecisionDispatcherConfig", "NpcDecisionDispatcher"]

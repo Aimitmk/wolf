@@ -680,6 +680,34 @@ class SpeakArbiter:
             )
             return
 
+    # ------------------------------------------------------------- game-end cleanup
+
+    def cleanup_game(self, game_id: str) -> int:
+        """Drop in-memory speak/playback state belonging to ``game_id``.
+
+        Companion to :meth:`NpcDecisionDispatcher.cleanup_game`. Called
+        from the game-end hook so a long-lived Master process doesn't
+        carry pending arbitration state across games. The DB rows
+        (``npc_speak_requests`` / ``_results`` / ``_playback_events``)
+        are intentionally kept for replay/export — only the in-memory
+        gates / dicts are swept here.
+
+        Returns the count of in-flight `_pending` entries dropped.
+        """
+        swept = 0
+        for rid, pending in list(self._pending.items()):
+            if pending.game_id != game_id:
+                continue
+            self._pending.pop(rid, None)
+            self._active_playback.discard(rid)
+            self._playback_deadlines.pop(rid, None)
+            swept += 1
+        if swept:
+            log.info(
+                "speak_arbiter_cleanup_game game=%s swept=%d", game_id, swept,
+            )
+        return swept
+
     # ------------------------------------------------------------- restart sweep
 
     async def reactive_voice_recovery_sweep(self, game_id: str) -> None:

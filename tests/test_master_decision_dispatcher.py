@@ -391,3 +391,75 @@ async def test_decide_vote_request_payload_shape() -> None:
         )
     )
     await task
+
+
+async def test_cleanup_game_resolves_pending_for_target_game_only() -> None:
+    """`cleanup_game` is wired into `_on_reactive_game_end` so a long-lived
+    Master process doesn't accumulate pending decision futures across games.
+    Two-game scenario: dispatch one in-flight vote per game, then cleanup g1
+    and verify the g1 future resolves to None while g2's is untouched.
+    """
+    registry = InMemoryNpcRegistry()
+    seat2_buf: list[str] = []
+    seat3_buf: list[str] = []
+    registry.register(
+        npc_id="npc_g1_seat2", discord_bot_user_id="bot2",
+        supported_voices=(), version="1",
+        send=_capture_send(seat2_buf), now_ms=1000, persona_key="setsu",
+    )
+    registry.assign(
+        "npc_g1_seat2", seat=2, game_id="g1", phase_id="g1::day1::DAY_VOTE::1"
+    )
+    registry.register(
+        npc_id="npc_g2_seat3", discord_bot_user_id="bot3",
+        supported_voices=(), version="1",
+        send=_capture_send(seat3_buf), now_ms=1000, persona_key="gina",
+    )
+    registry.assign(
+        "npc_g2_seat3", seat=3, game_id="g2", phase_id="g2::day1::DAY_VOTE::1"
+    )
+
+    dispatcher = NpcDecisionDispatcher(
+        registry=registry,
+        # Long TTL so the test isn't racing the timeout path; cleanup must
+        # win regardless.
+        config=DecisionDispatcherConfig(request_ttl_ms=60_000),
+        now_ms=lambda: 1_000,
+    )
+
+    async def _drive(game_id: str, voter_seat: int) -> dict[int, int | None]:
+        return await dispatcher.dispatch_votes(
+            game_id=game_id, day=1, round_=0,
+            voters=[Player(seat_no=voter_seat, role=Role.VILLAGER, alive=True)],
+            seats=_seats(),
+            candidate_seats=[1, 2, 3],
+        )
+
+    g1_task = asyncio.create_task(_drive("g1", 2))
+    g2_task = asyncio.create_task(_drive("g2", 3))
+    # Wait until both requests have been sent.
+    for _ in range(100):
+        if seat2_buf and seat3_buf:
+            break
+        await asyncio.sleep(0.01)
+    assert seat2_buf and seat3_buf
+
+    assert len(dispatcher._pending) == 2
+
+    swept = dispatcher.cleanup_game("g1")
+    assert swept == 1
+    assert len(dispatcher._pending) == 1
+
+    g1_result = await g1_task
+    assert g1_result == {2: None}, "g1 voter resolves to abstain after cleanup"
+    assert not g2_task.done(), "g2 future must not be touched by g1 cleanup"
+
+    # Resolve g2 normally so the test exits cleanly.
+    sent_g2 = DecideVoteRequest.model_validate_json(seat3_buf[0])
+    await dispatcher.on_vote_decision(
+        VoteDecision(
+            ts=2_000, trace_id=sent_g2.trace_id, request_id=sent_g2.request_id,
+            npc_id="npc_g2_seat3", seat_no=3, target_seat=1,
+        )
+    )
+    await g2_task

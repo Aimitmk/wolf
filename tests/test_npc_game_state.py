@@ -305,6 +305,53 @@ async def test_client_drops_update_when_no_snapshot_seen() -> None:
     assert "never_snapshotted" not in client.game_states
 
 
+@pytest.mark.asyncio
+async def test_seat_released_drops_per_game_state_and_logic_cache() -> None:
+    """`_on_seat_released` is the long-term cleanup hook for an NPC bot
+    that plays many games in one process. Without it `game_states` and
+    the LogicPacket cache grow unbounded across games.
+
+    This exercises both:
+    - `game_states[game_id]` is popped (but other games stay).
+    - `_logic_cache` entries whose phase_id starts with the released
+      game_id are dropped (other games preserved).
+    """
+    from wolfbot.domain.ws_messages import LogicPacket, SeatReleased
+
+    client, _sent = _make_client_with_capture()
+    # Seed state for two games and two logic packets.
+    await client.process_message(_snapshot(game_id="g1").model_dump_json())
+    await client.process_message(_snapshot(game_id="g2").model_dump_json())
+    assert "g1" in client.game_states and "g2" in client.game_states
+
+    pkt_g1 = LogicPacket(
+        ts=1, trace_id="t",
+        packet_id="lp_aaa", phase_id="g1::day1::DAY_DISCUSSION::1",
+        recipient_npc_id="npc_setsu",
+        public_state_summary="(d)", expires_at_ms=9999,
+    )
+    pkt_g2 = LogicPacket(
+        ts=1, trace_id="t",
+        packet_id="lp_bbb", phase_id="g2::day1::DAY_DISCUSSION::1",
+        recipient_npc_id="npc_setsu",
+        public_state_summary="(d)", expires_at_ms=9999,
+    )
+    client._logic_cache[pkt_g1.packet_id] = pkt_g1
+    client._logic_cache[pkt_g2.packet_id] = pkt_g2
+
+    # Release g1.
+    msg = SeatReleased(
+        ts=2000, trace_id="rel-g1",
+        npc_id="npc_setsu", game_id="g1", reason="game_ended",
+    )
+    await client.process_message(msg.model_dump_json())
+
+    assert "g1" not in client.game_states, "released game state must be dropped"
+    assert "g2" in client.game_states, "other-game state must be preserved"
+    assert "lp_aaa" not in client._logic_cache
+    assert "lp_bbb" in client._logic_cache
+
+
 def test_npcgamestate_constructs_with_defaults() -> None:
     """Sanity: the dataclass instantiates with defaults so test fixtures
     can build empty state without going through a snapshot."""

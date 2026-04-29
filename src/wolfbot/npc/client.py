@@ -278,6 +278,22 @@ class NpcClient:
         self.assigned_seat = None
         self.assigned_game_id = None
         self.assigned_phase_id = None
+        # Drop per-game caches so a long-lived NPC process doesn't
+        # accumulate `NpcGameState` + LogicPackets across every game it
+        # plays. The state is push-replaced by Master at the next
+        # PrivateStateSnapshot, so dropping it here only costs the next
+        # game its first snapshot — already mandatory anyway. Guard for
+        # the rare null game_id (older `SeatReleased` payloads carry it
+        # as optional): without a key we can't target the right game, so
+        # we skip the cleanup rather than risk wiping the wrong entry.
+        if msg.game_id is not None:
+            self.game_states.pop(msg.game_id, None)
+            prefix = f"{msg.game_id}::"
+            self._logic_cache = {
+                pid: pkt
+                for pid, pkt in self._logic_cache.items()
+                if not pkt.phase_id.startswith(prefix)
+            }
         if self.on_vc_leave is not None:
             try:
                 await self.on_vc_leave()
