@@ -450,7 +450,9 @@ function TimeCell({ time }: { time: string }) {
 const ARBITER_REASON_JA: Record<string, string> = {
   addressed: "指名",
   silent_rotation: "未発言ローテ",
-  lru_rotation: "LRO ローテ",
+  lru_rotation: "LRU ローテ",
+  low_info_diversion: "応酬迂回",
+  all_demoted_fallback: "全降格フォールバック",
   seat_tiebreak: "席順",
 };
 
@@ -461,6 +463,10 @@ const ARBITER_REASON_TIP: Record<string, string> = {
     "このフェーズでまだ発言していない NPC を優先して選んだ",
   lru_rotation:
     "全員が一度発言済み — 直前の話者を除外し、席番号の若い順で選んだ",
+  low_info_diversion:
+    "2席だけが応酬し情報が増えていない (CO等なし) ため、両者を降格して別の NPC を選んだ",
+  all_demoted_fallback:
+    "降格対象しか候補が残っていなかったため、降格対象から拾った (オフライン等で第3者不在の縮退)",
   seat_tiebreak:
     "他の候補が無く、席番号の若い順で選んだ (通常 1 NPC のみ生存時の縮退)",
 };

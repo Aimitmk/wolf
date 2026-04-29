@@ -67,6 +67,47 @@ log = logging.getLogger(__name__)
 # 20 is plenty for an 80-char reactive reply and keeps WS frames small.
 _RECENT_SPEECH_CAP = 20
 
+# Diversity guards on top of the addressed / silent / LRU sort key.
+# - `_PAIR_VOLLEY_WINDOW`: when the last N events come from exactly 2
+#   distinct seats AND none carried structured "info" (currently a
+#   ``co_declaration``), demote both seats so a third NPC gets to speak.
+#   This breaks the ラキオ ↔ ジョナス ping-pong: each pair gets to volley
+#   the full window before being told to step aside.
+# - `_CONSECUTIVE_CAP`: same seat speaking ≥ N times in a row is also
+#   demoted. Mostly fires when a human keeps re-addressing the same NPC
+#   or when a buggy upstream tries to dispatch the same seat twice.
+_PAIR_VOLLEY_WINDOW = 4
+_CONSECUTIVE_CAP = 3
+
+
+def _compute_demoted_seats(
+    summary: Sequence[tuple[int, bool]],
+) -> frozenset[int]:
+    """Return seats that should be demoted in the next pick.
+
+    Two independent gates, OR'd together:
+
+    1. Last ``_PAIR_VOLLEY_WINDOW`` events came from exactly 2 distinct
+       seats AND none of them flagged ``has_info`` (= no CO declared) →
+       both seats demoted.
+    2. Last ``_CONSECUTIVE_CAP`` events all came from a single seat →
+       that seat demoted.
+
+    Returns an empty set when the window is too short or no gate fires.
+    """
+    demoted: set[int] = set()
+    if len(summary) >= _PAIR_VOLLEY_WINDOW:
+        window = list(summary)[-_PAIR_VOLLEY_WINDOW:]
+        seats_in_window = {seat for seat, _ in window}
+        any_info = any(has_info for _, has_info in window)
+        if len(seats_in_window) == 2 and not any_info:
+            demoted |= seats_in_window
+    if len(summary) >= _CONSECUTIVE_CAP:
+        tail = list(summary)[-_CONSECUTIVE_CAP:]
+        if len({seat for seat, _ in tail}) == 1:
+            demoted.add(tail[0][0])
+    return frozenset(demoted)
+
 
 @dataclass
 class SpeakArbiterConfig:
@@ -650,25 +691,23 @@ class SpeakArbiter:
         if state is None:
             return
 
-        # Pick the next NPC. Priority order, applied as a 4-key sort:
-        #   1. addressed seat — if a recent human utterance carries
-        #      `addressed_seat_no`, that NPC must reply before anyone else.
-        #   2. silent seats — NPCs who haven't yet spoken in this phase win
-        #      over those who have. Without this the lowest-seat NPC would
-        #      monopolize pure-NPC games where no human speech triggers
-        #      rotation.
-        #   3. NOT the immediate previous speaker — once `silent_seats`
-        #      empties (= every alive NPC has spoken once), this is the
-        #      only thing that prevents seat 1 from looping forever. The
-        #      reactive_voice mode previously fell straight through to
-        #      seat number, so seat 1 monopolized the rest of the phase.
-        #   4. lowest assigned_seat as a stable tiebreaker.
+        # Pick the next NPC. Priority order, applied as a 5-key sort:
+        #   1. NOT demoted — `_compute_demoted_seats` flags seats stuck
+        #      in a low-info pair volley OR exceeding the consecutive
+        #      speaker cap. Demoted seats fall to the bottom regardless
+        #      of being addressed, so a 3rd NPC can break in.
+        #   2. addressed seat — recent utterance's `addressed_seat_no`.
+        #   3. silent seats — NPCs who haven't yet spoken in this phase.
+        #   4. NOT the immediate previous speaker (LRU rotation).
+        #   5. lowest assigned_seat as a stable tiebreaker.
         addressed = state.last_addressed_seat
         last_speaker = state.last_speaker_seat
+        demoted = _compute_demoted_seats(state.recent_speech_summary)
         online = self.registry.all_online()
 
-        def _pick_key(e: object) -> tuple[int, int, int, int]:
+        def _pick_key(e: object) -> tuple[int, int, int, int, int]:
             seat = getattr(e, "assigned_seat", None) or 99
+            is_demoted = 1 if seat in demoted else 0
             is_addressed = 0 if (
                 addressed is not None and seat == addressed
             ) else 1
@@ -676,7 +715,7 @@ class SpeakArbiter:
             is_just_spoke = 1 if (
                 last_speaker is not None and seat == last_speaker
             ) else 0
-            return (is_addressed, in_silent, is_just_spoke, seat)
+            return (is_demoted, is_addressed, in_silent, is_just_spoke, seat)
 
         online_npc_seats = sorted(
             e.assigned_seat
@@ -692,6 +731,7 @@ class SpeakArbiter:
             "silent_seats": sorted(state.silent_seats),
             "alive_seat_nos": sorted(state.alive_seat_nos),
             "online_npc_seats": online_npc_seats,
+            "demoted_seats": sorted(demoted),
         }
 
         for entry in sorted(online, key=_pick_key):
@@ -700,12 +740,20 @@ class SpeakArbiter:
             if entry.assigned_seat not in state.alive_seat_nos:
                 continue
             seat = entry.assigned_seat
-            if addressed is not None and seat == addressed:
+            if seat in demoted:
+                # Reached this branch only when EVERY non-demoted
+                # candidate was filtered out (offline / dead / not in
+                # this game). Falling back is preferable to silence.
+                reason = "all_demoted_fallback"
+            elif addressed is not None and seat == addressed:
                 reason = "addressed"
             elif seat in state.silent_seats:
                 reason = "silent_rotation"
             elif last_speaker is not None and seat != last_speaker:
-                reason = "lru_rotation"
+                # When at least one seat got demoted *and* we ended up
+                # picking a non-demoted third party, label it so the
+                # viewer can show "stuck volley → diverted to seat N".
+                reason = "low_info_diversion" if demoted else "lru_rotation"
             else:
                 reason = "seat_tiebreak"
             await self.dispatch_request(

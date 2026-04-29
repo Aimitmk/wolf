@@ -948,6 +948,149 @@ async def test_try_dispatch_next_avoids_immediate_repeat_after_first_round(
     assert not bufs["gina"]
 
 
+async def test_pair_volley_demotion_fires_after_4_low_info_speeches(
+    repo: SqliteRepo,
+) -> None:
+    """A→B→A→B with no CO declared = 4 low-info speeches between 2 seats.
+    `_compute_demoted_seats` must mark BOTH seats so the next arbiter
+    pick picks a 3rd NPC (e.g., 席3 ジナ) instead of one of the two stuck
+    in the volley. Reproduces the production loop where ラキオ ↔ ジョナス
+    spoke alternately for the entire phase.
+    """
+    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+
+    # 4-event window: 1, 2, 1, 2 (no info)
+    summary = ((1, False), (2, False), (1, False), (2, False))
+    demoted = _compute_demoted_seats(summary)
+    assert demoted == frozenset({1, 2})
+
+
+async def test_pair_volley_resets_when_co_declared() -> None:
+    """A CO declaration in the window flips ``has_info=True`` for that
+    event → the gate must NOT fire. Otherwise legitimate dramatic moments
+    (e.g. seer CO in the middle of a heated exchange) would be punished.
+    """
+    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+
+    summary = ((1, False), (2, False), (1, True), (2, False))
+    assert _compute_demoted_seats(summary) == frozenset()
+
+
+async def test_consecutive_cap_demotion_after_3_same_seat() -> None:
+    """Same seat speaking 3 in a row → demote that seat. Mostly fires
+    when a human keeps re-addressing the same NPC, but defensive against
+    any future bug that lets the same seat dispatch repeatedly."""
+    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+
+    summary = ((5, False), (5, False), (5, False))
+    assert _compute_demoted_seats(summary) == frozenset({5})
+
+
+async def test_compute_demoted_seats_no_op_for_short_window() -> None:
+    """Window shorter than the gate thresholds yields an empty set."""
+    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+
+    assert _compute_demoted_seats(()) == frozenset()
+    assert _compute_demoted_seats(((1, False), (2, False))) == frozenset()
+
+
+async def test_try_dispatch_next_diverts_around_pair_volley(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: simulate ラキオ (1) ↔ ジョナス (2) ping-pong with no CO,
+    then verify the next dispatch targets ジナ (3) — the only third
+    online NPC — and the persisted selection_reason is ``low_info_diversion``.
+    """
+    g = Game(
+        id="rv-divert",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+        Seat(seat_no=3, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in ((1, Role.WEREWOLF), (2, Role.MADMAN), (3, Role.SEER)):
+        await repo.set_player_role(g.id, sn, role)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        )
+    )
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    # First, seed a single seat-3 speech so silent_seats becomes empty.
+    # Then 4 alternating no-info speeches between seats 1 and 2 — the
+    # last 4 events form the pair-volley window. Without the demotion
+    # gate, seat 1 would win as lowest non-last-speaker (LRU). With it,
+    # seat 3 is the only non-demoted candidate.
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=3, text="ジナの開始発言",
+            created_at_ms=5,
+        )
+    )
+    for ts, seat in ((10, 1), (20, 2), (30, 1), (40, 2)):
+        await store.insert(
+            make_npc_generated_event(
+                game_id=g.id, phase_id=phase_id, day=1,
+                phase=Phase.DAY_DISCUSSION,
+                speaker_seat=seat, text=f"seat {seat}",
+                created_at_ms=ts,
+            )
+        )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "jonas": [], "gina": []}
+    for npc_id, persona, seat in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_jonas", "jonas", 2),
+        ("npc_gina", "gina", 3),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+    )
+    await arb.try_dispatch_next(g.id)
+
+    assert bufs["gina"], "third party (席3 ジナ) must break the volley"
+    assert not bufs["raqio"]
+    assert not bufs["jonas"]
+
+    seat_repr, reason = await _fetch_selection_reason(repo, g.id)
+    assert seat_repr == "3"
+    assert reason == "low_info_diversion"
+
+
 async def test_arbiter_cleanup_game_drops_only_target_game(repo: SqliteRepo) -> None:
     """`cleanup_game` is wired into `_on_reactive_game_end` so a long-lived
     Master process doesn't carry stale `_pending` / `_active_playback` /

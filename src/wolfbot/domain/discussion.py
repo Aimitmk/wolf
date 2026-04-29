@@ -160,3 +160,14 @@ class PublicDiscussionState(BaseModel):
     # arbiter falls back to seat-number tiebreak and seat 1 monopolizes
     # the rest of the phase.
     last_speaker_seat: int | None = None
+    # Sliding window of `(speaker_seat, has_info)` for the most recent
+    # non-sentinel speech events in this phase. ``has_info`` is True when
+    # the event added structured information (currently: a CO declaration;
+    # future signals can be added without changing the field shape).
+    # SpeakArbiter consumes this to detect a low-information pair volley
+    # (e.g. ラキオ ↔ ジョナス pinging each other for several rounds without
+    # CO or new accusation target) and demote both seats so a third NPC
+    # gets picked instead. Capped at 6 entries so the window stays small
+    # but big enough to cover both the pair-volley check (last 4) and the
+    # consecutive-speaker cap (last 3).
+    recent_speech_summary: tuple[tuple[int, bool], ...] = ()

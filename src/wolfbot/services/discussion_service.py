@@ -540,6 +540,17 @@ def apply_speech_event(
     last_speaker_seat = (
         speaker if speaker is not None else state.last_speaker_seat
     )
+    # Append (speaker, has_info) to the sliding summary window the
+    # arbiter uses for low-info pair-volley detection. ``has_info`` is
+    # the structured "did this event move the discussion forward"
+    # signal. Today: a CO declaration counts. Wider signals (new
+    # accusation target, vote announcement) can be added here later
+    # without changing the field shape.
+    summary = list(state.recent_speech_summary)
+    if speaker is not None:
+        has_info = event.co_declaration is not None
+        summary.append((speaker, has_info))
+        summary = summary[-6:]
     return PublicDiscussionState(
         game_id=state.game_id,
         phase_id=state.phase_id,
@@ -555,6 +566,7 @@ def apply_speech_event(
         last_addressed_speaker_seat=last_addressed_speaker_seat,
         last_addressed_text=last_addressed_text,
         last_speaker_seat=last_speaker_seat,
+        recent_speech_summary=tuple(summary),
     )
 
 
@@ -601,6 +613,7 @@ def rebuild_public_state_from_events(
     spoken_seats: set[int] = set()
     co_claims: list[CoClaim] = []
     recent_ids: list[str] = []
+    summary: list[tuple[int, bool]] = []
     seen_co: set[tuple[int, str]] = set()
     last_addressed_seat: int | None = None
     last_addressed_speaker_seat: int | None = None
@@ -612,6 +625,8 @@ def rebuild_public_state_from_events(
         if event.speaker_seat is not None:
             spoken_seats.add(event.speaker_seat)
             last_speaker_seat = event.speaker_seat
+            has_info = event.co_declaration is not None
+            summary.append((event.speaker_seat, has_info))
         recent_ids.append(event.event_id)
         # Mirror the per-event update logic in `_apply_event_to_state`:
         # only consume the standing address when the NPC speaker IS the
@@ -653,6 +668,7 @@ def rebuild_public_state_from_events(
     state.last_addressed_speaker_seat = last_addressed_speaker_seat
     state.last_addressed_text = last_addressed_text
     state.last_speaker_seat = last_speaker_seat
+    state.recent_speech_summary = tuple(summary[-6:])
     return state
 
 
