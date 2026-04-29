@@ -12,10 +12,17 @@ NPC bots over Phase-D include the right per-seat shape:
 
 from __future__ import annotations
 
-from wolfbot.domain.enums import Role
-from wolfbot.domain.models import Player, Seat
+import tempfile
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest_asyncio
+
+from wolfbot.domain.enums import Phase, Role, SubmissionType
+from wolfbot.domain.models import Game, LogEntry, NightAction, Player, Seat
 from wolfbot.master.private_state import (
     build_snapshot_for_seat,
+    load_private_state_for_seat,
     make_alive_changed_update,
     make_day_advanced_update,
     make_guard_entry_update,
@@ -25,6 +32,8 @@ from wolfbot.master.private_state import (
     make_wolf_chat_update,
 )
 from wolfbot.npc.game_state import apply_update, state_from_snapshot
+from wolfbot.persistence.schema import migrate
+from wolfbot.persistence.sqlite_repo import SqliteRepo
 
 
 def _seats() -> list[Seat]:
@@ -237,3 +246,167 @@ def test_day_advanced_update_increments_day() -> None:
         day_number=3, ts=2, trace_id="t2",
     ))
     assert state.day_number == 3
+
+
+# ---- DB → snapshot history loader ------------------------------------
+
+
+@pytest_asyncio.fixture
+async def fresh_repo() -> AsyncIterator[SqliteRepo]:
+    with tempfile.TemporaryDirectory() as td:
+        db = Path(td) / "test.db"
+        await migrate(db)
+        r = SqliteRepo(db)
+        await r.connect()
+        try:
+            yield r
+        finally:
+            await r.close()
+
+
+async def _seed_game_with_seer(repo: SqliteRepo) -> Game:
+    """A minimal game with seat 5 = SEER and seat 9 = the night-0
+    random-white target. Only enough rows for the loader to parse."""
+    g = Game(
+        id="snap_seed",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=i, display_name=f"NPC{i}", is_llm=True,
+             persona_key=None, discord_user_id=None)
+        for i in range(1, 10)
+    ]
+    seats[8] = Seat(  # seat 9 with emoji prefix to mirror live data
+        seat_no=9, display_name="👑ユリコ", is_llm=True,
+        persona_key="yuriko", discord_user_id=None,
+    )
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 5, Role.SEER)
+    await repo.set_player_role(g.id, 9, Role.VILLAGER)
+    return g
+
+
+async def test_load_private_state_seer_recovers_night0_random_white(
+    fresh_repo: SqliteRepo,
+) -> None:
+    """The seer's NIGHT_0 random white must round-trip through the
+    snapshot loader. Pre-fix the snapshot was always built with
+    seer_results=() — Gina's day-1 user prompt had no `## 自分の占い結果`
+    block and she correctly chose not to fabricate a CO without data."""
+    g = await _seed_game_with_seer(fresh_repo)
+    await fresh_repo.insert_log_private(
+        LogEntry(
+            game_id=g.id, day=0, phase=Phase.NIGHT_0,
+            kind="SEER_RESULT_NIGHT0",
+            actor_seat=None, audience_seat=5, visibility="PRIVATE",
+            text="初日ランダム白: 👑ユリコ は 人狼ではありません。",
+            created_at=1,
+        )
+    )
+    seers, mediums, guards, wolves = await load_private_state_for_seat(
+        fresh_repo, game_id=g.id, seat_no=5, role=Role.SEER,
+        players=await fresh_repo.load_players(g.id),
+        seats=await fresh_repo.load_seats(g.id),
+    )
+    assert mediums == () and guards == () and wolves == ()
+    assert len(seers) == 1
+    assert seers[0].day == 0
+    assert seers[0].target_seat == 9
+    assert seers[0].target_name == "👑ユリコ"
+    assert seers[0].is_wolf is False
+
+
+async def test_load_private_state_seer_parses_day1_black_and_white(
+    fresh_repo: SqliteRepo,
+) -> None:
+    """Day 1+ SEER_RESULT log text format ('〜 は 人狼です' / '〜 は
+    人狼ではありません'). Both branches resolve to the right is_wolf."""
+    g = await _seed_game_with_seer(fresh_repo)
+    await fresh_repo.insert_log_private(
+        LogEntry(
+            game_id=g.id, day=1, phase=Phase.NIGHT,
+            kind="SEER_RESULT", actor_seat=None, audience_seat=5,
+            visibility="PRIVATE",
+            text="占い結果: NPC2 は 人狼 です。", created_at=10,
+        )
+    )
+    await fresh_repo.insert_log_private(
+        LogEntry(
+            game_id=g.id, day=2, phase=Phase.NIGHT,
+            kind="SEER_RESULT", actor_seat=None, audience_seat=5,
+            visibility="PRIVATE",
+            text="占い結果: NPC3 は 人狼ではありません。", created_at=20,
+        )
+    )
+    seers, _m, _g, _w = await load_private_state_for_seat(
+        fresh_repo, game_id=g.id, seat_no=5, role=Role.SEER,
+        players=await fresh_repo.load_players(g.id),
+        seats=await fresh_repo.load_seats(g.id),
+    )
+    by_day = {s.day: s for s in seers}
+    assert by_day[1].target_seat == 2 and by_day[1].is_wolf is True
+    assert by_day[2].target_seat == 3 and by_day[2].is_wolf is False
+
+
+async def test_load_private_state_wolf_chat_history_for_wolf(
+    fresh_repo: SqliteRepo,
+) -> None:
+    """Wolf NPCs see WOLF_CHAT private logs (audience_seat=NULL)."""
+    g = await _seed_game_with_seer(fresh_repo)
+    await fresh_repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await fresh_repo.set_player_role(g.id, 3, Role.WEREWOLF)
+    await fresh_repo.insert_log_private(
+        LogEntry(
+            game_id=g.id, day=0, phase=Phase.NIGHT_0,
+            kind="WOLF_CHAT", actor_seat=3, audience_seat=None,
+            visibility="PRIVATE", text="今日は席5を狙うか", created_at=5,
+        )
+    )
+    _s, _m, _gh, wolves = await load_private_state_for_seat(
+        fresh_repo, game_id=g.id, seat_no=1, role=Role.WEREWOLF,
+        players=await fresh_repo.load_players(g.id),
+        seats=await fresh_repo.load_seats(g.id),
+    )
+    assert len(wolves) == 1
+    assert wolves[0].speaker_seat == 3
+    assert wolves[0].text == "今日は席5を狙うか"
+
+
+async def test_load_private_state_knight_guard_history_with_morning(
+    fresh_repo: SqliteRepo,
+) -> None:
+    """Knight's guard history is rebuilt from night_actions, with
+    peaceful_morning derived from the next day's MORNING public log."""
+    g = await _seed_game_with_seer(fresh_repo)
+    await fresh_repo.set_player_role(g.id, 7, Role.KNIGHT)
+    await fresh_repo.insert_night_action(
+        NightAction(
+            game_id=g.id, day=1, actor_seat=7,
+            kind=SubmissionType.KNIGHT_GUARD, target_seat=5,
+            submitted_at=100,
+        )
+    )
+    await fresh_repo.insert_log_public(
+        LogEntry(
+            game_id=g.id, day=2, phase=Phase.DAY_DISCUSSION,
+            kind="MORNING", actor_seat=None, visibility="PUBLIC",
+            text="平和な朝です。昨晩の犠牲者はいません。", created_at=200,
+        )
+    )
+    _s, _m, guards, _w = await load_private_state_for_seat(
+        fresh_repo, game_id=g.id, seat_no=7, role=Role.KNIGHT,
+        players=await fresh_repo.load_players(g.id),
+        seats=await fresh_repo.load_seats(g.id),
+    )
+    assert len(guards) == 1
+    assert guards[0].day == 1
+    assert guards[0].target_seat == 5
+    assert guards[0].peaceful_morning is True
