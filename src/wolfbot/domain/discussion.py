@@ -92,11 +92,24 @@ class SpeechEvent(BaseModel):
         ge=1,
         le=9,
         description=(
-            "Seat number this utterance is addressed to "
-            "('〜さん、どう思う' style direct address). "
-            "Resolved on Master from the analyzer's `addressed_name` against the "
-            "current seats table. SpeakArbiter prefers this NPC when picking "
-            "the next speaker."
+            "Legacy single-addressee field. When ``addressed_seat_nos`` is "
+            "set this mirrors its first element so older readers (DB row "
+            "writers, restart recovery for pre-multi-address events) keep "
+            "working. Prefer ``addressed_seat_nos`` for new code."
+        ),
+    )
+    addressed_seat_nos: tuple[int, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "All seats this utterance is addressed to. SpeakArbiter "
+            "prioritises every seat in the set on the next dispatch and "
+            "consumes them one-by-one as each addressee replies. Empty "
+            "for general remarks. The legacy `addressed_seat_no` field "
+            "carries the first element for back-compat with code that "
+            "only knows the singular form. Use "
+            ":func:`event_addressed_seats` rather than reading either "
+            "field directly so the singular-only fallback is applied "
+            "consistently."
         ),
     )
     role_callout: str | None = Field(
@@ -115,6 +128,22 @@ class SpeechEvent(BaseModel):
 
     def is_baseline(self) -> bool:
         return self.source == SpeechSource.PHASE_BASELINE
+
+
+def event_addressed_seats(event: SpeechEvent) -> tuple[int, ...]:
+    """Return the canonical ordered list of addressees for a SpeechEvent.
+
+    Single source of truth: prefer ``addressed_seat_nos`` (the new
+    multi-addressee field) and fall back to wrapping the legacy
+    ``addressed_seat_no`` in a 1-tuple so test fixtures and older
+    callers that only set the singular field still feed the fold
+    correctly. Returns ``()`` when neither is set.
+    """
+    if event.addressed_seat_nos:
+        return event.addressed_seat_nos
+    if event.addressed_seat_no is not None:
+        return (event.addressed_seat_no,)
+    return ()
 
 
 def make_phase_id(game_id: str, day: int, phase: Phase, sequence: int = 1) -> str:
@@ -163,6 +192,7 @@ class PublicDiscussionState(BaseModel):
     silent_seats: frozenset[int] = frozenset()
     recent_speech_event_ids: tuple[str, ...] = ()
     last_addressed_seat: int | None = None
+    last_addressed_seats: frozenset[int] = frozenset()
     last_addressed_speaker_seat: int | None = None
     last_addressed_text: str = ""
     # Most recent non-sentinel speech_event speaker. SpeakArbiter uses this

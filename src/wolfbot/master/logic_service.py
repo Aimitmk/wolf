@@ -75,7 +75,13 @@ def build_logic_packet(
         # CO trigger; wolf-side NPCs should consider whether to fake CO.
         callouts_repr = ", ".join(sorted(state.pending_role_callouts))
         summary += f" pending_role_callouts=[{callouts_repr}]"
-    if state.last_addressed_seat is not None:
+    # Prefer the multi-addressee set; fall back to the legacy singular
+    # field for state objects that haven't been migrated (e.g. test
+    # fixtures that only set `last_addressed_seat`).
+    addressed_seats: frozenset[int] = state.last_addressed_seats
+    if not addressed_seats and state.last_addressed_seat is not None:
+        addressed_seats = frozenset({state.last_addressed_seat})
+    if addressed_seats:
         speaker_repr = (
             f"席{state.last_addressed_speaker_seat}"
             if state.last_addressed_speaker_seat is not None
@@ -86,8 +92,16 @@ def build_logic_packet(
         utter = state.last_addressed_text.strip().replace("\n", " ")
         if len(utter) > 160:
             utter = utter[:160] + "…"
+        sorted_seats = sorted(addressed_seats)
+        if len(sorted_seats) == 1:
+            # Singular case keeps the legacy ``last_address=席N`` shape
+            # so existing log scrapers / NPC-side parsers don't see a
+            # surprise format change.
+            addr_repr = f"席{sorted_seats[0]}"
+        else:
+            addr_repr = "[" + ",".join(f"席{s}" for s in sorted_seats) + "]"
         summary += (
-            f" last_address=席{state.last_addressed_seat}"
+            f" last_address={addr_repr}"
             f" from={speaker_repr} text=\"{utter}\""
         )
 

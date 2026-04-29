@@ -61,7 +61,7 @@ _RESPONSE_SCHEMA: dict[str, object] = {
             "intent",
             "used_logic_ids",
             "co_declaration",
-            "addressed_seat_no",
+            "addressed_seat_nos",
         ],
         "properties": {
             "text": {"type": "string", "maxLength": 300},
@@ -77,14 +77,17 @@ _RESPONSE_SCHEMA: dict[str, object] = {
                 "type": ["string", "null"],
                 "enum": [*CO_CLAIM_VALUES, None],
             },
-            "addressed_seat_no": {
-                "type": ["integer", "null"],
+            "addressed_seat_nos": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 1, "maximum": 9},
                 "description": (
-                    "Seat number this utterance is directed at. Mirror the "
-                    "field human voice analysis emits so Master can route "
-                    "the next dispatch via the same arbiter priority "
-                    "(addressed > silent_rotation > lru_rotation > seat). "
-                    "Use null for general remarks aimed at the whole table."
+                    "Seat numbers this utterance is directed at. "
+                    "Empty array `[]` for general remarks aimed at the whole "
+                    "table. Single addressee → 1-element array (e.g. `[3]`); "
+                    "asking multiple people in one breath → multi-element "
+                    "(e.g. `[2, 3]` for 「セツとジナはどう?」). Master "
+                    "prioritises every named seat in the next dispatch and "
+                    "consumes them as each replies."
                 ),
             },
         },
@@ -144,7 +147,7 @@ def _build_system(
         "「もう 1 人組んでそうな人」「あと処刑できる回数を考えると…」 のように。\n"
         "- **`text` 内で席番号 (席1, 席2, ..., 席9 や Seat3 等) を絶対に書かない。**"
         "他のプレイヤーを呼ぶときは必ず生存者リストの display_name (キャラ名) を使う。"
-        "data 層 (`addressed_seat_no` 等) には正しい席番号を入れて構わないが、"
+        "data 層 (`addressed_seat_nos` 等) には正しい席番号を入れて構わないが、"
         "発話そのものは「ジナさん」「ラキオ」のような自然な呼び方にする。\n"
         "  禁止例: 「席3はどう思う?」「席4のラキオが…」「Seat 9、答えて」\n"
         "  推奨例: 「ジョナスさんはどう思う?」「ラキオが…」「ユリコ、答えて」\n"
@@ -153,10 +156,13 @@ def _build_system(
         "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
         "CO しないなら `co_declaration=null`。"
         "「占いCO」のような語そのものは `text` に書かない。\n"
-        "- 特定の席に向けて話す場合は `addressed_seat_no` にその席番号 (整数) を入れる。"
-        "誰宛でもない一般的な発言や全体への呼びかけは `null`。"
+        "- 特定の席に向けて話す場合は `addressed_seat_nos` にその席番号の配列を入れる。"
+        "1人だけなら `[3]`、複数人に同時に問いかけるなら `[2, 3]` (例「セツとジナはどう?」)。"
+        "誰宛でもない一般的な発言や全体への呼びかけは空配列 `[]`。"
         "自分の席を指定しても無効化されるので、相手の席を必ず入れること。"
-        "`text` 中で名前を呼んだ場合はその人の席番号を `addressed_seat_no` に設定する。\n"
+        "`text` 中で名前を呼んだ全員ぶんを `addressed_seat_nos` に列挙する。"
+        "Master は配列の全員を次に発話する優先候補として扱うので、"
+        "問いかけた人数に応じて漏れなく入れる。\n"
         "- 死亡者リストには (処刑) または (襲撃) の死因タグが付く。"
         "前日の処刑死を「昨夜の犠牲者」と混同しない。逆も同様。"
         "発言で死を語るときはタグに合わせた表現を使う"
@@ -363,11 +369,12 @@ _DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
 - "intent": "speak" | "agree" | "disagree" | "question" | "accuse" | "defend" | "skip"
 - "used_logic_ids": string の配列 (空配列でもよい)
 - "co_declaration": "seer" | "medium" | "knight" | null
-- "addressed_seat_no": integer | null (特定の席に向けて話すときその席番号、一般発言は null)
+- "addressed_seat_nos": integer の配列 (向ける席番号たち。1人なら [3]、複数なら [2, 3]、誰宛でもない一般発言は [])
 
 例:
-{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null, "addressed_seat_no": null}
-{"text": "ジョナスさん、それは矛盾してるよ。", "intent": "accuse", "used_logic_ids": [], "co_declaration": null, "addressed_seat_no": 3}
+{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": []}
+{"text": "ジョナスさん、それは矛盾してるよ。", "intent": "accuse", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": [3]}
+{"text": "セツとジナ、ラキオの主張をどう見る?", "intent": "question", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": [2, 3]}
 """
 
 
@@ -673,13 +680,29 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
     )
     co_raw = data.get("co_declaration")
     co_declaration = co_raw if co_raw in CO_CLAIM_VALUES else None
-    # `addressed_seat_no` is optional on older provider responses (the
-    # field was added in 2026-04 to mirror human voice analysis); coerce
-    # to int|None and silently drop garbage rather than fail the speech.
+    # `addressed_seat_nos` (list) is the authoritative field; the legacy
+    # `addressed_seat_no` (singular) stays accepted for back-compat with
+    # provider responses produced before 2026-04 multi-address rollout.
+    # Coerce to int and silently drop non-int garbage rather than fail
+    # the speech.
+    raw_nos = data.get("addressed_seat_nos")
+    addressed_seat_nos: list[int] = []
+    if isinstance(raw_nos, list):
+        for v in raw_nos:
+            if (
+                isinstance(v, int)
+                and not isinstance(v, bool)
+                and v not in addressed_seat_nos
+            ):
+                addressed_seat_nos.append(v)
     raw_addr = data.get("addressed_seat_no")
     addressed_seat_no: int | None = None
     if isinstance(raw_addr, int) and not isinstance(raw_addr, bool):
         addressed_seat_no = raw_addr
+        if not addressed_seat_nos:
+            addressed_seat_nos.append(raw_addr)
+    elif addressed_seat_nos:
+        addressed_seat_no = addressed_seat_nos[0]
     # Rough estimate: ~150ms per character for TTS
     estimated_ms = max(500, len(text) * 150)
 
@@ -690,6 +713,7 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         estimated_duration_ms=estimated_ms,
         co_declaration=co_declaration,
         addressed_seat_no=addressed_seat_no,
+        addressed_seat_nos=tuple(addressed_seat_nos),
     )
 
 

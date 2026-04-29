@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -174,12 +175,16 @@ class SpeakArbiter:
         now_ms: Callable[[], int] = default_now_ms,
         runoff_announce: Callable[[Seat], Awaitable[None]] | None = None,
         runoff_wake: Callable[[str], None] | None = None,
+        rng: random.Random | None = None,
     ) -> None:
         self.repo = repo
         self.registry = registry
         self.discussion = discussion
         self.config = config or SpeakArbiterConfig()
         self._now_ms = now_ms
+        # Seedable RNG for the picker tiebreak. Production uses an
+        # un-seeded `random.Random()`; tests inject a deterministic one.
+        self._rng = rng if rng is not None else random.Random()
         # Optional Master-narration hook fired right before dispatching a
         # tied LLM candidate's SpeakRequest in DAY_RUNOFF_SPEECH so Levi
         # can name the speaker ("続いて、X 様の最終演説でございます。").
@@ -622,32 +627,53 @@ class SpeakArbiter:
             failure_reason=None,
             received_at_ms=now,
         )
-        # Pull `addressed_seat_no` from the NPC's structured output so the
-        # next dispatch can prioritize the named seat the same way human
-        # voice does (via the analyzer's addressed_name → seat resolve).
-        # Validate alive + non-self at the boundary so a hallucinated or
-        # out-of-roster seat number can't poison the address routing.
-        addressed_seat_no = result.addressed_seat_no
-        if addressed_seat_no is not None:
-            if addressed_seat_no == pending.seat_no:
-                addressed_seat_no = None
-            else:
-                try:
-                    alive_seats = await self.repo.load_players(pending.game_id)
-                    alive_set = {p.seat_no for p in alive_seats if p.alive}
-                except Exception:
-                    log.exception(
-                        "addressed_seat_alive_check_failed game=%s",
-                        pending.game_id,
-                    )
-                    alive_set = set()
-                if addressed_seat_no not in alive_set:
+        # Resolve the NPC's addressed list: take every seat it named,
+        # union with the legacy singular field (for older NPC builds),
+        # then drop self-address and any non-alive seats so a
+        # hallucinated id can't poison the routing. Order is preserved
+        # so the eventual frontmost addressee in the list (e.g.
+        # ``[3, 4]``) keeps a deterministic ordering — the arbiter's
+        # tiebreak randomises within the addressed group anyway.
+        addressed_candidates: list[int] = []
+        seen: set[int] = set()
+        for seat in result.addressed_seat_nos:
+            if seat is None or seat in seen:
+                continue
+            seen.add(seat)
+            addressed_candidates.append(int(seat))
+        if (
+            result.addressed_seat_no is not None
+            and result.addressed_seat_no not in seen
+        ):
+            seen.add(result.addressed_seat_no)
+            addressed_candidates.append(int(result.addressed_seat_no))
+        # Drop self-address.
+        addressed_candidates = [
+            s for s in addressed_candidates if s != pending.seat_no
+        ]
+        if addressed_candidates:
+            try:
+                alive_seats = await self.repo.load_players(pending.game_id)
+                alive_set = {p.seat_no for p in alive_seats if p.alive}
+            except Exception:
+                log.exception(
+                    "addressed_seat_alive_check_failed game=%s",
+                    pending.game_id,
+                )
+                alive_set = set()
+            filtered: list[int] = []
+            for s in addressed_candidates:
+                if s in alive_set:
+                    filtered.append(s)
+                else:
                     log.info(
                         "npc_addressed_seat_unknown game=%s seat=%d "
                         "addressed=%s — dropped",
-                        pending.game_id, pending.seat_no, addressed_seat_no,
+                        pending.game_id, pending.seat_no, s,
                     )
-                    addressed_seat_no = None
+            addressed_candidates = filtered
+        addressed_seat_nos: tuple[int, ...] = tuple(addressed_candidates)
+        addressed_seat_no = addressed_seat_nos[0] if addressed_seat_nos else None
         speech_event = SpeechEvent(
             event_id=new_event_id(),
             game_id=pending.game_id,
@@ -660,6 +686,7 @@ class SpeakArbiter:
             text=result.text,
             co_declaration=result.co_declaration,
             addressed_seat_no=addressed_seat_no,
+            addressed_seat_nos=addressed_seat_nos,
             created_at_ms=now,
         )
         await self.discussion.record(speech_event)
@@ -809,7 +836,11 @@ class SpeakArbiter:
         #      in a low-info pair volley OR exceeding the consecutive
         #      speaker cap. Demoted seats fall to the bottom regardless
         #      of being addressed, so a 3rd NPC can break in.
-        #   2. addressed seat — recent utterance's `addressed_seat_no`.
+        #   2. addressed — seat appears in the multi-addressee
+        #      ``last_addressed_seats`` set (e.g. 「セツとジナ、どう?」 puts
+        #      both 2 and 3 in the set). Both win over non-addressed
+        #      seats; randomization on the last axis decides which of the
+        #      two goes first.
         #   3. lowest speech_count this phase — generalises the old
         #      binary silent_seats: a 0-count seat is still preferred,
         #      but a 1-count seat now also wins over a 5-count one. Stops
@@ -817,23 +848,25 @@ class SpeakArbiter:
         #      once and gives wolf-side seats at higher seat numbers a
         #      fair chance to fake-CO.
         #   4. NOT the immediate previous speaker (LRU rotation).
-        #   5. lowest assigned_seat as a stable tiebreaker.
-        addressed = state.last_addressed_seat
+        #   5. random — replaces the old seat-number tiebreak. Without
+        #      randomization the lowest-seat NPC won every tie, so
+        #      higher-seat NPCs (e.g. 席8 SQ, 席9 ユリコ) effectively
+        #      never spoke. Each call gets a fresh roll so the rotation
+        #      is fair across phases.
+        addressed_set = state.last_addressed_seats
         last_speaker = state.last_speaker_seat
         demoted = _compute_demoted_seats(state.recent_speech_summary)
         online = self.registry.all_online()
 
-        def _pick_key(e: object) -> tuple[int, int, int, int, int]:
+        def _pick_key(e: object) -> tuple[int, int, int, int, float]:
             seat = getattr(e, "assigned_seat", None) or 99
             is_demoted = 1 if seat in demoted else 0
-            is_addressed = 0 if (
-                addressed is not None and seat == addressed
-            ) else 1
+            is_addressed = 0 if seat in addressed_set else 1
             count = state.speech_counts.get(seat, 0)
             is_just_spoke = 1 if (
                 last_speaker is not None and seat == last_speaker
             ) else 0
-            return (is_demoted, is_addressed, count, is_just_spoke, seat)
+            return (is_demoted, is_addressed, count, is_just_spoke, self._rng.random())
 
         online_npc_seats = sorted(
             e.assigned_seat
@@ -854,7 +887,10 @@ class SpeakArbiter:
             "phase_id": state.phase_id,
             "day": state.day,
             "phase": game.phase.value,
-            "last_addressed_seat": addressed,
+            "last_addressed_seat": (
+                next(iter(sorted(addressed_set))) if addressed_set else None
+            ),
+            "last_addressed_seats": sorted(addressed_set),
             "last_speaker_seat": last_speaker,
             "silent_seats": sorted(state.silent_seats),
             "alive_seat_nos": sorted(state.alive_seat_nos),
@@ -875,7 +911,7 @@ class SpeakArbiter:
                 # candidate was filtered out (offline / dead / not in
                 # this game). Falling back is preferable to silence.
                 reason = "all_demoted_fallback"
-            elif addressed is not None and seat == addressed:
+            elif seat in addressed_set:
                 reason = "addressed"
             elif seat in state.silent_seats:
                 reason = "silent_rotation"
@@ -895,6 +931,10 @@ class SpeakArbiter:
             elif last_speaker is not None and seat != last_speaker:
                 reason = "lru_rotation"
             else:
+                # Seat-number tiebreak was replaced with random in the
+                # `_pick_key` so all NPCs at equal priority get a fair
+                # roll. Keep the legacy reason label so the viewer's
+                # historical badge wording still matches.
                 reason = "seat_tiebreak"
             await self.dispatch_request(
                 state=state,

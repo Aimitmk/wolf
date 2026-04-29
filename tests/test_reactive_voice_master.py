@@ -934,18 +934,26 @@ async def test_try_dispatch_next_avoids_immediate_repeat_after_first_round(
         )
         registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
 
+    import random as _random
+
     arb = SpeakArbiter(
         repo=repo, registry=registry, discussion=discussion,
         now_ms=lambda: 2000,
+        rng=_random.Random(0),
     )
     await arb.try_dispatch_next(g.id)
 
     assert not bufs["raqio"], (
         "ラキオ was the immediate previous speaker — must NOT be re-picked"
     )
-    # Seat 2 (Setsu) wins by lowest seat among non-last-speakers.
-    assert bufs["setsu"], "expected next pick to land on seat 2 Setsu"
-    assert not bufs["gina"]
+    # Equal-priority tiebreak is randomised — seat 2 OR seat 3 may win,
+    # but never seat 1 (the just-spoken seat). Seeded RNG keeps the
+    # specific winner deterministic for the test (currently seat 2).
+    assert bufs["setsu"] or bufs["gina"]
+    if bufs["setsu"]:
+        assert not bufs["gina"]
+    else:
+        assert not bufs["setsu"]
 
 
 async def test_try_dispatch_next_prefers_lower_speech_count(
@@ -1483,6 +1491,106 @@ async def test_arbiter_cleanup_game_drops_only_target_game(repo: SqliteRepo) -> 
     assert "req-g2-c" in arb._pending
     assert "req-g2-c" in arb._active_playback
     assert arb._playback_deadlines["req-g2-c"] == 5_000
+
+
+async def test_multi_addressed_seats_both_get_priority(
+    repo: SqliteRepo,
+) -> None:
+    """When an utterance addresses multiple seats (e.g.
+    ``addressed_seat_nos=[2, 3]`` for 「セツとジナはどう?」), both seats
+    win the addressed-priority axis on the next dispatch. Picking 2
+    consumes only its slot, leaving 3 still in the addressed set so the
+    follow-up dispatch picks 3 next over a non-addressed candidate.
+    """
+    import random as _random
+
+    g = Game(
+        id="rv-multi-addr",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+        Seat(seat_no=3, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+        Seat(seat_no=4, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in (
+        (1, Role.WEREWOLF), (2, Role.SEER),
+        (3, Role.MEDIUM), (4, Role.VILLAGER),
+    ):
+        await repo.set_player_role(g.id, sn, role)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3, 4], created_at_ms=1,
+        )
+    )
+    # Raqio (seat 1) addresses BOTH Setsu (2) and Gina (3) in one breath.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="セツとジナはどう思う?",
+            addressed_seat_nos=(2, 3), created_at_ms=10,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {
+        "raqio": [], "setsu": [], "gina": [], "jonas": [],
+    }
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+        ("npc_gina", "gina", 3),
+        ("npc_jonas", "jonas", 4),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000, rng=_random.Random(0),
+    )
+    await arb.try_dispatch_next(g.id)
+
+    # Either seat 2 or seat 3 wins (random tiebreak), but NOT seat 4
+    # (not addressed) and NOT seat 1 (just spoke).
+    first_winner: int | None = None
+    if bufs["setsu"] and not bufs["gina"]:
+        first_winner = 2
+    elif bufs["gina"] and not bufs["setsu"]:
+        first_winner = 3
+    assert first_winner in (2, 3)
+    assert not bufs["raqio"], "ラキオ just spoke — never picked"
+    assert not bufs["jonas"], "ジョナス wasn't addressed — must lose to addressed pair"
 
 
 async def test_runoff_dispatch_picks_tied_llm_candidates_in_order(

@@ -41,6 +41,7 @@ from wolfbot.domain.discussion import (
     SpeakerKind,
     SpeechEvent,
     SpeechSource,
+    event_addressed_seats,
     make_phase_id,
 )
 from wolfbot.domain.enums import CO_CLAIM_VALUES, Phase
@@ -89,14 +90,17 @@ class SqliteSpeechEventStore:
         self._conn = conn
 
     async def insert(self, event: SpeechEvent) -> None:
+        nos_json: str | None = None
+        if event.addressed_seat_nos:
+            nos_json = json.dumps(list(event.addressed_seat_nos))
         await self._conn.execute(
             """
             INSERT INTO speech_events (
                 event_id, game_id, phase_id, day, phase, source, speaker_kind,
                 speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                 alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                role_callout, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                addressed_seat_nos_json, role_callout, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.event_id,
@@ -115,6 +119,7 @@ class SqliteSpeechEventStore:
                 event.summary,
                 event.co_declaration,
                 event.addressed_seat_no,
+                nos_json,
                 event.role_callout,
                 event.created_at_ms,
             ),
@@ -127,7 +132,7 @@ class SqliteSpeechEventStore:
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                    alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                   role_callout, created_at_ms
+                   addressed_seat_nos_json, role_callout, created_at_ms
               FROM speech_events
              WHERE game_id=? AND phase_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -143,7 +148,7 @@ class SqliteSpeechEventStore:
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                    alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                   role_callout, created_at_ms
+                   addressed_seat_nos_json, role_callout, created_at_ms
               FROM speech_events
              WHERE game_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -155,6 +160,20 @@ class SqliteSpeechEventStore:
 
 
 def _row_to_event(row: Any) -> SpeechEvent:
+    nos_json = row[16]
+    addressed_nos: tuple[int, ...] = ()
+    if nos_json:
+        try:
+            parsed = json.loads(nos_json)
+            if isinstance(parsed, list):
+                addressed_nos = tuple(int(s) for s in parsed if s is not None)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            addressed_nos = ()
+    # Legacy events written before addressed_seat_nos_json existed: synth
+    # the tuple from the singular column so the fold sees both forms
+    # consistently.
+    if not addressed_nos and row[15] is not None:
+        addressed_nos = (int(row[15]),)
     return SpeechEvent(
         event_id=row[0],
         game_id=row[1],
@@ -172,8 +191,9 @@ def _row_to_event(row: Any) -> SpeechEvent:
         summary=row[13],
         co_declaration=row[14],
         addressed_seat_no=row[15],
-        role_callout=row[16],
-        created_at_ms=row[17],
+        addressed_seat_nos=addressed_nos,
+        role_callout=row[17],
+        created_at_ms=row[18],
     )
 
 
@@ -223,6 +243,31 @@ def make_phase_baseline(
     )
 
 
+def _normalize_addressed(
+    addressed_seat_no: int | None,
+    addressed_seat_nos: tuple[int, ...] | None,
+) -> tuple[int | None, tuple[int, ...]]:
+    """Coerce the singular + list form into a consistent pair.
+
+    Returns ``(seat_no, seat_nos)`` where ``seat_nos`` is the canonical
+    list and ``seat_no`` mirrors its first element. Either input may be
+    None / empty; if both are set, the list wins and ``seat_no`` is
+    ignored. Removes duplicates while preserving order.
+    """
+    nos: list[int] = []
+    if addressed_seat_nos:
+        for s in addressed_seat_nos:
+            if s is None:
+                continue
+            if s not in nos:
+                nos.append(int(s))
+    if not nos and addressed_seat_no is not None:
+        nos.append(int(addressed_seat_no))
+    if not nos:
+        return (None, ())
+    return (nos[0], tuple(nos))
+
+
 def make_human_text_event(
     *,
     game_id: str,
@@ -233,9 +278,11 @@ def make_human_text_event(
     text: str,
     co_declaration: str | None = None,
     addressed_seat_no: int | None = None,
+    addressed_seat_nos: tuple[int, ...] | None = None,
     role_callout: str | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
+    seat_no, seat_nos = _normalize_addressed(addressed_seat_no, addressed_seat_nos)
     return SpeechEvent(
         event_id=new_event_id(),
         game_id=game_id,
@@ -247,7 +294,8 @@ def make_human_text_event(
         speaker_seat=speaker_seat,
         text=text,
         co_declaration=co_declaration,
-        addressed_seat_no=addressed_seat_no,
+        addressed_seat_no=seat_no,
+        addressed_seat_nos=seat_nos,
         role_callout=role_callout,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
@@ -263,9 +311,11 @@ def make_npc_generated_event(
     text: str,
     co_declaration: str | None = None,
     addressed_seat_no: int | None = None,
+    addressed_seat_nos: tuple[int, ...] | None = None,
     role_callout: str | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
+    seat_no, seat_nos = _normalize_addressed(addressed_seat_no, addressed_seat_nos)
     return SpeechEvent(
         event_id=new_event_id(),
         game_id=game_id,
@@ -277,7 +327,8 @@ def make_npc_generated_event(
         speaker_seat=speaker_seat,
         text=text,
         co_declaration=co_declaration,
-        addressed_seat_no=addressed_seat_no,
+        addressed_seat_no=seat_no,
+        addressed_seat_nos=seat_nos,
         role_callout=role_callout,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
@@ -296,8 +347,10 @@ def make_voice_stt_event(
     audio_end_ms: int,
     co_declaration: str | None = None,
     addressed_seat_no: int | None = None,
+    addressed_seat_nos: tuple[int, ...] | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
+    seat_no, seat_nos = _normalize_addressed(addressed_seat_no, addressed_seat_nos)
     return SpeechEvent(
         event_id=new_event_id(),
         game_id=game_id,
@@ -312,7 +365,8 @@ def make_voice_stt_event(
         audio_start_ms=audio_start_ms,
         audio_end_ms=audio_end_ms,
         co_declaration=co_declaration,
-        addressed_seat_no=addressed_seat_no,
+        addressed_seat_no=seat_no,
+        addressed_seat_nos=seat_nos,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -526,33 +580,41 @@ def apply_speech_event(
 
     recent = [*state.recent_speech_event_ids, event.event_id][-10:]
 
-    # Address routing rules. The arbiter consumes `last_addressed_seat`
-    # to prioritize whoever was just called out, so we have to be careful
-    # about *when* it's cleared:
+    # Address routing rules. The arbiter consumes ``last_addressed_seats``
+    # (multi-seat) to prioritize everyone who was just called out, so we
+    # have to be careful about *when* members are cleared:
     #
-    # - Human or NPC speech with its own `addressed_seat_no` always
-    #   supersedes the prior address (= a fresh call-out wins).
-    # - An NPC speaks but the prior addressee is themselves (= the
-    #   addressed seat replied) → consume the address.
-    # - Anything else keeps the standing address. Without this, e.g. a
-    #   silent_rotation pick that "jumps the line" before the addressed
-    #   NPC replies would silently clear the hint and the addressee
-    #   never gets prioritized.
-    last_addressed_seat = state.last_addressed_seat
+    # - Human or NPC speech with its own ``addressed_seat_nos`` always
+    #   supersedes the prior addressing (= a fresh call-out wins, the
+    #   old set is dropped wholesale).
+    # - An NPC who is themselves in the prior set speaks (= one of the
+    #   addressees replied) → remove only that NPC from the set; the
+    #   others stay prioritized so they all get a chance to answer.
+    # - Anything else keeps the standing set. Without this, e.g. a
+    #   silent_rotation pick that "jumps the line" before any addressed
+    #   NPC replies would silently clear the hint and the addressees
+    #   never get prioritized.
+    last_addressed_seats: frozenset[int] = state.last_addressed_seats
     last_addressed_speaker_seat = state.last_addressed_speaker_seat
     last_addressed_text = state.last_addressed_text
-    if event.addressed_seat_no is not None:
-        last_addressed_seat = event.addressed_seat_no
+    new_addressed = event_addressed_seats(event)
+    if new_addressed:
+        last_addressed_seats = frozenset(new_addressed)
         last_addressed_speaker_seat = speaker
         last_addressed_text = event.text
     elif (
         event.source == SpeechSource.NPC_GENERATED
         and speaker is not None
-        and speaker == state.last_addressed_seat
+        and speaker in state.last_addressed_seats
     ):
-        last_addressed_seat = None
-        last_addressed_speaker_seat = None
-        last_addressed_text = ""
+        remaining = set(state.last_addressed_seats) - {speaker}
+        last_addressed_seats = frozenset(remaining)
+        if not remaining:
+            last_addressed_speaker_seat = None
+            last_addressed_text = ""
+    last_addressed_seat = (
+        next(iter(sorted(last_addressed_seats))) if last_addressed_seats else None
+    )
 
     last_speaker_seat = (
         speaker if speaker is not None else state.last_speaker_seat
@@ -606,6 +668,7 @@ def apply_speech_event(
         last_addressed_seat=last_addressed_seat,
         last_addressed_speaker_seat=last_addressed_speaker_seat,
         last_addressed_text=last_addressed_text,
+        last_addressed_seats=last_addressed_seats,
         last_speaker_seat=last_speaker_seat,
         recent_speech_summary=tuple(summary),
         pending_role_callouts=frozenset(pending_role_callouts),
@@ -660,7 +723,7 @@ def rebuild_public_state_from_events(
     seen_co: set[tuple[int, str]] = set()
     pending_role_callouts: set[str] = set()
     speech_counts: dict[int, int] = {}
-    last_addressed_seat: int | None = None
+    last_addressed_seats: frozenset[int] = frozenset()
     last_addressed_speaker_seat: int | None = None
     last_addressed_text: str = ""
     last_speaker_seat: int | None = None
@@ -674,22 +737,25 @@ def rebuild_public_state_from_events(
                 speech_counts.get(event.speaker_seat, 0) + 1
             )
         recent_ids.append(event.event_id)
-        # Mirror the per-event update logic in `_apply_event_to_state`:
-        # only consume the standing address when the NPC speaker IS the
-        # previously addressed seat (= the addressee replied). A new
-        # `addressed_seat_no` always overrides the prior pointer.
-        if event.addressed_seat_no is not None:
-            last_addressed_seat = event.addressed_seat_no
+        # Mirror the per-event update logic in `apply_speech_event`:
+        # a fresh ``addressed_seat_nos`` (multi-seat) replaces the entire
+        # standing set; an NPC speaker who's already in the set consumes
+        # *only their own slot*, leaving co-addressees still prioritized.
+        new_addressed = event_addressed_seats(event)
+        if new_addressed:
+            last_addressed_seats = frozenset(new_addressed)
             last_addressed_speaker_seat = event.speaker_seat
             last_addressed_text = event.text
         elif (
             event.source == SpeechSource.NPC_GENERATED
             and event.speaker_seat is not None
-            and event.speaker_seat == last_addressed_seat
+            and event.speaker_seat in last_addressed_seats
         ):
-            last_addressed_seat = None
-            last_addressed_speaker_seat = None
-            last_addressed_text = ""
+            remaining = set(last_addressed_seats) - {event.speaker_seat}
+            last_addressed_seats = frozenset(remaining)
+            if not remaining:
+                last_addressed_speaker_seat = None
+                last_addressed_text = ""
         if event.speaker_seat is None:
             continue
         # Track outstanding role-callouts (request → pending; matching
@@ -724,7 +790,10 @@ def rebuild_public_state_from_events(
     state.co_claims = tuple(co_claims)
     state.silent_seats = frozenset(alive_seats - spoken_seats)
     state.recent_speech_event_ids = tuple(recent_ids[-10:])
-    state.last_addressed_seat = last_addressed_seat
+    state.last_addressed_seats = last_addressed_seats
+    state.last_addressed_seat = (
+        next(iter(sorted(last_addressed_seats))) if last_addressed_seats else None
+    )
     state.last_addressed_speaker_seat = last_addressed_speaker_seat
     state.last_addressed_text = last_addressed_text
     state.last_speaker_seat = last_speaker_seat

@@ -271,3 +271,64 @@ def test_speech_counts_excludes_baseline_sentinel() -> None:
     state = rebuild_public_state_from_events(events)
     assert state is not None
     assert state.speech_counts == {}
+
+
+def test_multi_addressed_seats_populate_set_and_consume_per_responder() -> None:
+    """An NPC addressing multiple seats puts ALL of them in
+    ``last_addressed_seats``. When one of them replies, only that
+    addressee is removed; the others remain prioritised so the next
+    dispatch still favours an unanswered addressee.
+    """
+    pid = make_phase_id("g1", 1, Phase.DAY_DISCUSSION)
+    sentinel = make_phase_baseline(
+        game_id="g1", phase_id=pid, day=1,
+        phase=Phase.DAY_DISCUSSION,
+        alive_seat_nos=[1, 2, 3, 4], created_at_ms=0,
+    )
+    multi_addr = make_npc_generated_event(
+        game_id="g1", phase_id=pid, day=1,
+        phase=Phase.DAY_DISCUSSION,
+        speaker_seat=1, text="セツとジナはどう?",
+        addressed_seat_nos=(2, 3),
+        created_at_ms=10,
+    )
+    state_after_addr = rebuild_public_state_from_events([sentinel, multi_addr])
+    assert state_after_addr is not None
+    assert state_after_addr.last_addressed_seats == frozenset({2, 3})
+
+    # Setsu (seat 2) replies. Gina (seat 3) should still be in the set.
+    setsu_reply = make_npc_generated_event(
+        game_id="g1", phase_id=pid, day=1,
+        phase=Phase.DAY_DISCUSSION,
+        speaker_seat=2, text="うーん、少し迷うところがあります。",
+        created_at_ms=20,
+    )
+    state_after_reply = rebuild_public_state_from_events(
+        [sentinel, multi_addr, setsu_reply]
+    )
+    assert state_after_reply is not None
+    assert state_after_reply.last_addressed_seats == frozenset({3})
+
+
+def test_multi_address_back_compat_singular_field_promoted() -> None:
+    """A SpeechEvent that only sets the legacy ``addressed_seat_no`` (no
+    list field) must still appear in ``last_addressed_seats`` so older
+    fixtures and pre-multi-address persisted rows keep working.
+    """
+    pid = make_phase_id("g1", 1, Phase.DAY_DISCUSSION)
+    sentinel = make_phase_baseline(
+        game_id="g1", phase_id=pid, day=1,
+        phase=Phase.DAY_DISCUSSION,
+        alive_seat_nos=[1, 2, 3], created_at_ms=0,
+    )
+    legacy_event = make_npc_generated_event(
+        game_id="g1", phase_id=pid, day=1,
+        phase=Phase.DAY_DISCUSSION,
+        speaker_seat=1, text="セツさん、どう?",
+        addressed_seat_no=2,  # singular only
+        created_at_ms=10,
+    )
+    state = rebuild_public_state_from_events([sentinel, legacy_event])
+    assert state is not None
+    assert state.last_addressed_seats == frozenset({2})
+    assert state.last_addressed_seat == 2

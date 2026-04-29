@@ -250,13 +250,21 @@ class SpeakResult(BaseEnvelope):
     addressed_seat_no: int | None = Field(
         default=None,
         description=(
-            "Seat number this utterance is directed at, mirroring the "
-            "field humans get via voice STT analysis. Master persists it "
-            "on SpeechEvent so the arbiter can prioritize the addressed "
-            "seat on the next dispatch (same code path as human address "
-            "routing). None for general remarks not aimed at a specific "
-            "seat. Self-address (==speaker_seat) is silently dropped on "
-            "the Master side."
+            "Legacy single-addressee field. When ``addressed_seat_nos`` "
+            "is non-empty Master prefers the list and ignores this. "
+            "Older NPC bot builds that don't know the list field still "
+            "work via this fallback. None / unset for general remarks."
+        ),
+    )
+    addressed_seat_nos: tuple[int, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "All seats this utterance is directed at — e.g. asking "
+            "「セツとジナはどう思う?」 produces ``(2, 3)``. Master "
+            "persists every entry on SpeechEvent so the arbiter "
+            "prioritises every named NPC and consumes them one-by-one "
+            "as each replies. Self-address (==speaker_seat) and "
+            "non-alive seats are dropped on the Master boundary."
         ),
     )
 

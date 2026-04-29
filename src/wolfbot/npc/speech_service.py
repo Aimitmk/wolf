@@ -29,6 +29,7 @@ class NpcGeneratedSpeech:
     estimated_duration_ms: int
     co_declaration: str | None = None
     addressed_seat_no: int | None = None
+    addressed_seat_nos: tuple[int, ...] = ()
 
 
 @runtime_checkable
@@ -128,9 +129,21 @@ class NpcSpeechService:
         # alive / on-roster here without seat data; Master applies the
         # alive/self-filter when persisting, so a hallucinated seat number
         # is filtered out at the boundary, not silently dropped here.
-        addressed_seat_no = speech.addressed_seat_no
-        if addressed_seat_no is not None and addressed_seat_no == request.seat_no:
-            addressed_seat_no = None
+        # Build the canonical addressed list, falling back to the legacy
+        # singular field for back-compat with NpcGeneratedSpeech instances
+        # that haven't been updated to populate the list.
+        merged: list[int] = []
+        for s in speech.addressed_seat_nos:
+            if s is not None and s != request.seat_no and s not in merged:
+                merged.append(int(s))
+        if (
+            speech.addressed_seat_no is not None
+            and speech.addressed_seat_no != request.seat_no
+            and speech.addressed_seat_no not in merged
+        ):
+            merged.append(int(speech.addressed_seat_no))
+        addressed_seat_nos: tuple[int, ...] = tuple(merged)
+        addressed_seat_no = addressed_seat_nos[0] if addressed_seat_nos else None
         return SpeakResult(
             ts=now_ms,
             trace_id=request.trace_id,
@@ -144,6 +157,7 @@ class NpcSpeechService:
             estimated_duration_ms=speech.estimated_duration_ms,
             co_declaration=co_declaration,
             addressed_seat_no=addressed_seat_no,
+            addressed_seat_nos=addressed_seat_nos,
         )
 
 
