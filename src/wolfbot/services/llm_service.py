@@ -986,6 +986,16 @@ class LLMAdapter:
         dispatch request. Best-effort — a missing DiscussionService or
         an empty phase yields an empty string so the NPC sees the
         historical no-digest behavior.
+
+        The vote / night decision happens AFTER the day's discussion has
+        ended, so ``game.phase`` at this point is DAY_VOTE / NIGHT etc.
+        Looking up speech events under that phase id returns zero rows
+        (speeches are persisted under DAY_DISCUSSION / DAY_RUNOFF_SPEECH
+        only). Pull from the day's DAY_DISCUSSION explicitly so the
+        digest carries the actual discussion content the NPC needs to
+        align its vote with what was said. DAY_RUNOFF_SPEECH events are
+        appended chronologically when present so a runoff vote also sees
+        the candidates' final speeches.
         """
         if self.discussion_service is None:
             return ""
@@ -998,10 +1008,28 @@ class LLMAdapter:
                 apply_speech_event,
             )
 
-            phase_id = _make_phase_id(game.id, game.day_number, game.phase)
-            events = list(
-                await self.discussion_service.load_phase(game.id, phase_id)
+            day = game.day_number
+            discussion_phase_id = _make_phase_id(
+                game.id, day, Phase.DAY_DISCUSSION
             )
+            runoff_phase_id = _make_phase_id(
+                game.id, day, Phase.DAY_RUNOFF_SPEECH
+            )
+            events = list(
+                await self.discussion_service.load_phase(
+                    game.id, discussion_phase_id
+                )
+            )
+            runoff_events = list(
+                await self.discussion_service.load_phase(
+                    game.id, runoff_phase_id
+                )
+            )
+            # Append runoff events after discussion so they fold on top
+            # of the day's accumulated state. Both phases carry their
+            # own phase_baseline sentinel so the fold reads each
+            # baseline correctly when entering the next phase.
+            events.extend(runoff_events)
             if not events:
                 return ""
             state = None
@@ -1009,9 +1037,13 @@ class LLMAdapter:
                 state = apply_speech_event(state, ev)
             if state is None:
                 return ""
+            past_votes = await self._load_past_votes(game.id, day)
             seat_names = {s.seat_no: s.display_name for s in seats}
             return build_public_digest(
-                state=state, recent_events=events, seat_names=seat_names,
+                state=state,
+                recent_events=events,
+                seat_names=seat_names,
+                past_votes=past_votes,
             )
         except Exception:
             log.exception(
@@ -1019,6 +1051,40 @@ class LLMAdapter:
                 game.id, game.day_number,
             )
             return ""
+
+    async def _load_past_votes(
+        self,
+        game_id: str,
+        current_day: int,
+    ) -> tuple[tuple[int, int, tuple[tuple[int, int | None], ...]], ...]:
+        """Load completed-day vote ballots so the digest can render the
+        full "who voted whom" history.
+
+        Mirrors `SpeakArbiter._load_past_votes` so the vote / night
+        decision LLM gets the same ballot ledger that day-discussion
+        speeches already see via the LogicPacket. Returns ``()`` when no
+        past day exists or any DB read fails — best-effort.
+        """
+        if current_day <= 1:
+            return ()
+        out: list[tuple[int, int, tuple[tuple[int, int | None], ...]]] = []
+        try:
+            for day in range(1, current_day):
+                for round_ in (0, 1):
+                    rows = await self.repo.load_votes(
+                        game_id, day=day, round_=round_,
+                    )
+                    if not rows:
+                        continue
+                    pairs = tuple(
+                        (v.voter_seat, v.target_seat)
+                        for v in sorted(rows, key=lambda v: v.voter_seat)
+                    )
+                    out.append((day, round_, pairs))
+        except Exception:
+            log.exception("digest_past_votes_load_failed game=%s", game_id)
+            return ()
+        return tuple(out)
 
     async def _run_votes_via_npc_dispatcher(
         self,

@@ -147,3 +147,52 @@ def test_digest_skips_phase_baseline_in_addressed_counts() -> None:
         state=state, recent_events=events, seat_names={2: "Bob"},
     )
     assert "席2 Bob: 1回" in out
+
+
+def test_digest_renders_recent_speech_block_so_vote_llm_sees_seer_results() -> None:
+    """Regression: the vote / night decision LLM previously saw only
+    the CO-claims summary (席9 が seer) without any actual content. So
+    when ユリコ called SQ black, that fact never reached the vote
+    prompt and ラキオ ended up voting セツ instead of SQ. The digest
+    must include the recent speech text so the decision LLM can
+    align with what was said.
+    """
+    state = _state(
+        co_claims=(
+            CoClaim(seat=9, role_claim="seer", declared_at_event_id="ev-co1"),
+        ),
+    )
+    events = [
+        _ev(speaker_seat=9, text="この身、占い師。SQ黒。"),
+        _ev(speaker_seat=3, text="僕の霊媒結果はシゲミチ狼。SQ処刑しよう。"),
+    ]
+    out = build_public_digest(
+        state=state, recent_events=events,
+        seat_names={3: "Rakio", 9: "Yuriko"},
+    )
+    assert "## 直近の発言 (古い順)" in out
+    assert "席9 Yuriko" in out
+    assert "SQ黒" in out
+    assert "席3 Rakio" in out
+    assert "シゲミチ狼" in out
+
+
+def test_digest_renders_past_votes_when_provided() -> None:
+    """The completed-day ballot ledger lets the LLM reason about who
+    voted whom historically — same data the SpeakArbiter already feeds
+    discussion-time speeches via LogicPacket.past_votes.
+    """
+    state = _state()
+    past_votes = (
+        (1, 0, ((1, 7), (2, 7), (3, 7), (4, 1), (5, None))),
+    )
+    out = build_public_digest(
+        state=state, recent_events=[],
+        seat_names={1: "Alice", 2: "Bob", 3: "Carol", 4: "Dave",
+                    5: "Eve", 7: "Frank"},
+        past_votes=past_votes,
+    )
+    assert "## 公開された投票履歴" in out
+    assert "day1 投票" in out
+    assert "席1 Alice → 席7 Frank" in out
+    assert "席5 Eve → 棄権" in out
