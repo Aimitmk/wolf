@@ -1485,6 +1485,230 @@ async def test_arbiter_cleanup_game_drops_only_target_game(repo: SqliteRepo) -> 
     assert arb._playback_deadlines["req-g2-c"] == 5_000
 
 
+async def test_runoff_dispatch_picks_tied_llm_candidates_in_order(
+    repo: SqliteRepo,
+) -> None:
+    """In DAY_RUNOFF_SPEECH the arbiter ignores the regular speech_count
+    rotation and dispatches to **tied** LLM candidates, in seat-no order,
+    one at a time. After each accepted SpeakResult, ``runoff_speech_done``
+    is flipped so the engine's `plan_runoff_speech_to_runoff` can advance
+    once the last tied candidate finishes. Reproduces the production bug
+    where Master's rounds-mode batch silently ran in reactive_voice mode
+    and TTS never played.
+    """
+    from wolfbot.domain.models import Vote
+
+    g = Game(
+        id="rv-runoff",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+        Seat(seat_no=3, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in ((1, Role.WEREWOLF), (2, Role.SEER), (3, Role.MEDIUM)):
+        await repo.set_player_role(g.id, sn, role)
+
+    # Round-0 votes that produce tied=(1, 2). Voter 3 abstains so the
+    # tally is 1=1, 2=1 — clean two-way tie.
+    for voter, target in ((1, 2), (2, 1), (3, None)):
+        await repo.insert_vote(
+            Vote(game_id=g.id, day=1, round=0, voter_seat=voter,
+                 target_seat=target, submitted_at=1)
+        )
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_RUNOFF_SPEECH)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_RUNOFF_SPEECH,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "setsu": [], "gina": []}
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+        ("npc_gina", "gina", 3),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    intros: list[int] = []  # captured runoff_announce calls
+
+    async def _intro(seat: Seat) -> None:
+        intros.append(seat.seat_no)
+
+    wakes: list[str] = []
+
+    def _wake(game_id: str) -> None:
+        wakes.append(game_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+        runoff_announce=_intro,
+        runoff_wake=_wake,
+    )
+
+    # First dispatch: seat 1 (lowest tied seat-no).
+    await arb.try_dispatch_next(g.id)
+    assert intros == [1], "Master must voice the candidate intro before TTS"
+    assert bufs["raqio"], "席1 ラキオ must receive the SpeakRequest"
+    assert not bufs["setsu"]
+    assert not bufs["gina"], "席3 ジナ is not a tied candidate — never picked"
+
+    seat_repr, reason = await _fetch_selection_reason(repo, g.id)
+    assert seat_repr == "1"
+    assert reason == "runoff_candidate"
+
+    # NPC accepts → engine wakes, runoff_speech_done flips.
+    req_msg = next(m for m in bufs["raqio"] if '"speak_request"' in m)
+    import json as _json
+    req_payload = _json.loads(req_msg)
+    request_id = req_payload["request_id"]
+    result = SpeakResult(
+        ts=2100, trace_id="t", request_id=request_id,
+        npc_id="npc_raqio", phase_id=phase_id,
+        status="accepted",
+        text="私は皆さんの推理に矛盾を感じています。投票先を見直してほしいです。",
+    )
+    ok, _ = await arb.handle_speak_result(
+        result, current_phase_id=phase_id, day=1, phase=Phase.DAY_RUNOFF_SPEECH,
+    )
+    assert ok
+    progress_seat1 = await repo.load_llm_speech_progress(g.id, 1, 1)
+    assert progress_seat1[4] is True, "runoff_speech_done must flip on accept"
+    assert g.id in wakes, "engine must wake so the phase can advance"
+
+    # Simulate playback completion so the serial-speech gate releases —
+    # the live wiring kicks try_dispatch_next on playback_finished.
+    await arb.handle_playback_finished(
+        PlaybackFinished(
+            ts=2200, trace_id="t", request_id=request_id,
+            npc_id="npc_raqio",
+            started_at_ms=2150, finished_at_ms=2200,
+        )
+    )
+
+    # Second dispatch: seat 2 (next tied seat-no).
+    bufs["raqio"].clear()
+    bufs["setsu"].clear()
+    bufs["gina"].clear()
+    intros.clear()
+    await arb.try_dispatch_next(g.id)
+    assert intros == [2]
+    assert bufs["setsu"], "席2 セツ must receive the SpeakRequest second"
+    assert not bufs["raqio"], "席1 already done — must not be re-picked"
+    assert not bufs["gina"]
+
+
+async def test_runoff_dispatch_marks_done_on_offline_npc(
+    repo: SqliteRepo,
+) -> None:
+    """A tied candidate whose NPC bot is offline must be marked done so
+    the phase advances rather than stalling on a permanently-silent seat.
+    """
+    from wolfbot.domain.models import Vote
+
+    g = Game(
+        id="rv-runoff-offline",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    for seat in (
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+        Seat(seat_no=3, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+    ):
+        await repo.insert_seat(g.id, seat)
+    for sn, role in ((1, Role.WEREWOLF), (2, Role.SEER), (3, Role.MEDIUM)):
+        await repo.set_player_role(g.id, sn, role)
+    # Tie: seats 1 and 2 (voter 3 abstains).
+    for voter, target in ((1, 2), (2, 1), (3, None)):
+        await repo.insert_vote(
+            Vote(game_id=g.id, day=1, round=0, voter_seat=voter,
+                 target_seat=target, submitted_at=1)
+        )
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_RUNOFF_SPEECH)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_RUNOFF_SPEECH,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        )
+    )
+
+    # ONLY seat 2's NPC bot is online. Seat 1 (also tied) has no NPC.
+    registry = InMemoryNpcRegistry()
+    buf2: list[str] = []
+    registry.register(
+        npc_id="npc_setsu", discord_bot_user_id="bot_setsu",
+        supported_voices=(), version="1",
+        send=_captured_send(buf2),
+        now_ms=1000, persona_key="setsu",
+    )
+    registry.assign("npc_setsu", seat=2, game_id=g.id, phase_id=phase_id)
+
+    intros: list[int] = []
+
+    async def _intro(seat: Seat) -> None:
+        intros.append(seat.seat_no)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+        runoff_announce=_intro,
+    )
+
+    await arb.try_dispatch_next(g.id)
+
+    # Seat 1 had no online NPC → marked done. Seat 2 is online → got
+    # the SpeakRequest with intro voiced.
+    progress_seat1 = await repo.load_llm_speech_progress(g.id, 1, 1)
+    assert progress_seat1[4] is True, "offline candidate must be marked done"
+    assert intros == [2]
+    assert buf2, "online tied candidate must receive the SpeakRequest"
+
+
 def test_logic_packet_builder_includes_co_claims_in_summary() -> None:
     state = PublicDiscussionState(
         game_id="g",

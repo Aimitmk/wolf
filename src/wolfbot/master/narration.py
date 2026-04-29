@@ -277,8 +277,27 @@ def render_master_narration(
     return handler(entry, ctx)
 
 
+def render_runoff_candidate_intro(seat: Seat) -> str:
+    """Levi-styled introduction line for a runoff candidate's speech.
+
+    Spoken by Master in VC right before SpeakArbiter dispatches the
+    candidate's SpeakRequest, so listeners always know whose final
+    speech is starting (the same way 「占い師の発表」 patterns name the
+    speaker out loud). Uses the same emoji-stripping logic as
+    ``_seat_label`` so the readout pronounces the persona name cleanly.
+    """
+    name = seat.display_name.lstrip()
+    while name and not (name[0].isalnum() or "぀" <= name[0] <= "ヿ"):
+        name = name[1:]
+    name = name.strip() or seat.display_name
+    return (
+        f"続いて、{name} 様の最終演説でございます。どうぞ。"
+    )
+
+
 __all__ = [
     "NarrationContext",
     "NarrationOutput",
     "render_master_narration",
+    "render_runoff_candidate_intro",
 ]

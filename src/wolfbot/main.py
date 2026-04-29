@@ -712,10 +712,42 @@ async def _run() -> None:
 
         _npc_registry_ref.append(npc_registry)
 
+        # Late-bound holder so arbiter can call into master_tts (built
+        # below) without reordering construction. GameService is already
+        # in scope so we can pin it immediately.
+        _master_tts_holder: list[Any] = []
+        _game_service_holder: list[Any] = [game_service]
+
+        async def _runoff_announce(seat: Any) -> None:
+            """Levi voice-introduces a tied runoff candidate before TTS."""
+            from wolfbot.master.narration import render_runoff_candidate_intro
+
+            if not _master_tts_holder:
+                return
+            tts = _master_tts_holder[0]
+            try:
+                async with tts.suppress_npc_dispatch(arbiter):
+                    await tts.speak(render_runoff_candidate_intro(seat))
+            except Exception:
+                log.exception(
+                    "runoff_candidate_intro_failed seat=%d",
+                    getattr(seat, "seat_no", -1),
+                )
+
+        def _runoff_wake(game_id: str) -> None:
+            if not _game_service_holder:
+                return
+            try:
+                _game_service_holder[0].wake.wake(game_id)
+            except Exception:
+                log.exception("runoff_wake_invocation_failed game=%s", game_id)
+
         arbiter = SpeakArbiter(
             repo=repo,
             registry=npc_registry,
             discussion=discussion_service,
+            runoff_announce=_runoff_announce,
+            runoff_wake=_runoff_wake,
         )
         _reactive_phase_cb.append(arbiter)
         recovery._reactive_voice_sweep = arbiter.reactive_voice_recovery_sweep
@@ -791,6 +823,10 @@ async def _run() -> None:
             voice_id=str(settings.MASTER_TTS_VOICE_ID),
             vc_ref=master_vc_ref,
         )
+        # Hand the live MasterTtsPlayback to the arbiter's runoff_announce
+        # closure (built earlier with a late-binding holder so we didn't
+        # need to reorder construction).
+        _master_tts_holder.append(master_tts)
 
         async def _post_to_vc_chat(game: Any, text: str) -> None:
             """Post `text` to the VC's attached text chat.

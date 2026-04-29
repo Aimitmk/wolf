@@ -451,6 +451,25 @@ class GameService:
             # Same-phase grace re-commit must not redispatch.
             if previous_phase is Phase.DAY_RUNOFF_SPEECH:
                 return
+            # In reactive_voice mode the rounds-mode batch (Master gameplay
+            # LLM → Discord text post) skips the entire NPC-bot TTS path,
+            # so candidates' final speeches end up as silent text. Route
+            # through the reactive phase-enter callback instead — it joins
+            # VC, seeds the phase baseline, assigns NPCs to seats, and
+            # kicks SpeakArbiter, which now picks tied candidates one at a
+            # time and dispatches via the NPC bot pipeline (with VOICEVOX
+            # playback). `runoff_speech_done` is marked by the arbiter as
+            # each candidate's SpeakResult or failure path resolves.
+            if new_game.discussion_mode == "reactive_voice":
+                if self._on_reactive_phase_enter is not None:
+                    try:
+                        await self._on_reactive_phase_enter(new_game.id)
+                    except Exception:
+                        log.exception(
+                            "reactive_voice runoff phase enter failed for %s",
+                            new_game.id,
+                        )
+                return
             round0 = await self.repo.load_votes(new_game.id, day=new_game.day_number, round_=0)
             alive_set = {p.seat_no for p in players_after if p.alive}
             tied = list(compute_vote_result(round0, alive_set).tied)

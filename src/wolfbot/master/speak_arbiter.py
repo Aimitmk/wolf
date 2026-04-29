@@ -24,6 +24,7 @@ runtime. Tests substitute `FakeMasterWsServer` and a tempfile-backed repo.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -37,6 +38,8 @@ from wolfbot.domain.discussion import (
     make_phase_id,
 )
 from wolfbot.domain.enums import Phase, Role
+from wolfbot.domain.models import Seat
+from wolfbot.domain.rules import compute_vote_result
 from wolfbot.domain.ws_messages import (
     PlaybackAuthorized,
     PlaybackFailed,
@@ -78,6 +81,22 @@ _RECENT_SPEECH_CAP = 20
 #   or when a buggy upstream tries to dispatch the same seat twice.
 _PAIR_VOLLEY_WINDOW = 4
 _CONSECUTIVE_CAP = 3
+
+
+def _parse_day_from_phase_id(phase_id: str) -> int | None:
+    """Extract the integer day from a canonical phase_id token.
+
+    Phase ids look like ``gid::day3::DAY_RUNOFF_SPEECH::1``; we walk the
+    ``::`` segments and look for one matching ``dayN``. Returns ``None``
+    when the format doesn't match — the caller treats that as "skip,
+    don't mark done" rather than crashing the WS handler.
+    """
+    for token in phase_id.split("::"):
+        if token.startswith("day"):
+            tail = token[3:]
+            if tail.isdigit():
+                return int(tail)
+    return None
 
 
 def _compute_demoted_seats(
@@ -153,12 +172,27 @@ class SpeakArbiter:
         discussion: DiscussionService,
         config: SpeakArbiterConfig | None = None,
         now_ms: Callable[[], int] = default_now_ms,
+        runoff_announce: Callable[[Seat], Awaitable[None]] | None = None,
+        runoff_wake: Callable[[str], None] | None = None,
     ) -> None:
         self.repo = repo
         self.registry = registry
         self.discussion = discussion
         self.config = config or SpeakArbiterConfig()
         self._now_ms = now_ms
+        # Optional Master-narration hook fired right before dispatching a
+        # tied LLM candidate's SpeakRequest in DAY_RUNOFF_SPEECH so Levi
+        # can name the speaker ("続いて、X 様の最終演説でございます。").
+        # The arbiter awaits the callback so the announcement plays
+        # before the NPC's TTS so they don't overlap in VC.
+        self._runoff_announce = runoff_announce
+        # Optional engine-wake hook called when every tied LLM candidate
+        # has finished or been marked done; lets DAY_RUNOFF_SPEECH advance
+        # immediately to DAY_RUNOFF instead of waiting for the deadline.
+        self._runoff_wake = runoff_wake
+        # Strong refs to per-runoff watchdog tasks so they don't get
+        # garbage-collected mid-sleep.
+        self._runoff_watchdog_tasks: set[asyncio.Task[None]] = set()
         self._pending: dict[str, _PendingRequest] = {}
         # Serial-speech gate: a request_id is in `_active_playback` between
         # PlaybackAuthorized and the closing tts_failed / playback_finished /
@@ -543,15 +577,35 @@ class SpeakArbiter:
             return (False, "unknown_request")
         if result.phase_id != current_phase_id:
             await _record_rejection("stale_phase")
+            await self._mark_runoff_done_if_phase(
+                game_id=pending.game_id,
+                phase_id=result.phase_id,
+                seat_no=pending.seat_no,
+            )
             return (False, "stale_phase")
         if now > pending.expires_at_ms:
             await _record_rejection("expired_request")
+            await self._mark_runoff_done_if_phase(
+                game_id=pending.game_id,
+                phase_id=result.phase_id,
+                seat_no=pending.seat_no,
+            )
             return (False, "expired_request")
         if result.status != "accepted" or not result.text:
             await _record_rejection("speaker_declined")
+            await self._mark_runoff_done_if_phase(
+                game_id=pending.game_id,
+                phase_id=result.phase_id,
+                seat_no=pending.seat_no,
+            )
             return (False, "speaker_declined")
         if len(result.text) > self.config.max_chars_reactive:
             await _record_rejection("utterance_too_long")
+            await self._mark_runoff_done_if_phase(
+                game_id=pending.game_id,
+                phase_id=result.phase_id,
+                seat_no=pending.seat_no,
+            )
             return (False, "utterance_too_long")
 
         # Accepted. Persist result + SpeechEvent + open playback row.
@@ -630,6 +684,15 @@ class SpeakArbiter:
             playback_deadline_ms=deadline,
         )
         await _send(authorized.model_dump_json())
+        # Runoff candidate: mark this seat's speech done so the engine
+        # can advance to DAY_RUNOFF as soon as every tied LLM has spoken.
+        # Done after the SpeechEvent is recorded so the runoff_speech log
+        # row exists when `plan_runoff_speech_to_runoff` polls progress.
+        await self._mark_runoff_done_if_phase(
+            game_id=pending.game_id,
+            phase_id=result.phase_id,
+            seat_no=pending.seat_no,
+        )
         return (True, None)
 
     # ------------------------------------------------------------- TTS / playback
@@ -712,6 +775,9 @@ class SpeakArbiter:
         Called on phase entry, after each new public speech event, and after
         playback completes. No-op when the serial-speech gate is blocked, no
         NPC is online, or no game is in a reactive_voice discussion phase.
+
+        DAY_RUNOFF_SPEECH uses a separate picker (`_dispatch_runoff_next`)
+        constrained to tied candidates with one shot each — see that method.
         """
         # Close expired playback rows in DB before checking the gate.
         await self._sweep_expired_playback()
@@ -726,6 +792,10 @@ class SpeakArbiter:
 
         block = self.is_blocked()
         if block is not None:
+            return
+
+        if game.phase is Phase.DAY_RUNOFF_SPEECH:
+            await self._dispatch_runoff_next(game_id, game.day_number)
             return
 
         state = await self.rebuild_public_state(
@@ -835,6 +905,240 @@ class SpeakArbiter:
                 public_state_snapshot=snapshot,
             )
             return
+
+    # ------------------------------------------------------------- runoff dispatch
+
+    async def _dispatch_runoff_next(self, game_id: str, day: int) -> None:
+        """Dispatch the next tied LLM candidate's final speech.
+
+        Candidate set = round-0 tied seats ∩ alive ∩ LLM seat ∩
+        ``runoff_speech_done = False``. The arbiter dispatches them
+        sequentially in seat-no order: pick → optional Master narration
+        intro → SpeakRequest → NPC TTS playback. After each candidate
+        resolves (accepted or any failure path), `runoff_speech_done` is
+        flipped so the engine's `plan_runoff_speech_to_runoff` advances
+        as soon as the last one finishes.
+
+        When no eligible candidate remains (everyone done, or the only
+        ones left have no online NPC bot), `runoff_wake` is fired so the
+        engine doesn't sit on the deadline.
+        """
+        seats = await self.repo.load_seats(game_id)
+        seats_by_no: dict[int, Seat] = {s.seat_no: s for s in seats}
+        players = await self.repo.load_players(game_id)
+        alive_set = {p.seat_no for p in players if p.alive}
+        round0 = await self.repo.load_votes(game_id, day=day, round_=0)
+        outcome = compute_vote_result(round0, alive_set)
+        tied = list(outcome.tied)
+        if not tied:
+            # Edge: no tied set (e.g. recovery race) → just wake so the
+            # engine can re-plan against fresh state.
+            self._maybe_wake_runoff(game_id)
+            return
+
+        # Tied LLM seats whose runoff speech hasn't been recorded yet.
+        # Seat-no order is the user-visible "who speaks first" axis; we
+        # follow the same order rounds-mode used so logs / replays line
+        # up between modes.
+        eligible: list[Seat] = []
+        for seat_no in sorted(tied):
+            seat = seats_by_no.get(seat_no)
+            if seat is None or not seat.is_llm:
+                continue
+            progress = await self.repo.load_llm_speech_progress(
+                game_id, day, seat_no
+            )
+            if progress[4]:  # runoff_speech_done
+                continue
+            eligible.append(seat)
+
+        if not eligible:
+            # Every tied LLM has already spoken (or been skipped). Wake
+            # the engine so DAY_RUNOFF_SPEECH advances to DAY_RUNOFF
+            # without waiting for the safety-net deadline.
+            self._maybe_wake_runoff(game_id)
+            return
+
+        # Find the first eligible seat with an online NPC bot. If a tied
+        # candidate has no online NPC (rare: misconfigured persona, bot
+        # crash before rejoin), mark them done and skip — otherwise the
+        # phase would stall forever.
+        chosen: Seat | None = None
+        chosen_npc_id: str | None = None
+        for seat in eligible:
+            entry = self._find_npc_for_seat(game_id, seat.seat_no)
+            if entry is None:
+                log.info(
+                    "runoff_speech_no_online_npc game=%s seat=%d — "
+                    "marking done so phase advances",
+                    game_id,
+                    seat.seat_no,
+                )
+                try:
+                    await self.repo.mark_llm_runoff_speech_done(
+                        game_id, day, seat.seat_no
+                    )
+                except Exception:
+                    log.exception(
+                        "runoff_speech_done_mark_failed game=%s seat=%d",
+                        game_id,
+                        seat.seat_no,
+                    )
+                continue
+            chosen = seat
+            chosen_npc_id = entry.npc_id
+            break
+
+        if chosen is None or chosen_npc_id is None:
+            # All remaining tied LLMs were skipped above. Wake the
+            # engine so it sees the marks we just wrote.
+            self._maybe_wake_runoff(game_id)
+            return
+
+        # Master narration: name the candidate before they speak. Awaited
+        # so the intro finishes before the NPC's own TTS starts.
+        if self._runoff_announce is not None:
+            try:
+                await self._runoff_announce(chosen)
+            except Exception:
+                log.exception(
+                    "runoff_announce_failed game=%s seat=%d",
+                    game_id,
+                    chosen.seat_no,
+                )
+
+        # Re-rebuild state AFTER the announcement so a fresh
+        # phase_baseline / event log is folded in. The state is also
+        # what `dispatch_request` consumes for the LogicPacket.
+        state = await self.rebuild_public_state(
+            game_id=game_id, day=day, phase=Phase.DAY_RUNOFF_SPEECH
+        )
+        if state is None:
+            self._maybe_wake_runoff(game_id)
+            return
+
+        snapshot: dict[str, Any] = {
+            "phase_id": state.phase_id,
+            "day": state.day,
+            "phase": Phase.DAY_RUNOFF_SPEECH.value,
+            "tied_candidates": sorted(tied),
+            "alive_seat_nos": sorted(state.alive_seat_nos),
+        }
+        request, reason = await self.dispatch_request(
+            state=state,
+            candidate_npc_id=chosen_npc_id,
+            seat_no=chosen.seat_no,
+            game_id=game_id,
+            selection_reason="runoff_candidate",
+            public_state_snapshot=snapshot,
+        )
+        if request is None:
+            # Dispatch failed (npc_offline, ws_send_failed, gate held).
+            # The npc_offline + ws_send_failed cases would leave this
+            # seat permanently un-spoken, so mark done and re-dispatch
+            # so the phase keeps moving. ``queue_busy`` /
+            # ``human_currently_speaking`` are transient — just re-poll
+            # later via the normal try_dispatch_next pathway.
+            if reason in ("npc_offline", "ws_send_failed"):
+                await self._mark_runoff_done_if_phase(
+                    game_id=game_id,
+                    phase_id=state.phase_id,
+                    seat_no=chosen.seat_no,
+                )
+                await self.try_dispatch_next(game_id)
+            return
+        # Watchdog: if the NPC never returns a SpeakResult before the
+        # request's TTL expires, the phase would stall forever. Spawn
+        # a one-shot task that marks the seat done and re-dispatches
+        # so the engine eventually advances. The mark is idempotent
+        # (UPSERT), so a result that arrives in the same window is fine.
+        ttl_s = max(1.0, self.config.request_ttl_ms / 1000.0)
+        request_id = request.request_id
+        seat_no = chosen.seat_no
+        phase_id = state.phase_id
+
+        async def _watchdog() -> None:
+            try:
+                await asyncio.sleep(ttl_s)
+            except asyncio.CancelledError:
+                return
+            if request_id not in self._pending:
+                return  # SpeakResult already resolved this slot.
+            log.info(
+                "runoff_request_watchdog_fired game=%s seat=%d request=%s",
+                game_id,
+                seat_no,
+                request_id,
+            )
+            await self._mark_runoff_done_if_phase(
+                game_id=game_id,
+                phase_id=phase_id,
+                seat_no=seat_no,
+            )
+            self._pending.pop(request_id, None)
+            try:
+                await self.try_dispatch_next(game_id)
+            except Exception:
+                log.exception(
+                    "runoff_watchdog_redispatch_failed game=%s", game_id
+                )
+
+        task = asyncio.create_task(_watchdog(), name=f"runoff-watchdog-{request_id}")
+        self._runoff_watchdog_tasks.add(task)
+        task.add_done_callback(self._runoff_watchdog_tasks.discard)
+
+    def _find_npc_for_seat(
+        self, game_id: str, seat_no: int
+    ) -> Any | None:
+        """Lookup the registry entry pinned to ``(game_id, seat_no)``."""
+        for entry in self.registry.all_online():
+            if entry.assigned_seat == seat_no and entry.game_id == game_id:
+                return entry
+        return None
+
+    def _maybe_wake_runoff(self, game_id: str) -> None:
+        if self._runoff_wake is None:
+            return
+        try:
+            self._runoff_wake(game_id)
+        except Exception:
+            log.exception("runoff_wake_failed game=%s", game_id)
+
+    async def _mark_runoff_done_if_phase(
+        self,
+        *,
+        game_id: str,
+        phase_id: str,
+        seat_no: int,
+    ) -> None:
+        """Best-effort `runoff_speech_done = 1` for a finished SpeakResult.
+
+        Reads the day from the phase_id format (`gid::dayN::PHASE::seq`)
+        so we don't need an extra DB hit. No-op when the phase token in
+        ``phase_id`` isn't DAY_RUNOFF_SPEECH (= the result was for an
+        ordinary discussion utterance and there's no progress to flip).
+        """
+        if "::DAY_RUNOFF_SPEECH::" not in phase_id:
+            return
+        day = _parse_day_from_phase_id(phase_id)
+        if day is None:
+            return
+        try:
+            await self.repo.mark_llm_runoff_speech_done(
+                game_id, day, seat_no
+            )
+        except Exception:
+            log.exception(
+                "runoff_speech_done_mark_failed game=%s day=%d seat=%d",
+                game_id,
+                day,
+                seat_no,
+            )
+            return
+        # Wake the engine so `_plan_next` can re-evaluate immediately
+        # whether all tied candidates are done. Without this the phase
+        # would sit until the next deadline tick.
+        self._maybe_wake_runoff(game_id)
 
     # ------------------------------------------------------------- game-end cleanup
 
