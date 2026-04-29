@@ -73,6 +73,7 @@ def test_apply_then_rebuild_agree() -> None:
     assert folded.co_claims == rebuilt.co_claims
     assert folded.silent_seats == rebuilt.silent_seats
     assert folded.recent_speech_event_ids == rebuilt.recent_speech_event_ids
+    assert folded.speech_counts == rebuilt.speech_counts
 
 
 def test_silent_seats_excludes_dead_seats() -> None:
@@ -237,3 +238,36 @@ def test_co_claim_legacy_substring_fallback_still_works_when_field_absent() -> N
     state = rebuild_public_state_from_events(events)
     assert state is not None
     assert [(c.seat, c.role_claim) for c in state.co_claims] == [(1, "seer")]
+
+
+def test_speech_counts_increment_per_speaker() -> None:
+    """`speech_counts` records how many non-baseline events each seat has
+    produced this phase. The arbiter's pick logic reads this so a
+    talkative NPC drops below quieter ones once everyone has spoken at
+    least once.
+    """
+    events = _seed(
+        alive=[1, 2, 3],
+        events_payload=[
+            (1, "ラキオ1"),
+            (2, "セツ1"),
+            (1, "ラキオ2"),
+            (1, "ラキオ3"),
+        ],
+    )
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.speech_counts == {1: 3, 2: 1}
+    # silent_seats stays binary — seat 3 never spoke. The new field is
+    # additive and complements (not replaces) the silent baseline.
+    assert state.silent_seats == frozenset({3})
+
+
+def test_speech_counts_excludes_baseline_sentinel() -> None:
+    """The `phase_baseline` sentinel has speaker_seat=None, so it must
+    not bump any seat's count.
+    """
+    events = _seed(alive=[1, 2, 3], events_payload=[])
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.speech_counts == {}

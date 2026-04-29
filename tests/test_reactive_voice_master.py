@@ -948,6 +948,197 @@ async def test_try_dispatch_next_avoids_immediate_repeat_after_first_round(
     assert not bufs["gina"]
 
 
+async def test_try_dispatch_next_prefers_lower_speech_count(
+    repo: SqliteRepo,
+) -> None:
+    """The seat with the lowest phase-wide speech_count wins, even when
+    every alive NPC has spoken at least once (so silent_seats is empty).
+
+    Reproduces the in-the-wild imbalance where the lowest-seat-number NPC
+    monopolised once the silent rotation completed: with the binary
+    silent_seats only, seat 1 with count=4 still tied with seat 3 at
+    count=1 on the silent axis and won by seat tiebreak. The new sort
+    treats count as a continuous signal so seat 3 is preferred.
+    """
+    g = Game(
+        id="rv-count",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+        Seat(seat_no=3, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 2, Role.MADMAN)
+    await repo.set_player_role(g.id, 3, Role.SEER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        )
+    )
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    # Counts after seeding: seat1=4, seat2=4, seat3=1. Seat 3 also speaks
+    # in the recent window (event ts=60) so the pair-volley demotion
+    # gate stays quiet — the only differentiator left is the per-seat
+    # speech_count. Without that axis seat 1 wins by lowest seat tie-
+    # break; with it seat 3 beats both 4-counts.
+    payload = [
+        (10, 1, "ラキオ1巡目"),              # 1:1
+        (20, 2, "セツの占いCO"),            # 2:1 (CO → has_info=True)
+        (30, 1, "ラキオ反論1"),             # 1:2
+        (40, 2, "セツ反応1"),               # 2:2
+        (50, 1, "ラキオ反論2"),             # 1:3
+        (55, 2, "セツ反応2"),               # 2:3
+        (60, 3, "ジナの差し込み"),           # 3:1 (breaks pair window)
+        (70, 1, "ラキオ反論3"),             # 1:4
+        (80, 2, "セツ反応3"),               # 2:4
+    ]
+    for ts, seat, text in payload:
+        kwargs: dict[str, object] = dict(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=seat, text=text, created_at_ms=ts,
+        )
+        if "占いCO" in text:
+            kwargs["co_declaration"] = "seer"
+        await store.insert(make_npc_generated_event(**kwargs))  # type: ignore[arg-type]
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "setsu": [], "gina": []}
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+        ("npc_gina", "gina", 3),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+    )
+    await arb.try_dispatch_next(g.id)
+
+    assert bufs["gina"], "ジナ (count=1) must outrank counts of 4"
+    assert not bufs["raqio"]
+    assert not bufs["setsu"]
+
+    seat_repr, reason = await _fetch_selection_reason(repo, g.id)
+    assert seat_repr == "3"
+    assert reason == "low_count_rotation"
+
+
+async def test_try_dispatch_next_lru_when_speech_counts_tied(
+    repo: SqliteRepo,
+) -> None:
+    """Two NPCs at equal speech_count — the just-spoke seat is demoted
+    (LRU), and the remaining seat wins. The reason is ``lru_rotation``,
+    not ``low_count_rotation`` (no count differential to leverage).
+    """
+    g = Game(
+        id="rv-lru-tied",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 2, Role.SEER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2], created_at_ms=1,
+        )
+    )
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    # seat 2 occupies the just-spoke slot at the end so LRU pushes us
+    # back to seat 1. Both seats have count=2 so the count axis is
+    # neutral.
+    for ts, seat in ((10, 1), (20, 2), (30, 1), (40, 2)):
+        await store.insert(
+            make_npc_generated_event(
+                game_id=g.id, phase_id=phase_id, day=1,
+                phase=Phase.DAY_DISCUSSION,
+                speaker_seat=seat, text=f"seat {seat} ts={ts}",
+                co_declaration="seer" if (ts, seat) == (10, 1) else None,
+                created_at_ms=ts,
+            )
+        )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "setsu": []}
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+    )
+    await arb.try_dispatch_next(g.id)
+
+    assert bufs["raqio"]
+    assert not bufs["setsu"]
+    seat_repr, reason = await _fetch_selection_reason(repo, g.id)
+    assert seat_repr == "1"
+    assert reason == "lru_rotation"
+
+
 async def test_pair_volley_demotion_fires_after_4_low_info_speeches(
     repo: SqliteRepo,
 ) -> None:

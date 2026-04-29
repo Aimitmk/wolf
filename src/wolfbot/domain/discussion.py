@@ -190,3 +190,13 @@ class PublicDiscussionState(BaseModel):
     # take it as a CO trigger and wolf-side NPCs can decide whether to
     # fake CO.
     pending_role_callouts: frozenset[str] = frozenset()
+    # Per-seat utterance count within this phase (non-baseline events
+    # only). The arbiter prefers seats with the lowest count so a
+    # talkative NPC doesn't monopolize the phase — the binary
+    # ``silent_seats`` was indistinguishable once every seat had spoken
+    # once, after which the rotation collapsed to seat-number tiebreak
+    # and the lowest-seat NPC kept winning. ``speech_counts`` extends
+    # that signal across the entire phase so wolf-side NPCs at higher
+    # seat numbers still get fair speaking turns (= more chances to
+    # fake-CO).
+    speech_counts: dict[int, int] = Field(default_factory=dict)

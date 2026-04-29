@@ -557,6 +557,13 @@ def apply_speech_event(
     last_speaker_seat = (
         speaker if speaker is not None else state.last_speaker_seat
     )
+    # Per-seat utterance count within the phase. Increment on every
+    # non-baseline speaker; the arbiter's `_pick_key` reads this so an
+    # NPC who's already spoken N times falls below NPCs who spoke
+    # fewer times.
+    speech_counts = dict(state.speech_counts)
+    if speaker is not None:
+        speech_counts[speaker] = speech_counts.get(speaker, 0) + 1
     # Append (speaker, has_info) to the sliding summary window the
     # arbiter uses for low-info pair-volley detection. ``has_info`` is
     # the structured "did this event move the discussion forward"
@@ -602,6 +609,7 @@ def apply_speech_event(
         last_speaker_seat=last_speaker_seat,
         recent_speech_summary=tuple(summary),
         pending_role_callouts=frozenset(pending_role_callouts),
+        speech_counts=speech_counts,
     )
 
 
@@ -651,6 +659,7 @@ def rebuild_public_state_from_events(
     summary: list[tuple[int, bool]] = []
     seen_co: set[tuple[int, str]] = set()
     pending_role_callouts: set[str] = set()
+    speech_counts: dict[int, int] = {}
     last_addressed_seat: int | None = None
     last_addressed_speaker_seat: int | None = None
     last_addressed_text: str = ""
@@ -661,6 +670,9 @@ def rebuild_public_state_from_events(
         if event.speaker_seat is not None:
             spoken_seats.add(event.speaker_seat)
             last_speaker_seat = event.speaker_seat
+            speech_counts[event.speaker_seat] = (
+                speech_counts.get(event.speaker_seat, 0) + 1
+            )
         recent_ids.append(event.event_id)
         # Mirror the per-event update logic in `_apply_event_to_state`:
         # only consume the standing address when the NPC speaker IS the
@@ -718,6 +730,7 @@ def rebuild_public_state_from_events(
     state.last_speaker_seat = last_speaker_seat
     state.recent_speech_summary = tuple(summary[-6:])
     state.pending_role_callouts = frozenset(pending_role_callouts)
+    state.speech_counts = speech_counts
     return state
 
 

@@ -732,7 +732,12 @@ class SpeakArbiter:
         #      speaker cap. Demoted seats fall to the bottom regardless
         #      of being addressed, so a 3rd NPC can break in.
         #   2. addressed seat — recent utterance's `addressed_seat_no`.
-        #   3. silent seats — NPCs who haven't yet spoken in this phase.
+        #   3. lowest speech_count this phase — generalises the old
+        #      binary silent_seats: a 0-count seat is still preferred,
+        #      but a 1-count seat now also wins over a 5-count one. Stops
+        #      the lowest-seat NPC monopolising once everyone has spoken
+        #      once and gives wolf-side seats at higher seat numbers a
+        #      fair chance to fake-CO.
         #   4. NOT the immediate previous speaker (LRU rotation).
         #   5. lowest assigned_seat as a stable tiebreaker.
         addressed = state.last_addressed_seat
@@ -746,17 +751,27 @@ class SpeakArbiter:
             is_addressed = 0 if (
                 addressed is not None and seat == addressed
             ) else 1
-            in_silent = 0 if seat in state.silent_seats else 1
+            count = state.speech_counts.get(seat, 0)
             is_just_spoke = 1 if (
                 last_speaker is not None and seat == last_speaker
             ) else 0
-            return (is_demoted, is_addressed, in_silent, is_just_spoke, seat)
+            return (is_demoted, is_addressed, count, is_just_spoke, seat)
 
         online_npc_seats = sorted(
             e.assigned_seat
             for e in online
             if e.assigned_seat is not None and e.game_id == game_id
         )
+        # Counts per seat, restricted to the candidates the arbiter can
+        # actually pick — used both for the snapshot and to classify the
+        # reason as ``low_count_rotation`` when the winning seat has
+        # spoken but strictly less than someone else online.
+        candidate_counts: dict[int, int] = {
+            seat: state.speech_counts.get(seat, 0)
+            for seat in online_npc_seats
+            if seat in state.alive_seat_nos
+        }
+        max_candidate_count = max(candidate_counts.values(), default=0)
         snapshot: dict[str, Any] = {
             "phase_id": state.phase_id,
             "day": state.day,
@@ -767,6 +782,7 @@ class SpeakArbiter:
             "alive_seat_nos": sorted(state.alive_seat_nos),
             "online_npc_seats": online_npc_seats,
             "demoted_seats": sorted(demoted),
+            "speech_counts": sorted(candidate_counts.items()),
         }
 
         for entry in sorted(online, key=_pick_key):
@@ -775,6 +791,7 @@ class SpeakArbiter:
             if entry.assigned_seat not in state.alive_seat_nos:
                 continue
             seat = entry.assigned_seat
+            picked_count = state.speech_counts.get(seat, 0)
             if seat in demoted:
                 # Reached this branch only when EVERY non-demoted
                 # candidate was filtered out (offline / dead / not in
@@ -784,11 +801,21 @@ class SpeakArbiter:
                 reason = "addressed"
             elif seat in state.silent_seats:
                 reason = "silent_rotation"
+            elif demoted:
+                # The pair-volley gate fired and a non-demoted third
+                # party won — labelled distinctly from low_count_rotation
+                # so the viewer keeps showing "stuck volley → diverted to
+                # seat N" even though the speech_count axis happens to
+                # favour the same seat.
+                reason = "low_info_diversion"
+            elif picked_count < max_candidate_count:
+                # Already spoke this phase, but strictly less than some
+                # other online candidate — the speech_count axis is what
+                # broke the tie. Distinct from silent_rotation (count==0)
+                # and from lru_rotation (counts equal, LRU won).
+                reason = "low_count_rotation"
             elif last_speaker is not None and seat != last_speaker:
-                # When at least one seat got demoted *and* we ended up
-                # picking a non-demoted third party, label it so the
-                # viewer can show "stuck volley → diverted to seat N".
-                reason = "low_info_diversion" if demoted else "lru_rotation"
+                reason = "lru_rotation"
             else:
                 reason = "seat_tiebreak"
             await self.dispatch_request(
