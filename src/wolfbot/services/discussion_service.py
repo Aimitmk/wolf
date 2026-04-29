@@ -523,6 +523,9 @@ def apply_speech_event(
         last_addressed_speaker_seat = speaker
         last_addressed_text = event.text
 
+    last_speaker_seat = (
+        speaker if speaker is not None else state.last_speaker_seat
+    )
     return PublicDiscussionState(
         game_id=state.game_id,
         phase_id=state.phase_id,
@@ -537,6 +540,7 @@ def apply_speech_event(
         last_addressed_seat=last_addressed_seat,
         last_addressed_speaker_seat=last_addressed_speaker_seat,
         last_addressed_text=last_addressed_text,
+        last_speaker_seat=last_speaker_seat,
     )
 
 
@@ -587,11 +591,13 @@ def rebuild_public_state_from_events(
     last_addressed_seat: int | None = None
     last_addressed_speaker_seat: int | None = None
     last_addressed_text: str = ""
+    last_speaker_seat: int | None = None
     for event in events:
         if event.source == SpeechSource.PHASE_BASELINE:
             continue
         if event.speaker_seat is not None:
             spoken_seats.add(event.speaker_seat)
+            last_speaker_seat = event.speaker_seat
         recent_ids.append(event.event_id)
         if event.source == SpeechSource.NPC_GENERATED:
             last_addressed_seat = None
@@ -624,6 +630,7 @@ def rebuild_public_state_from_events(
     state.last_addressed_seat = last_addressed_seat
     state.last_addressed_speaker_seat = last_addressed_speaker_seat
     state.last_addressed_text = last_addressed_text
+    state.last_speaker_seat = last_speaker_seat
     return state
 
 

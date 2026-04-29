@@ -450,6 +450,7 @@ function TimeCell({ time }: { time: string }) {
 const ARBITER_REASON_JA: Record<string, string> = {
   addressed: "指名",
   silent_rotation: "未発言ローテ",
+  lru_rotation: "LRO ローテ",
   seat_tiebreak: "席順",
 };
 
@@ -458,8 +459,10 @@ const ARBITER_REASON_TIP: Record<string, string> = {
     "直前の発言で addressed_seat_no がこの NPC の席だったため最優先で選ばれた",
   silent_rotation:
     "このフェーズでまだ発言していない NPC を優先して選んだ",
+  lru_rotation:
+    "全員が一度発言済み — 直前の話者を除外し、席番号の若い順で選んだ",
   seat_tiebreak:
-    "全員が一度発言済み — 席番号の若い順で選んだ",
+    "他の候補が無く、席番号の若い順で選んだ (通常 1 NPC のみ生存時の縮退)",
 };
 
 function ArbiterChip({ decision }: { decision: ArbiterDecision }) {

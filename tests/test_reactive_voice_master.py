@@ -856,6 +856,98 @@ async def test_try_dispatch_next_records_selection_reason_silent_rotation(
     assert reason == "silent_rotation"
 
 
+async def test_try_dispatch_next_avoids_immediate_repeat_after_first_round(
+    repo: SqliteRepo,
+) -> None:
+    """Once `silent_seats` is empty (every alive NPC spoke once), the
+    arbiter must not re-pick the most recent speaker. Without this guard
+    the lowest-seat NPC monopolizes the rest of the phase — observed in
+    the wild where seat 1 (Raqio) spoke 8 times in a row after the
+    rotation.
+    """
+    g = Game(
+        id="rv-lru",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+        Seat(seat_no=3, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 2, Role.SEER)
+    await repo.set_player_role(g.id, 3, Role.VILLAGER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        )
+    )
+    # Simulate a complete first round: every alive NPC spoke once. Last
+    # speaker is seat 1 (Raqio). silent_seats becomes empty.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    for ts, seat_no, text in (
+        (10, 2, "セツ first"),
+        (20, 3, "ジナ first"),
+        (30, 1, "ラキオ first"),  # ラキオ is the most recent speaker
+    ):
+        await store.insert(
+            make_npc_generated_event(
+                game_id=g.id, phase_id=phase_id, day=1,
+                phase=Phase.DAY_DISCUSSION,
+                speaker_seat=seat_no, text=text, created_at_ms=ts,
+            )
+        )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "setsu": [], "gina": []}
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+        ("npc_gina", "gina", 3),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+    )
+    await arb.try_dispatch_next(g.id)
+
+    assert not bufs["raqio"], (
+        "ラキオ was the immediate previous speaker — must NOT be re-picked"
+    )
+    # Seat 2 (Setsu) wins by lowest seat among non-last-speakers.
+    assert bufs["setsu"], "expected next pick to land on seat 2 Setsu"
+    assert not bufs["gina"]
+
+
 async def test_arbiter_cleanup_game_drops_only_target_game(repo: SqliteRepo) -> None:
     """`cleanup_game` is wired into `_on_reactive_game_end` so a long-lived
     Master process doesn't carry stale `_pending` / `_active_playback` /

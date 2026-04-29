@@ -623,25 +623,33 @@ class SpeakArbiter:
         if state is None:
             return
 
-        # Pick the next NPC. Priority order, applied as a 3-key sort:
+        # Pick the next NPC. Priority order, applied as a 4-key sort:
         #   1. addressed seat — if a recent human utterance carries
         #      `addressed_seat_no`, that NPC must reply before anyone else.
         #   2. silent seats — NPCs who haven't yet spoken in this phase win
         #      over those who have. Without this the lowest-seat NPC would
         #      monopolize pure-NPC games where no human speech triggers
-        #      rotation. Once every alive NPC has spoken the bucket becomes
-        #      a no-op and order falls back to seat number.
-        #   3. lowest assigned_seat as a stable tiebreaker.
+        #      rotation.
+        #   3. NOT the immediate previous speaker — once `silent_seats`
+        #      empties (= every alive NPC has spoken once), this is the
+        #      only thing that prevents seat 1 from looping forever. The
+        #      reactive_voice mode previously fell straight through to
+        #      seat number, so seat 1 monopolized the rest of the phase.
+        #   4. lowest assigned_seat as a stable tiebreaker.
         addressed = state.last_addressed_seat
+        last_speaker = state.last_speaker_seat
         online = self.registry.all_online()
 
-        def _pick_key(e: object) -> tuple[int, int, int]:
+        def _pick_key(e: object) -> tuple[int, int, int, int]:
             seat = getattr(e, "assigned_seat", None) or 99
             is_addressed = 0 if (
                 addressed is not None and seat == addressed
             ) else 1
             in_silent = 0 if seat in state.silent_seats else 1
-            return (is_addressed, in_silent, seat)
+            is_just_spoke = 1 if (
+                last_speaker is not None and seat == last_speaker
+            ) else 0
+            return (is_addressed, in_silent, is_just_spoke, seat)
 
         online_npc_seats = sorted(
             e.assigned_seat
@@ -653,6 +661,7 @@ class SpeakArbiter:
             "day": state.day,
             "phase": game.phase.value,
             "last_addressed_seat": addressed,
+            "last_speaker_seat": last_speaker,
             "silent_seats": sorted(state.silent_seats),
             "alive_seat_nos": sorted(state.alive_seat_nos),
             "online_npc_seats": online_npc_seats,
@@ -668,6 +677,8 @@ class SpeakArbiter:
                 reason = "addressed"
             elif seat in state.silent_seats:
                 reason = "silent_rotation"
+            elif last_speaker is not None and seat != last_speaker:
+                reason = "lru_rotation"
             else:
                 reason = "seat_tiebreak"
             await self.dispatch_request(

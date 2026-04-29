@@ -153,3 +153,10 @@ class PublicDiscussionState(BaseModel):
     last_addressed_seat: int | None = None
     last_addressed_speaker_seat: int | None = None
     last_addressed_text: str = ""
+    # Most recent non-sentinel speech_event speaker. SpeakArbiter uses this
+    # as a de-prioritization signal for the *next* dispatch so that once
+    # `silent_seats` empties (= every alive NPC has spoken once), the
+    # rotation can't re-pick the just-finished speaker. Without this, the
+    # arbiter falls back to seat-number tiebreak and seat 1 monopolizes
+    # the rest of the phase.
+    last_speaker_seat: int | None = None
