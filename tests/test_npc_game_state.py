@@ -343,6 +343,47 @@ async def test_vote_target_falls_back_to_random_when_llm_returns_null() -> None:
 
 
 @pytest.mark.asyncio
+async def test_night_target_falls_back_to_random_when_llm_returns_null() -> None:
+    """Master rejects night actions with `target_seat=None` (ILLEGAL_TARGET),
+    and the missing seat deadlocks the NIGHT phase via pending_decisions.
+    Live game stalled when the knight chose to skip the day-1 guard
+    ("GJ リスク回避"). Force a legal pick so the phase always advances.
+    """
+    client, sent = _make_client_with_capture()
+    await client.process_message(_snapshot(role="KNIGHT").model_dump_json())
+
+    class _StubDecisionLLM:
+        async def decide_json(
+            self, *, system_prompt: str, user_prompt: str,
+            schema: dict[str, object],
+        ) -> str:
+            # Knight tries to skip — must NOT be allowed through.
+            return '{"target_seat": null, "reason": "情報不足のため次夜余地残す"}'
+
+    client.decision_llm = _StubDecisionLLM()  # type: ignore[assignment]
+
+    night_req = DecideNightActionRequest(
+        ts=4000, trace_id="t-night",
+        request_id="rn-fallback", npc_id="npc_setsu", seat_no=3,
+        game_id="g1", phase_id="g1::day1::NIGHT::1",
+        action_kind="knight_guard",
+        candidate_seats=((1, "Alice"), (5, "Bob")),
+        expires_at_ms=20_000,
+    )
+    await client.process_message(night_req.model_dump_json())
+    decisions = [
+        NightActionDecision.model_validate_json(m)
+        for m in sent if '"night_action_decision"' in m
+    ]
+    assert len(decisions) == 1
+    assert decisions[0].target_seat in {1, 5}, (
+        "skip must be replaced by a legal candidate via the fallback"
+    )
+    assert decisions[0].reason_summary is not None
+    assert "abstain_fallback" in decisions[0].reason_summary
+
+
+@pytest.mark.asyncio
 async def test_alive_changed_update_carries_dead_seat_causes() -> None:
     """`alive_changed` payload now propagates per-seat death cause so
     the NPC prompt can label dead seats as 処刑/襲撃."""

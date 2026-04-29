@@ -94,8 +94,15 @@ _NIGHT_SCHEMA: dict[str, object] = {
     "required": ["target_seat", "reason"],
     "properties": {
         "target_seat": {
-            "type": ["integer", "null"],
-            "description": "Seat number of the night-action target, or null to skip.",
+            "type": "integer",
+            "description": (
+                "Seat number of the night-action target. Must be one of "
+                "the supplied candidate seats. Skipping (null) is forbidden — "
+                "every wolf_attack / seer_divine / knight_guard must pick "
+                "an actual target. Master rejects null with ILLEGAL_TARGET "
+                "and the night phase stalls on missing submissions, so "
+                "the decision LLM has to commit to a candidate."
+            ),
         },
         "reason": {
             "type": "string",
@@ -352,8 +359,12 @@ def build_night_prompt(
         f"## 行動候補席\n{candidates_str}",
         "",
         "上記すべてを踏まえ、夜の行動対象を決めてください。"
-        "対象を選ばない/選べない場合は target_seat を null。"
-        "JSON は {\"target_seat\": <席番号 | null>, \"reason\": \"<短い理由>\"} の形。",
+        "**スキップ禁止**: 必ず候補席の中から1人を選んで `target_seat` に入れる。"
+        "情報が薄くても、相対的に最も対象として価値がある1人を選ぶこと "
+        "(占い: 情報を取りたい灰、人狼: 噛み価値の高い位置、騎士: 守るべき情報役/重要位置)。"
+        "「捨て護衛」のような戦術選択をしたい場合も、null ではなく合法候補から1人を選ぶ。"
+        "JSON は {\"target_seat\": <候補席番号>, \"reason\": \"<短い理由>\"} の形 "
+        "(`target_seat` は必ず整数、null 不可)。",
     ]
     return system, "\n".join(p for p in user_parts if p is not None)
 

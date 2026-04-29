@@ -697,6 +697,25 @@ class NpcClient:
             )
             return None, "llm_error"
         result = parse_decision(raw, legal_seats=legal)
+        # Forbid skipping for night actions. Master rejects target=None
+        # with ILLEGAL_TARGET; the missing seat then deadlocks the
+        # NIGHT phase via pending_decisions until the host force-skips.
+        # Live game stuck on day-1 NIGHT because the knight returned
+        # null saying "GJ リスク回避し次夜余地残す". Force a legal pick
+        # so the phase always advances; persona keeps a chance to do
+        # 捨て護衛 / 価値の薄い位置 via the LLM choice itself.
+        if result.target_seat is None and legal:
+            rng = random.Random(
+                f"{req.game_id}:{req.seat_no}:{req.action_kind}".__hash__()
+            )
+            fallback = rng.choice(sorted(legal))
+            log.info(
+                "npc_night_abstain_fallback game=%s seat=%d kind=%s -> %d "
+                "reason=%s",
+                req.game_id, req.seat_no, req.action_kind, fallback,
+                result.reason_summary or "(none)",
+            )
+            return fallback, f"abstain_fallback:{result.reason_summary or ''}"
         return result.target_seat, result.reason_summary
 
 
