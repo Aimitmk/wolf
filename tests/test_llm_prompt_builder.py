@@ -943,10 +943,12 @@ def test_fake_strategy_switches_to_medium_or_knight_fake_if_countered(role: Role
 
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
 def test_fake_strategy_warns_against_over_faking(role: Role) -> None:
-    """Both wolf and madman are warned that piling on fake COs (6+) confirms
-    non-CO seats as white — at that point all wolves+madman have CO'd."""
+    """Both wolf and madman are warned that piling on fake seer/medium COs
+    (5+ total) confirms non-CO seats as white. The wording must scope the
+    count to 占い師と霊媒師の CO specifically — knight CO timing is separate."""
     block = _build_strategy_block(role)
-    assert "6 人以上" in block
+    assert "5 人以上" in block
+    assert "占い師と霊媒師の CO" in block
     assert "騙りすぎ" in block
 
 
@@ -1961,6 +1963,170 @@ def test_three_seer_co_extra_fake_directive_only_in_wolf_madman_strategy(
         assert "霊媒師騙りや騎士騙りを追加しない" not in block, (
             f"wolf-side no-extra-fake directive leaked into {role.name}"
         )
+
+
+# ---------------- 2026-04-29: 3-0 (3 seer COs + 0 medium COs) → no medium fake-CO
+# At day-1 round-2, when the public log shows 3 seer COs and 0 medium COs (`3-0`),
+# wolf and madman seats must not add a medium fake. Adding one would invite the real
+# medium's counter-CO → 3-2, where the seer/medium CO-overflow sum reaches 3 and
+# every non-CO seat is hardened to 確白級 (per the shared rules block). The village
+# then concentrates execution candidates onto the CO group, which is a wolf-side
+# loss path. The strategy text and the day-1 round-2 task text both carry the
+# prohibition; non-wolf seats must not see it.
+
+
+def test_wolf_strategy_prohibits_3_0_medium_fake() -> None:
+    """At 3-0 (3 seer COs + 0 medium COs), the wolf's strategy block must
+    explicitly forbid adding a medium fake. The reason chain must be present:
+    counter-medium creates 3-2, overflow sum hits 3, non-CO seats become
+    確白級, hangs concentrate onto the CO group. Already-CO'd-as-seer wolves
+    are explicitly allowed to continue that fake (only the *new* 3-0 medium
+    fake is forbidden). Wolf-actor `相方` vocabulary is preserved."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "3-0" in block
+    assert "占い師 CO 3 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "絶対に霊媒師 CO しない" in block
+    assert "自分がグレー位置でも" in block
+    assert "真霊媒師の対抗 CO" in block
+    assert "3-2" in block
+    assert "超過分合計" in block
+    assert "確白級" in block
+    assert "処刑候補が CO 群へ集中" in block
+    # Wolf-actor 相方 vocabulary remains usable in the wolf strategy block.
+    assert "相方" in block
+    # Already-CO'd-seer continuation must be explicitly allowed (the 3-0 ban
+    # is on adding a *new* medium fake, not on continuing existing fakes).
+    assert "既に自分が占い師 CO 中なら" in block
+
+
+def test_wolf_strategy_3_0_preserves_2_0_and_2_1_conditionals() -> None:
+    """The 3-0 prohibition must not silently overwrite the 2-0 / 2-1
+    conditional medium-fake guidance — the 3-0 bullet itself must
+    acknowledge that 2-0 / 2-1 stay conditional, and the pre-existing
+    2-0 / 2-1 bullets must remain in the wolf strategy block."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    # The 3-0 bullet itself acknowledges 2-0 / 2-1 continue to apply.
+    assert "2-0 / 2-1 の条件付き霊媒師騙りは維持" in block
+    # Pre-existing 2-0 / 2-1 bullets must still be there (no regression).
+    assert "2-0" in block
+    assert "2-1" in block
+    assert "占い師 CO 2 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "出ざるを得ない" in block
+
+
+def test_madman_strategy_prohibits_3_0_medium_fake() -> None:
+    """The madman version of the 3-0 prohibition. Same reason chain plus the
+    madman-only 本物の人狼位置を知らない anchor: adding a medium CO at 3-0
+    risks pushing real wolves toward the CO-execution candidate group.
+    Already-CO'd-as-seer continuation is explicitly allowed. Wolf-coordination
+    vocabulary (bare 相方 / 襲撃先を揃える) must remain absent."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "3-0" in block
+    assert "占い師 CO 3 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "絶対に霊媒師 CO しない" in block
+    assert "自分がグレー位置でも" in block
+    assert "真霊媒師の対抗 CO" in block
+    assert "3-2" in block
+    assert "超過分合計" in block
+    assert "確白級" in block
+    assert "処刑候補が CO 群へ集中" in block
+    # Madman-only knowledge boundary anchor.
+    assert "本物の人狼位置を知らない" in block
+    # Already-CO'd-seer continuation explicitly allowed.
+    assert "既に自分が占い師 CO 中なら" in block
+    # Wolf-coordination leak guard preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
+def test_madman_strategy_3_0_preserves_2_0_and_2_1_conditionals() -> None:
+    """Madman analog of the wolf preservation test."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "2-0 / 2-1 の条件付き霊媒師騙りは維持" in block
+    assert "2-0" in block
+    assert "2-1" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_3_0_no_medium_fake_directive_only_in_wolf_madman_strategy(role: Role) -> None:
+    """The 3-0 medium-fake prohibition is wolf-side execution guidance (village
+    and info roles cannot fake CO at all), so the directive must appear only in
+    WEREWOLF and MADMAN strategies. Mirrors
+    `test_three_seer_co_extra_fake_directive_only_in_wolf_madman_strategy`."""
+    block = _build_strategy_block(role)
+    if role in (Role.WEREWOLF, Role.MADMAN):
+        assert "絶対に霊媒師 CO しない" in block
+    else:
+        assert "絶対に霊媒師 CO しない" not in block, (
+            f"wolf-side 3-0 prohibition leaked into {role.name}"
+        )
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round2_wolf_or_madman_includes_3_0_no_medium_fake(
+    role: Role,
+) -> None:
+    """At day-1 round-2, the task-level reminder for wolf and madman must
+    include the 3-0 prohibition (3 seer COs + 0 medium COs → no medium fake-
+    CO, even when self in grey). Composes with (does not replace) the
+    pre-existing 2-0 / 2-1 conditional medium-fake guidance."""
+    text = task_daytime_speech(1, discussion_round=2, role=role)
+    assert "3-0" in text
+    assert "占い師 CO 3 人" in text
+    assert "霊媒師 CO 0 人" in text
+    assert "絶対に霊媒師 CO しない" in text
+    assert "3-2" in text
+    assert "確白級" in text
+    assert "処刑候補が CO 群へ集中" in text
+    # Pre-existing 2-0 / 2-1 guidance still present (no regression).
+    assert "2-0" in text
+    assert "2-1" in text
+    # Leak-guard regression — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+@pytest.mark.parametrize("role", [Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
+def test_task_daytime_speech_day1_round2_non_wolf_omits_3_0_directive(role: Role) -> None:
+    """Non-wolf/non-madman roles at day-1 round-2 must NOT receive the 3-0
+    medium-fake prohibition: the directive is wolf-side and only fires when
+    role is WEREWOLF or MADMAN."""
+    text = task_daytime_speech(1, discussion_round=2, role=role)
+    assert "絶対に霊媒師 CO しない" not in text
+    assert "占い師 CO 3 人" not in text
+
+
+def test_task_daytime_speech_day1_round2_default_omits_3_0_directive() -> None:
+    """The default day-1 round-2 call (no role) must not include the wolf-
+    side 3-0 directive — only WEREWOLF / MADMAN callers see it."""
+    text = task_daytime_speech(1, discussion_round=2)
+    assert "絶対に霊媒師 CO しない" not in text
+    assert "占い師 CO 3 人" not in text
+
+
+def test_task_daytime_speech_default_omits_3_0_directive() -> None:
+    """The bare default call (no round, no role) must not include the
+    day-1 round-2 wolf-side 3-0 directive."""
+    text = task_daytime_speech(2)
+    assert "3-0" not in text
+    assert "絶対に霊媒師 CO しない" not in text
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round1_wolf_or_madman_omits_3_0_directive(
+    role: Role,
+) -> None:
+    """Round 1 of day 1 must NOT carry the round-2 only 3-0 directive — the
+    medium-fake decision (and its 3-0 prohibition) is the round-2 conditional
+    branch. The round-1 simpler suppression (no medium fake at all on round 1)
+    must remain."""
+    text = task_daytime_speech(1, discussion_round=1, role=role)
+    assert "絶対に霊媒師 CO しない" not in text
+    # Round-1 suppression preserved (no regression).
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in text
 
 
 def test_knight_strategy_includes_day1_round2_2_1_grey4_co() -> None:

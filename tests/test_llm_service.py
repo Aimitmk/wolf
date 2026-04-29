@@ -1847,7 +1847,8 @@ async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRe
     assert "占い師騙り" in system_prompt
     assert "霊媒師騙り" in system_prompt
     assert "騎士騙り" in system_prompt
-    assert "6 人以上" in system_prompt
+    assert "5 人以上" in system_prompt
+    assert "占い師と霊媒師の CO" in system_prompt
     assert "騙りすぎ" in system_prompt
     # Conditional framing — day-1 seer fake is no longer unconditional.
     assert "無条件" in system_prompt
@@ -1873,7 +1874,8 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "占い師騙り" in system_prompt
     assert "霊媒師騙り" in system_prompt
     assert "騎士騙り" in system_prompt
-    assert "6 人以上" in system_prompt
+    assert "5 人以上" in system_prompt
+    assert "占い師と霊媒師の CO" in system_prompt
     assert "騙りすぎ" in system_prompt
     # Wolf-coordination vocabulary must not appear for the madman. Bare 相方
     # (actor mode, partner-known) absent; 相方候補 (public-log inference) allowed.
@@ -1938,6 +1940,67 @@ async def test_ask_system_prompt_madman_day1_round_conditional_medium_fake(
     # Wolf-coordination leak guard preserved.
     assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
+
+
+# -------- 2026-04-29: 3-0 (3 seer COs + 0 medium COs) → no medium fake-CO
+# End-to-end mirrors of the unit-level 3-0 prohibition tests. Confirm the
+# directive reaches the LLM via build_system_prompt for wolf and madman seats,
+# stays out of non-wolf seats, and that the day-1 round-2 task block carries
+# the prohibition when `_do_one_discussion_speech(discussion_round=2)` runs.
+
+
+async def test_ask_system_prompt_wolf_seat_includes_3_0_no_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: a werewolf LLM's system prompt must carry the 3-0 medium-
+    fake prohibition via `_ROLE_STRATEGIES[Role.WEREWOLF]`."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "3-0" in system_prompt
+    assert "占い師 CO 3 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "絶対に霊媒師 CO しない" in system_prompt
+    assert "真霊媒師の対抗 CO" in system_prompt
+    assert "3-2" in system_prompt
+    assert "超過分合計" in system_prompt
+    assert "確白級" in system_prompt
+    assert "処刑候補が CO 群へ集中" in system_prompt
+    # Already-CO'd-seer continuation must be explicitly allowed.
+    assert "既に自分が占い師 CO 中なら" in system_prompt
+
+
+async def test_ask_system_prompt_madman_includes_3_0_no_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end madman analog with the wolf-position-unawareness anchor.
+    Wolf-coordination vocabulary must stay absent (existing leak guard)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "3-0" in system_prompt
+    assert "占い師 CO 3 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "絶対に霊媒師 CO しない" in system_prompt
+    assert "3-2" in system_prompt
+    assert "超過分合計" in system_prompt
+    assert "確白級" in system_prompt
+    assert "処刑候補が CO 群へ集中" in system_prompt
+    assert "本物の人狼位置を知らない" in system_prompt
+    # Already-CO'd-seer continuation explicitly allowed.
+    assert "既に自分が占い師 CO 中なら" in system_prompt
+    # Leak guard.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
+async def test_ask_system_prompt_non_wolf_excludes_3_0_directive(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """The 3-0 wolf-side prohibition must not bleed into non-wolf/non-madman
+    seats' system prompts. Mirrors the unit-level cross-leak guard."""
+    system_prompt = await _capture_ask_system_prompt(repo, role)
+    assert "絶対に霊媒師 CO しない" not in system_prompt, (
+        f"wolf-side 3-0 prohibition leaked into {role.name}"
+    )
 
 
 async def test_ask_system_prompt_medium_includes_day1_co_timing(
@@ -2435,6 +2498,65 @@ async def test_discussion_speech_day1_round2_wolf_includes_conditional_medium_fa
     assert "出ざるを得ない" in system_prompt
     # Day-1 has no execution → no medium result.
     assert "霊媒結果は出さず" in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+async def test_discussion_speech_day1_round2_wolf_includes_3_0_no_medium_fake(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """End-to-end: when `_do_one_discussion_speech(discussion_round=2)` runs
+    on a day-1 game with a wolf or madman LLM seat, the captured task block
+    must include the 3-0 medium-fake prohibition (3 seer COs + 0 medium COs
+    → no medium CO, even when self-grey)."""
+    game = Game(
+        id=f"g-d1r2-30-{role.value}",
+        guild_id=f"gu-d1r2-30-{role.value}",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=2
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Task-level 3-0 directive reached the LLM via the task block.
+    assert "3-0" in system_prompt
+    assert "占い師 CO 3 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "絶対に霊媒師 CO しない" in system_prompt
+    assert "3-2" in system_prompt
+    assert "確白級" in system_prompt
 
 
 async def test_discussion_speech_day1_round1_medium_lurks(
