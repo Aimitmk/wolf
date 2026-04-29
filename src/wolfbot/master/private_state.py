@@ -39,6 +39,7 @@ from wolfbot.domain.ws_messages import (
     PrivateStateSnapshot,
     PrivateStateUpdate,
     SeerResult,
+    WolfAttackEntry,
     WolfChatLine,
 )
 
@@ -101,6 +102,7 @@ def build_snapshot_for_seat(
     medium_results: Sequence[MediumResult] = (),
     guard_history: Sequence[GuardEntry] = (),
     wolf_chat_history: Sequence[WolfChatLine] = (),
+    wolf_attack_history: Sequence[WolfAttackEntry] = (),
     ts: int,
     trace_id: str,
 ) -> PrivateStateSnapshot:
@@ -137,6 +139,7 @@ def build_snapshot_for_seat(
         medium_results=tuple(medium_results),
         guard_history=tuple(guard_history),
         wolf_chat_history=tuple(wolf_chat_history),
+        wolf_attack_history=tuple(wolf_attack_history),
     )
 
 
@@ -185,12 +188,13 @@ async def load_private_state_for_seat(
     tuple[MediumResult, ...],
     tuple[GuardEntry, ...],
     tuple[WolfChatLine, ...],
+    tuple[WolfAttackEntry, ...],
 ]:
     """Rebuild role-specific history for a seat from persisted DB rows.
 
     Returns ``(seer_results, medium_results, guard_history,
-    wolf_chat_history)``. Each tuple is non-empty only when the role
-    actually owns that history:
+    wolf_chat_history, wolf_attack_history)``. Each tuple is non-empty
+    only when the role actually owns that history:
 
     * ``seer_results`` — populated for ``Role.SEER`` from
       SEER_RESULT_NIGHT0 + SEER_RESULT private logs.
@@ -202,6 +206,11 @@ async def load_private_state_for_seat(
     * ``wolf_chat_history`` — populated for ``Role.WEREWOLF`` from
       WOLF_CHAT private logs (every wolf seat sees them via the
       ``audience_seat IS NULL`` branch of ``load_private_logs``).
+    * ``wolf_attack_history`` — populated for ``Role.WEREWOLF`` from
+      ``night_actions`` (WOLF_ATTACK entries) joined with the MORNING
+      public log to derive ``peaceful_morning``. Lets wolves detect
+      "we attacked X last night, X is alive → GJ → re-attack X tonight
+      because the knight can't guard the same seat twice in a row".
 
     Best-effort: a parse failure on one row is logged and skipped, not
     fatal — a partially populated snapshot is still strictly better
@@ -213,6 +222,7 @@ async def load_private_state_for_seat(
     medium_results: list[MediumResult] = []
     wolf_chat_history: list[WolfChatLine] = []
     guard_history: list[GuardEntry] = []
+    wolf_attack_history: list[WolfAttackEntry] = []
 
     if role in (Role.SEER, Role.MEDIUM):
         try:
@@ -301,6 +311,55 @@ async def load_private_state_for_seat(
                     text=str(r["text"]),
                 )
             )
+        # Reload public logs to derive `peaceful_morning` per attack.
+        # Same shape as the knight's guard-history loader below.
+        try:
+            public_logs_for_attack = await repo.load_public_logs(
+                game_id, limit=200,
+            )
+        except Exception:
+            log.exception(
+                "private_state_load_failed_public_logs_for_attack game=%s",
+                game_id,
+            )
+            public_logs_for_attack = []
+        attack_morning_by_day: dict[int, bool] = {}
+        for log_row in public_logs_for_attack:
+            if log_row.get("kind") == "MORNING":
+                resolved_day = int(log_row.get("day", 0))
+                if resolved_day < 0:
+                    continue
+                peaceful = "平和な朝" in str(log_row.get("text", ""))
+                attack_morning_by_day[resolved_day] = peaceful
+        try:
+            seen_attack_days: set[int] = set()
+            for day in range(0, 30):
+                actions = await repo.load_night_actions(game_id, day=day)
+                for a in actions:
+                    if (
+                        a.kind is SubmissionType.WOLF_ATTACK
+                        and a.target_seat is not None
+                        and a.target_seat in seats_by_no
+                        and day not in seen_attack_days
+                    ):
+                        seen_attack_days.add(day)
+                        wolf_attack_history.append(
+                            WolfAttackEntry(
+                                day=day,
+                                target_seat=a.target_seat,
+                                target_name=seats_by_no[
+                                    a.target_seat
+                                ].display_name,
+                                peaceful_morning=attack_morning_by_day.get(day),
+                            )
+                        )
+                if not actions and day > 1:
+                    break
+        except Exception:
+            log.exception(
+                "private_state_load_failed_wolf_attack game=%s seat=%d",
+                game_id, seat_no,
+            )
 
     if role is Role.KNIGHT:
         # Knight's guard targets come from the night_actions table for
@@ -314,6 +373,7 @@ async def load_private_state_for_seat(
             return (
                 tuple(seer_results), tuple(medium_results),
                 tuple(guard_history), tuple(wolf_chat_history),
+                tuple(wolf_attack_history),
             )
         try:
             public_logs = await repo.load_public_logs(game_id, limit=200)
@@ -369,6 +429,7 @@ async def load_private_state_for_seat(
         tuple(medium_results),
         tuple(guard_history),
         tuple(wolf_chat_history),
+        tuple(wolf_attack_history),
     )
 
 

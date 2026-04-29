@@ -183,6 +183,18 @@ def _build_state_block(state: NpcGameState) -> str:
             lines.append(
                 f"  day{line.day} {line.speaker_name}: {line.text}"
             )
+    if state.wolf_attack_history:
+        lines.append("## 自分達の襲撃履歴 (非公開)")
+        for atk in state.wolf_attack_history:
+            if atk.peaceful_morning is True:
+                outcome = "(平和な朝 = GJ)"
+            elif atk.peaceful_morning is False:
+                outcome = "(襲撃成功)"
+            else:
+                outcome = "(結果未確定)"
+            lines.append(
+                f"  day{atk.day}: {atk.target_name} を襲撃 {outcome}"
+            )
     return "\n".join(lines)
 
 
@@ -309,7 +321,15 @@ def build_wolf_chat_prompt(
         "あなたは人狼で、仲間の人狼にだけ届く秘密チャットでこのターンの "
         "襲撃方針を簡潔に伝えてください。村人に届く発話ではないので、"
         "ペルソナの口調を保ちつつ素直に作戦を提示してよい (ただし"
-        "メタ用語は避ける)。返答は JSON のみ。"
+        "メタ用語は避ける)。返答は JSON のみ。\n\n"
+        "**戦術指針 — GJ後の再噛み**: 前夜の襲撃が GJ で平和な朝になった "
+        "(自分達が昨夜噛んだ対象が今朝も生存している) 場合、"
+        "騎士の連続護衛禁止により今夜その対象は守られない。"
+        "盤面が大きく変わっていないなら同じ対象を再噛みするのが原則最善 — "
+        "数学的に成功が確定する。"
+        "切り替えるのは、対象の襲撃価値が大きく低下した、別位置に超緊急の情報役が出た、"
+        "等の具体的根拠があるときに限る。"
+        "「読まれそう」「対称的すぎる」のような漠然とした不安では切り替えない。"
     )
     user_parts = [
         f"## 現在: 人狼チャット (day {state.day_number})",

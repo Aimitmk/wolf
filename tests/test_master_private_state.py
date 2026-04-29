@@ -311,12 +311,12 @@ async def test_load_private_state_seer_recovers_night0_random_white(
             created_at=1,
         )
     )
-    seers, mediums, guards, wolves = await load_private_state_for_seat(
+    seers, mediums, guards, wolves, attacks = await load_private_state_for_seat(
         fresh_repo, game_id=g.id, seat_no=5, role=Role.SEER,
         players=await fresh_repo.load_players(g.id),
         seats=await fresh_repo.load_seats(g.id),
     )
-    assert mediums == () and guards == () and wolves == ()
+    assert mediums == () and guards == () and wolves == () and attacks == ()
     assert len(seers) == 1
     assert seers[0].day == 0
     assert seers[0].target_seat == 9
@@ -346,7 +346,7 @@ async def test_load_private_state_seer_parses_day1_black_and_white(
             text="占い結果: NPC3 は 人狼ではありません。", created_at=20,
         )
     )
-    seers, _m, _g, _w = await load_private_state_for_seat(
+    seers, _m, _g, _w, _a = await load_private_state_for_seat(
         fresh_repo, game_id=g.id, seat_no=5, role=Role.SEER,
         players=await fresh_repo.load_players(g.id),
         seats=await fresh_repo.load_seats(g.id),
@@ -370,7 +370,7 @@ async def test_load_private_state_wolf_chat_history_for_wolf(
             visibility="PRIVATE", text="今日は席5を狙うか", created_at=5,
         )
     )
-    _s, _m, _gh, wolves = await load_private_state_for_seat(
+    _s, _m, _gh, wolves, _a = await load_private_state_for_seat(
         fresh_repo, game_id=g.id, seat_no=1, role=Role.WEREWOLF,
         players=await fresh_repo.load_players(g.id),
         seats=await fresh_repo.load_seats(g.id),
@@ -401,7 +401,7 @@ async def test_load_private_state_knight_guard_history_with_morning(
             text="平和な朝です。昨晩の犠牲者はいません。", created_at=200,
         )
     )
-    _s, _m, guards, _w = await load_private_state_for_seat(
+    _s, _m, guards, _w, _a = await load_private_state_for_seat(
         fresh_repo, game_id=g.id, seat_no=7, role=Role.KNIGHT,
         players=await fresh_repo.load_players(g.id),
         seats=await fresh_repo.load_seats(g.id),
@@ -410,3 +410,60 @@ async def test_load_private_state_knight_guard_history_with_morning(
     assert guards[0].day == 1
     assert guards[0].target_seat == 5
     assert guards[0].peaceful_morning is True
+
+
+async def test_load_private_state_wolf_attack_history_with_morning(
+    fresh_repo: SqliteRepo,
+) -> None:
+    """Wolves see their own attack history with `peaceful_morning`
+    derived from the matching MORNING public log so they can detect
+    "GJ → re-attack the same target tomorrow because the knight can't
+    guard consecutively".
+    """
+    g = await _seed_game_with_seer(fresh_repo)
+    await fresh_repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await fresh_repo.set_player_role(g.id, 3, Role.WEREWOLF)
+    # Wolf attack on day 1 — GJ'd by knight (peaceful morning on day 1).
+    await fresh_repo.insert_night_action(
+        NightAction(
+            game_id=g.id, day=1, actor_seat=1,
+            kind=SubmissionType.WOLF_ATTACK, target_seat=9,
+            submitted_at=100,
+        )
+    )
+    await fresh_repo.insert_log_public(
+        LogEntry(
+            game_id=g.id, day=1, phase=Phase.DAY_DISCUSSION,
+            kind="MORNING", actor_seat=None, visibility="PUBLIC",
+            text="平和な朝です。昨晩の犠牲者はいません。", created_at=200,
+        )
+    )
+    # Wolf attack on day 2 — successful kill.
+    await fresh_repo.insert_night_action(
+        NightAction(
+            game_id=g.id, day=2, actor_seat=1,
+            kind=SubmissionType.WOLF_ATTACK, target_seat=5,
+            submitted_at=300,
+        )
+    )
+    await fresh_repo.insert_log_public(
+        LogEntry(
+            game_id=g.id, day=2, phase=Phase.DAY_DISCUSSION,
+            kind="MORNING", actor_seat=5, visibility="PUBLIC",
+            text="朝になりました。犠牲者: NPC5", created_at=400,
+        )
+    )
+
+    _s, _m, _gh, _w, attacks = await load_private_state_for_seat(
+        fresh_repo, game_id=g.id, seat_no=1, role=Role.WEREWOLF,
+        players=await fresh_repo.load_players(g.id),
+        seats=await fresh_repo.load_seats(g.id),
+    )
+    by_day = {a.day: a for a in attacks}
+    assert by_day[1].target_seat == 9
+    assert by_day[1].peaceful_morning is True, (
+        "GJ on day 1 → wolves should see peaceful_morning=True so the "
+        "next-night re-attack heuristic can fire"
+    )
+    assert by_day[2].target_seat == 5
+    assert by_day[2].peaceful_morning is False

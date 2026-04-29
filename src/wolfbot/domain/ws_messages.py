@@ -324,6 +324,25 @@ class WolfChatLine(BaseModel):
     text: str
 
 
+class WolfAttackEntry(BaseModel):
+    """Past wolf attack target the wolves submitted on a given night.
+
+    ``peaceful_morning`` is True when the attack was knight-GJ'd (no
+    victim that morning), False when the target was killed, None when
+    the morning hasn't resolved yet. Wolves use this to detect the
+    "GJ → re-attack same target" pattern: the knight cannot guard the
+    same seat on consecutive nights, so a GJ'd target is a free kill
+    on the next night.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    day: int
+    target_seat: int
+    target_name: str
+    peaceful_morning: bool | None = None
+
+
 class PrivateStateSnapshot(BaseEnvelope):
     """Master → NPC: full private game state for the seat this NPC plays.
 
@@ -350,6 +369,7 @@ class PrivateStateSnapshot(BaseEnvelope):
     medium_results: tuple[MediumResult, ...] = ()
     guard_history: tuple[GuardEntry, ...] = ()
     wolf_chat_history: tuple[WolfChatLine, ...] = ()
+    wolf_attack_history: tuple[WolfAttackEntry, ...] = ()
 
 
 class PrivateStateUpdate(BaseEnvelope):

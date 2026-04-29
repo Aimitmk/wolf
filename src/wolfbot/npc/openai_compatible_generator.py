@@ -307,6 +307,19 @@ def _build_user(
                 lines.append(
                     f"  day{wc.day} {wc.speaker_name}: {wc.text}"
                 )
+        wolf_attack_history = getattr(state, "wolf_attack_history", []) or []
+        if wolf_attack_history:
+            lines.append("## 自分達の襲撃履歴 (非公開)")
+            for atk in wolf_attack_history:
+                if atk.peaceful_morning is True:
+                    outcome = "(平和な朝 = GJ)"
+                elif atk.peaceful_morning is False:
+                    outcome = "(襲撃成功)"
+                else:
+                    outcome = "(結果未確定)"
+                lines.append(
+                    f"  day{atk.day}: {atk.target_name} を襲撃 {outcome}"
+                )
     if logic.past_votes:
         # Public vote history. Each NPC saw the EXECUTION public log when
         # it landed, but the per-phase fold doesn't carry that text into

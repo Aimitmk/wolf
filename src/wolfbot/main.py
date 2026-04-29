@@ -320,15 +320,19 @@ async def _run() -> None:
         # NPC sees no concrete data to CO with on day 1, even though
         # the strategy block tells them to declare early — which is
         # exactly the day-1 silence the live game hit.
-        seer_results, medium_results, guard_history, wolf_chat_history = (
-            await load_private_state_for_seat(
-                repo,
-                game_id=game_id,
-                seat_no=seat_no,
-                role=me.role,
-                players=players,
-                seats=seats,
-            )
+        (
+            seer_results,
+            medium_results,
+            guard_history,
+            wolf_chat_history,
+            wolf_attack_history,
+        ) = await load_private_state_for_seat(
+            repo,
+            game_id=game_id,
+            seat_no=seat_no,
+            role=me.role,
+            players=players,
+            seats=seats,
         )
         snapshot = build_snapshot_for_seat(
             npc_id=npc_id,
@@ -343,6 +347,7 @@ async def _run() -> None:
             medium_results=medium_results,
             guard_history=guard_history,
             wolf_chat_history=wolf_chat_history,
+            wolf_attack_history=wolf_attack_history,
             ts=int(asyncio.get_running_loop().time() * 1000),
             trace_id=f"snapshot-{game_id}-{seat_no}",
         )

@@ -24,6 +24,7 @@ from wolfbot.domain.ws_messages import (
     PrivateStateSnapshot,
     PrivateStateUpdate,
     SeerResult,
+    WolfAttackEntry,
     WolfChatLine,
 )
 
@@ -85,6 +86,7 @@ class NpcGameState:
     medium_results: list[MediumResult] = field(default_factory=list)
     guard_history: list[GuardEntry] = field(default_factory=list)
     wolf_chat_history: list[WolfChatLine] = field(default_factory=list)
+    wolf_attack_history: list[WolfAttackEntry] = field(default_factory=list)
 
 
 def state_from_snapshot(snapshot: PrivateStateSnapshot) -> NpcGameState:
@@ -105,6 +107,7 @@ def state_from_snapshot(snapshot: PrivateStateSnapshot) -> NpcGameState:
         medium_results=list(snapshot.medium_results),
         guard_history=list(snapshot.guard_history),
         wolf_chat_history=list(snapshot.wolf_chat_history),
+        wolf_attack_history=list(snapshot.wolf_attack_history),
     )
 
 
