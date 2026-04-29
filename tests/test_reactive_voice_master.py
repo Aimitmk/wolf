@@ -966,14 +966,94 @@ async def test_pair_volley_demotion_fires_after_4_low_info_speeches(
 
 
 async def test_pair_volley_resets_when_co_declared() -> None:
-    """A CO declaration in the window flips ``has_info=True`` for that
-    event → the gate must NOT fire. Otherwise legitimate dramatic moments
-    (e.g. seer CO in the middle of a heated exchange) would be punished.
+    """A *fresh* CO declaration in the window flips ``has_info=True`` for
+    that event → the gate must NOT fire. Otherwise legitimate dramatic
+    moments (e.g. seer CO in the middle of a heated exchange) would be
+    punished. Note: only the first CO per (seat, role) sets has_info —
+    the fold dedups so re-declaring an existing CO doesn't bypass.
     """
     from wolfbot.master.speak_arbiter import _compute_demoted_seats
 
     summary = ((1, False), (2, False), (1, True), (2, False))
     assert _compute_demoted_seats(summary) == frozenset()
+
+
+async def test_repeated_co_from_same_seat_does_not_bypass_gate(
+    repo: SqliteRepo,
+) -> None:
+    """The day-1 ジョナス↔ラキオ ping-pong escaped the gate because
+    Raqio kept emitting the same `co_declaration='seer'` flag on every
+    speech, making each event look like new info. Dedup CO at fold
+    time so the gate fires when the only "info" is a repeated CO.
+    """
+    g = Game(
+        id="rv-co-repeat",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="Alice", discord_user_id="u1",
+             is_llm=False, persona_key=None),
+        Seat(seat_no=2, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+        Seat(seat_no=3, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 2, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 3, Role.SEER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3], created_at_ms=1,
+        )
+    )
+    from wolfbot.services.discussion_service import (
+        make_npc_generated_event,
+        rebuild_public_state_from_events,
+    )
+    # First CO at ts=5 is genuine; the next 4 events form the volley
+    # window. Raqio re-emits `co_declaration='seer'` on every reply but
+    # the dedup makes those repeats has_info=False, so the window's last
+    # 4 entries are all (seat, False) → gate fires.
+    events_seq = [
+        (5, 3, "seer"),        # first CO (outside the last-4 window)
+        (10, 2, None),         # window start
+        (20, 3, "seer"),       # repeat — should NOT count as info
+        (30, 2, None),
+        (40, 3, "seer"),       # another repeat
+    ]
+    for ts, seat, co in events_seq:
+        await store.insert(
+            make_npc_generated_event(
+                game_id=g.id, phase_id=phase_id, day=1,
+                phase=Phase.DAY_DISCUSSION,
+                speaker_seat=seat, text=f"seat {seat} ts {ts}",
+                co_declaration=co, created_at_ms=ts,
+            )
+        )
+    events = await store.load_phase(g.id, phase_id)
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    # 5 events → summary is capped at 6 → all 5 retained.
+    # Last 4 entries: (2, False), (3, False), (2, False), (3, False)
+    # Pair volley: 2 distinct seats {2,3}, no has_info in window → demote.
+    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+    assert _compute_demoted_seats(state.recent_speech_summary) == frozenset({2, 3})
 
 
 async def test_consecutive_cap_demotion_after_3_same_seat() -> None:

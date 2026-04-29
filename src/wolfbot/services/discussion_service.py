@@ -502,6 +502,7 @@ def apply_speech_event(
 
     co_claims = list(state.co_claims)
     seen_co = {(c.seat, c.role_claim) for c in co_claims}
+    is_new_co = False  # tracks whether THIS event added a fresh CO
     if speaker is not None:
         role_key = _resolve_co_role(event)
         if role_key is not None:
@@ -515,6 +516,7 @@ def apply_speech_event(
                         declared_at_event_id=event.event_id,
                     )
                 )
+                is_new_co = True
 
     recent = [*state.recent_speech_event_ids, event.event_id][-10:]
 
@@ -552,13 +554,16 @@ def apply_speech_event(
     # Append (speaker, has_info) to the sliding summary window the
     # arbiter uses for low-info pair-volley detection. ``has_info`` is
     # the structured "did this event move the discussion forward"
-    # signal. Today: a CO declaration counts. Wider signals (new
-    # accusation target, vote announcement) can be added here later
-    # without changing the field shape.
+    # signal. Today: only a *first-time* CO counts (re-declaring an
+    # already-recorded CO doesn't bypass the gate — that was the
+    # ジョナス↔ラキオ ping-pong escape hatch where Raqio kept emitting
+    # the same `co_declaration='seer'` flag and made every speech look
+    # like new info). Wider signals (new accusation target, vote
+    # announcement) can be added here later without changing the
+    # field shape.
     summary = list(state.recent_speech_summary)
     if speaker is not None:
-        has_info = event.co_declaration is not None
-        summary.append((speaker, has_info))
+        summary.append((speaker, is_new_co))
         summary = summary[-6:]
     return PublicDiscussionState(
         game_id=state.game_id,
@@ -634,8 +639,6 @@ def rebuild_public_state_from_events(
         if event.speaker_seat is not None:
             spoken_seats.add(event.speaker_seat)
             last_speaker_seat = event.speaker_seat
-            has_info = event.co_declaration is not None
-            summary.append((event.speaker_seat, has_info))
         recent_ids.append(event.event_id)
         # Mirror the per-event update logic in `_apply_event_to_state`:
         # only consume the standing address when the NPC speaker IS the
@@ -655,13 +658,21 @@ def rebuild_public_state_from_events(
             last_addressed_text = ""
         if event.speaker_seat is None:
             continue
+        # `is_new_co` flag goes into `recent_speech_summary` so the arbiter
+        # can detect "two seats arguing without new information" — a
+        # repeated CO from the same seat does NOT count as info.
+        is_new_co = False
         role_key = _resolve_co_role(event)
+        if role_key is not None:
+            key = (event.speaker_seat, role_key)
+            if key not in seen_co:
+                is_new_co = True
+        summary.append((event.speaker_seat, is_new_co))
         if role_key is None:
             continue
-        key = (event.speaker_seat, role_key)
-        if key in seen_co:
+        if (event.speaker_seat, role_key) in seen_co:
             continue
-        seen_co.add(key)
+        seen_co.add((event.speaker_seat, role_key))
         co_claims.append(
             CoClaim(
                 seat=event.speaker_seat,
