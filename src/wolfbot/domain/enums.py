@@ -6,6 +6,7 @@ Keep this module side-effect free — pure layer.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 
 class Role(StrEnum):
@@ -110,3 +111,51 @@ ROLE_DISTRIBUTION: dict[Role, int] = {
 
 
 VILLAGE_SIZE = 9
+
+
+# Roles that may openly claim themselves ("カミングアウト" / CO) during day
+# discussion. Wolves and madmen routinely fake these, but they cannot CO
+# their own true role (no one openly claims wolf/madman); villagers have
+# no role power so a villager-CO is meaningless. The lowercased form is
+# the wire/storage shape used by ``speech_events.co_declaration``, the
+# voice/text analyzer prompts, and downstream Literal validators.
+CO_CLAIMABLE_ROLES: tuple[Role, ...] = (Role.SEER, Role.MEDIUM, Role.KNIGHT)
+
+
+def role_to_co_claim(role: Role) -> str:
+    """Wire form of a CO-claimable role (``Role.SEER`` → ``"seer"``)."""
+    return role.value.lower()
+
+
+CO_CLAIM_VALUES: tuple[str, ...] = tuple(
+    role_to_co_claim(r) for r in CO_CLAIMABLE_ROLES
+)
+
+
+# Type alias for the wire/storage form. Cannot be derived from
+# ``CO_CLAIM_VALUES`` because :class:`Literal` requires static values
+# resolvable by the type-checker — ``Literal[*tuple]`` is not legal
+# Python. Adding a CO-claimable role therefore requires updating BOTH
+# :data:`CO_CLAIMABLE_ROLES` and this Literal in lockstep; the
+# consistency test in ``tests/test_domain_co_claim.py`` asserts the two
+# stay aligned so a mismatch is caught at CI time rather than at
+# runtime when a mis-typed seat starts dropping CO declarations
+# silently.
+#
+# Named ``CoDeclaration`` rather than ``CoClaim`` because
+# :class:`wolfbot.domain.discussion.CoClaim` is already a Pydantic
+# model representing a CO event in public-state rebuild — the two
+# concepts are unrelated and the name collision would be confusing.
+CoDeclaration = Literal["seer", "medium", "knight"]
+
+
+def format_co_claim_options(
+    *, separator: str = "/", quote: str = '"'
+) -> str:
+    """Render :data:`CO_CLAIM_VALUES` as a prompt-friendly enumeration.
+
+    Default form ``"seer"/"medium"/"knight"`` matches the existing
+    Japanese analyzer prompts. Pass ``quote=""`` for a bare list
+    (``seer/medium/knight``).
+    """
+    return separator.join(f"{quote}{v}{quote}" for v in CO_CLAIM_VALUES)

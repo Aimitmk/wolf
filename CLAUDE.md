@@ -15,6 +15,7 @@ Contributor-facing conventions (commit style, test naming, PR expectations) live
 ```bash
 uv sync                                                  # install deps (main + dev)
 uv run wolfbot                                           # run the bot (requires .env)
+uv run wolfbot-npc                                       # run one NPC bot (requires NPC env vars)
 
 uv run pytest tests                                      # full test suite
 uv run pytest tests/test_rules_votes.py                  # single file
@@ -32,26 +33,51 @@ uv run mypy                                              # strict typecheck (pac
 
 ## Required environment variables
 
-From `.env.example`. The provider identity field (`XAI_API_KEY`, `DEEPSEEK_API_KEY`, or `GEMINI_VERTEX_PROJECT`) is conditionally required by `LLM_PROVIDER`; the cross-field check lives in a `model_validator(mode='after')` on `Settings` and fails fast at boot if the active provider's required field is missing or empty. Note: `GEMINI_VERTEX_PROJECT` only identifies the GCP project — Vertex AI credentials come from ADC (gcloud locally, attached service account in production), not from this var. Vertex AI Express mode and API-key auth are deliberately unsupported.
+Two env files, one per process. The Gameplay LLM (Master) and the NPC speech LLM (each NPC worker) are configured by **the same provider switch**, just under different env-var prefixes (`GAMEPLAY_LLM_*` vs `NPC_LLM_*`). Both reuse :class:`wolfbot.llm.decider_config.LLMDeciderConfig` internally and dispatch to one of three providers (`xai` / `deepseek` / `gemini`). The provider field is conditionally required by the role's `*_PROVIDER`; the cross-field check is a `model_validator(mode='after')` on each Settings class and fails fast at boot. Note: `*_VERTEX_PROJECT` only identifies the GCP project — Vertex AI credentials come from ADC (gcloud locally, attached service account in production), not from this var. Vertex AI Express mode and API-key auth are deliberately unsupported.
 
-- `DISCORD_TOKEN` — bot token (SecretStr)
-- `LLM_PROVIDER` — `xai` (default), `deepseek`, or `gemini`. Lowercase only.
-- `XAI_API_KEY` — xAI API key (SecretStr); required when `LLM_PROVIDER=xai`
-- `XAI_MODEL` — model name (default `grok-4-1-fast-reasoning`)
-- `DEEPSEEK_API_KEY` — DeepSeek API key (SecretStr); required when `LLM_PROVIDER=deepseek`
-- `DEEPSEEK_BASE_URL` — default `https://api.deepseek.com`
-- `DEEPSEEK_MODEL` — default `deepseek-v4-flash`
-- `DEEPSEEK_THINKING` — `enabled` (default) or `disabled`
-- `DEEPSEEK_REASONING_EFFORT` — `high` or `max` (default); only forwarded when thinking is enabled
-- `GEMINI_VERTEX_PROJECT` — GCP project ID for Vertex AI; required when `LLM_PROVIDER=gemini`. Credentials come from ADC, not from this var. Empty string is rejected at boot.
-- `GEMINI_VERTEX_LOCATION` — default `global`; the Vertex AI Gemini location
-- `GEMINI_MODEL` — default `gemini-3-flash-preview`
-- `GEMINI_THINKING_LEVEL` — `minimal` / `low` / `medium` / `high` (default `high`)
+**Master** (`.env.master`, see `.env.master.example`) — loaded by `src/wolfbot/config.py::MasterSettings`, instantiated once in `main.py`:
+
+- `DISCORD_TOKEN` — Master bot token (SecretStr)
 - `DISCORD_GUILD_ID`, `MAIN_TEXT_CHANNEL_ID`, `MAIN_VOICE_CHANNEL_ID` — ints
 - `WOLFBOT_DB_PATH` — SQLite path (default `./wolfbot.db`)
 - `LOG_LEVEL` — default `INFO`
+- `LLM_DISCUSSION_MODE` — `rounds` (default) or `reactive_voice`
+- `MASTER_WS_LISTEN` — Master WS bind address (default `127.0.0.1:8800`)
+- `MASTER_NPC_PSK` — optional PSK for NPC/voice-ingest WS auth (SecretStr)
+- **Gameplay LLM** — drives every gameplay decision Master makes on behalf of LLM seats: votes (always), night actions (always — wolf attack / divine / guard), and day-discussion text **in rounds mode** (in reactive_voice mode the discussion text is offloaded to NPC bots, but votes / night actions still go through this LLM). Provider switch:
+  - `GAMEPLAY_LLM_PROVIDER` — `xai` (default) / `deepseek` / `gemini`. Lowercase only.
+  - `GAMEPLAY_LLM_API_KEY` (SecretStr) — required when provider is `xai` or `deepseek`. Any OpenAI Chat Completions–compatible endpoint works (xAI Grok / OpenAI / Groq / Together / vLLM / Ollama / DeepSeek).
+  - `GAMEPLAY_LLM_MODEL` — model name (default `grok-4-1-fast`).
+  - `GAMEPLAY_LLM_BASE_URL` — override the provider default base URL when pointing at a self-hosted OpenAI-compatible endpoint. Optional.
+  - `GAMEPLAY_LLM_THINKING` — `enabled` (default) or `disabled`. **DeepSeek-only**, ignored otherwise.
+  - `GAMEPLAY_LLM_REASONING_EFFORT` — `high` or `max` (default). **DeepSeek-only**, only forwarded when thinking is enabled.
+  - `GAMEPLAY_LLM_VERTEX_PROJECT` — GCP project ID. **Required when provider is `gemini`**. Credentials come from ADC, not from this var. Empty string is rejected at boot.
+  - `GAMEPLAY_LLM_VERTEX_LOCATION` — default `global`. **Gemini-only.**
+  - `GAMEPLAY_LLM_THINKING_LEVEL` — `minimal` / `low` / `medium` / `high` (default `high`). **Gemini-only.**
+- **Voice LLM** — separate role. The multimodal LLM that *understands human voice* — transcription + summary + CO detection + vote target extraction in one call. Default targets Google Gemini Flash via the AI Studio REST API; needed only in reactive_voice mode when voice-ingest is active.
+  - `VOICE_LLM_API_KEY` — required when `MASTER_NPC_PSK` is set and you want voice-ingest active. (SecretStr)
+  - `VOICE_LLM_MODEL` — default `gemini-2.0-flash-lite`.
 
-Loaded at boot by `src/wolfbot/config.py::Settings` (pydantic-settings, reads `.env`, instantiated once in `main.py`). Adding a new env var = adding a typed field to `Settings` — do not parse `os.environ` directly from code paths.
+**NPC bot** (`envs/npc/.env.<persona>`, one file per persona — see committed `envs/npc/.env.<persona>.example` templates plus [envs/npc/README.md](envs/npc/README.md)) — loaded by `src/wolfbot/npc/config.py::NpcSettings`, instantiated once per worker in `wolfbot.npc.main`. **Each NPC bot process is bound to exactly one persona at startup** (`NPC_PERSONA_KEY`); NPC bots are not interchangeable. Required fields:
+
+- `NPC_ID` — unique NPC identifier on the WS (e.g. `npc_setsu`)
+- `NPC_DISCORD_TOKEN` — this persona's Discord bot token (each persona has its own bot app, manually invited to the guild once)
+- `NPC_PERSONA_KEY` — must be a key from `wolfbot.npc.personas.NPC_PERSONAS_BY_KEY` (`setsu`, `gina`, `sq`, `raqio`, `stella`, `shigemichi`, `chipie`, `comet`, `jonas`, `kukrushka`, `otome`, `sha_ming`, `remnan`, `yuriko`)
+- `MASTER_WS_URL` — e.g. `ws://127.0.0.1:8800`
+- `MASTER_NPC_PSK` — must match Master's value (SecretStr)
+- **NPC LLM** — drives this NPC bot's short reactive utterances during DAY_DISCUSSION in reactive_voice mode. Does **not** decide votes or night actions — Master's `GAMEPLAY_LLM_*` handles those. The provider switch is symmetrical to `GAMEPLAY_LLM_*`:
+  - `NPC_LLM_PROVIDER` — `xai` (default) / `deepseek` / `gemini`.
+  - `NPC_LLM_API_KEY`, `NPC_LLM_MODEL`, `NPC_LLM_BASE_URL` — same semantics as the Gameplay equivalents.
+  - `NPC_LLM_THINKING`, `NPC_LLM_REASONING_EFFORT` — DeepSeek-only.
+  - `NPC_LLM_VERTEX_PROJECT`, `NPC_LLM_VERTEX_LOCATION`, `NPC_LLM_THINKING_LEVEL` — Gemini-only.
+  - The same credential may be reused across personas, and may also be shared with Master's `GAMEPLAY_LLM_*`, but the two roles are intentionally split so each can target a different provider / model.
+- `TTS_VOICE_ID`, `VOICEVOX_URL` — VOICEVOX speaker / engine
+- `MAIN_VOICE_CHANNEL_ID`, `DISCORD_GUILD_ID` — must match Master
+- `HEARTBEAT_INTERVAL_S`, `LOG_LEVEL`
+
+Each NPC process picks its env file via the `WOLFBOT_NPC_ENV` env var (default: `.env.npc` in CWD, but with the `envs/npc/` layout you should always set this explicitly). Typical multi-persona deployment: `WOLFBOT_NPC_ENV=envs/npc/.env.setsu uv run wolfbot-npc` etc.
+
+Adding a new env var = adding a typed field to the appropriate `*Settings` class — do not parse `os.environ` directly from code paths.
 
 ## Architecture
 
@@ -62,14 +88,23 @@ Outer layers depend on inner; never the reverse.
 ```
 domain/        pure: enums, frozen models, rules, state_machine  — no I/O, no asyncio
   ↑
-services/      orchestration: GameService, GameEngine, RecoveryService, PermissionManager
+services/      orchestration: GameService, GameEngine, RecoveryService, PermissionManager,
+               LLMAdapter, DiscussionService, DiscordBotAdapter, ...
   ↑
 persistence/   SqliteRepo (aiosqlite)
 llm/           personas + prompt builder
 prompts/       system prompt markdown (`llm_system_prompt.md`), read at runtime by prompt_builder
 ui/            discord.ui Views (DM vote/action selects)
-main.py        wiring
+master/        Master-side reactive_voice pipeline (loaded only when MASTER_NPC_PSK is set):
+               ws_server, ingest_service, logic_service, speak_arbiter, npc_registry,
+               voice_ingest_service, voice_ingest_client, audio_sink, stt_service.
+npc/           NPC bot worker (separate process via `uv run wolfbot-npc`):
+               main, config (NpcSettings), client, speech_service,
+               openai_compatible_generator, tts, playback.
+main.py        Master wiring (entrypoint `wolfbot`)
 ```
+
+`master/` and `npc/` are intentionally split because the two processes have disjoint runtime concerns: `master/` runs alongside the core `services/` in the Master Discord bot, while `npc/` is one-process-per-NPC and only talks to Master over WS. Anything imported by both lives in `domain/` (e.g. `domain/ws_messages.py`).
 
 Within `services/`: `discord_service.py` contains both `DiscordBotAdapter` and the `WolfCog` slash-command dispatcher — new slash commands go in the cog, new Discord side-effects in the adapter. `submission_snapshot.py` is the shared pending-submission calculator, reused by `GameService` (early-wake checks) and `RecoveryService` (DM restoration on restart); reuse it rather than re-implement the "who still owes a submission" logic.
 
@@ -144,7 +179,22 @@ During wolf-attack splits, the main channel announces only `未確定: N件` (hi
 
 ### LLM integration
 
-`src/wolfbot/services/llm_service.py` exposes three deciders selected by `make_llm_decider(settings)` based on `settings.LLM_PROVIDER`. `XAILLMActionDecider` calls `https://api.x.ai/v1/chat/completions` with `response_format={"type":"json_schema", "json_schema": RESPONSE_SCHEMA}` strict mode (Grok rejects `reasoning_effort`/`extra_body`, so the xAI path deliberately sends neither). `DeepSeekLLMActionDecider` calls `https://api.deepseek.com` with `response_format={"type":"json_object"}` (DeepSeek doesn't support strict json_schema) plus a per-call JSON contract appended to the system prompt by `_deepseek_json_contract` so the model knows the exact field names; `DEEPSEEK_THINKING` toggles `extra_body={"thinking": {"type": ...}}` and, when enabled, forwards `reasoning_effort` (`high`/`max`). DeepSeek's `reasoning_content` is intentionally never read, logged, or persisted — only `message.content` is consumed. `GeminiLLMActionDecider` calls Vertex AI's Gemini API via the official `google-genai` SDK (`genai.Client(vertexai=True, project=..., location=...)` — endpoint is in the `aiplatform.googleapis.com` family, resolved by the SDK; with `location="global"` the SDK targets `https://aiplatform.googleapis.com/`). Authentication is ADC/IAM only (no API key); locally `gcloud auth application-default login`, in production an attached service account with Vertex AI permissions. Vertex AI Express mode and API-key auth are deliberately unsupported. Request shape: `client.aio.models.generate_content(...)` with `response_mime_type="application/json"` + `response_json_schema=RESPONSE_SCHEMA["schema"]` (Gemini 3 structured outputs), plus `thinking_config=types.ThinkingConfig(thinking_level=...)`; default `thinking_level="high"`. Gemini's internal thinking / thought signatures are never read, logged, or persisted — only `resp.text` is consumed (parallel to DeepSeek's `reasoning_content` rule). All three paths funnel through `LLMAction.model_validate_json` and share the same `tenacity` retry policy. The runtime markdown template (`src/wolfbot/prompts/llm_system_prompt.md`) is unchanged — the DeepSeek JSON contract is added at decider time only on the DeepSeek path; Gemini relies on `response_json_schema` and xAI on `json_schema` strict mode.
+`src/wolfbot/services/llm_service.py` exposes three deciders selected by `make_llm_decider(cfg)` where `cfg: LLMDeciderConfig` is built from `MasterSettings.gameplay_decider_config()` (or `NpcSettings.npc_decider_config()` on the NPC side). The provider switch is one shared abstraction (`wolfbot.llm.decider_config.LLMDeciderConfig`) used by both the gameplay decider factory and the NPC speech generator factory (`wolfbot.npc.generator_factory.make_npc_generator`). The Master env prefix is `GAMEPLAY_LLM_*`; the NPC env prefix is `NPC_LLM_*`; the field semantics (provider, api_key, model, base_url, thinking, reasoning_effort, vertex_project, vertex_location, thinking_level) are identical.
+
+`XAILLMActionDecider` calls the configured OpenAI-compatible endpoint (default `https://api.x.ai/v1/chat/completions`; override via `*_LLM_BASE_URL` to point at OpenAI / Groq / Together / vLLM / Ollama / etc.) with `response_format={"type":"json_schema", "json_schema": RESPONSE_SCHEMA}` strict mode. Grok rejects `reasoning_effort`/`extra_body`, so the xAI path deliberately sends neither. `DeepSeekLLMActionDecider` calls `https://api.deepseek.com` with `response_format={"type":"json_object"}` (DeepSeek doesn't support strict json_schema) plus a per-call JSON contract appended to the system prompt by `_deepseek_json_contract` so the model knows the exact field names; `*_LLM_THINKING` toggles `extra_body={"thinking": {"type": ...}}` and, when enabled, forwards `reasoning_effort` (`high`/`max`). DeepSeek's `reasoning_content` is intentionally never read, logged, or persisted — only `message.content` is consumed. `GeminiLLMActionDecider` calls Vertex AI's Gemini API via the official `google-genai` SDK (`genai.Client(vertexai=True, project=..., location=...)` — endpoint is in the `aiplatform.googleapis.com` family, resolved by the SDK; with `location="global"` the SDK targets `https://aiplatform.googleapis.com/`). Authentication is ADC/IAM only (no API key); locally `gcloud auth application-default login`, in production an attached service account with Vertex AI permissions. Vertex AI Express mode and API-key auth are deliberately unsupported. Request shape: `client.aio.models.generate_content(...)` with `response_mime_type="application/json"` + `response_json_schema=RESPONSE_SCHEMA["schema"]` (Gemini 3 structured outputs), plus `thinking_config=types.ThinkingConfig(thinking_level=...)`; default `thinking_level="high"`. Gemini's internal thinking / thought signatures are never read, logged, or persisted — only `resp.text` is consumed (parallel to DeepSeek's `reasoning_content` rule). All three paths funnel through `LLMAction.model_validate_json` and share the same `tenacity` retry policy. The runtime markdown template (`src/wolfbot/prompts/llm_system_prompt.md`) is unchanged — the DeepSeek JSON contract is added at decider time only on the DeepSeek path; Gemini relies on `response_json_schema` and xAI on `json_schema` strict mode.
+
+The NPC speech path mirrors this exactly: `OpenAICompatibleNpcGenerator` handles xAI / OpenAI / DeepSeek (with `mode="json_object"`) by reusing the same decider-config-style switch in its config dataclass; `GeminiNpcGenerator` handles Vertex AI. The factory `wolfbot.npc.generator_factory.make_npc_generator(cfg, persona_key)` picks the right one based on `cfg.provider` and binds the persona to the worker process.
+
+### Reactive voice pipeline (realtime chat)
+
+When `LLM_DISCUSSION_MODE=reactive_voice` and `MASTER_NPC_PSK` is set, `main.py` wires a realtime voice pipeline:
+
+- **Master side** (`main.py`): `InMemoryNpcRegistry` + `SpeakArbiter` + `MasterIngestService` + `WebsocketsMasterWsServer`. The Master joins VC via `voice_recv.VoiceRecvClient` + `WolfbotAudioSink` for STT ingest, receives human speech via `GeminiAudioAnalyzer`, and dispatches NPC turns via the arbiter. On phase enter, `_on_reactive_phase_enter` assigns online NPCs to LLM seats.
+- **NPC side** (`wolfbot.npc.main`, one process per NPC bot, **bound to one persona at startup**): `discord.Client` joins VC → WebSocket to Master (PSK auth, register payload carries `persona_key`) → `NpcClient` handles `SpeakRequest` → `OpenAICompatibleNpcGenerator` (NPC LLM call, structured JSON; default targets xAI Grok) renders speech in the bound persona → `NpcSpeechService` → `VoicevoxTtsService` (local VOICEVOX, 24kHz WAV) → `DiscordVoicePlayback` (`discord.FFmpegPCMAudio`). All NPC-side modules live under `wolfbot.npc.*`; the Master-side counterpart (`InMemoryNpcRegistry`, `SpeakArbiter`, `MasterIngestService`, `WebsocketsMasterWsServer`) lives under `wolfbot.master.*`. The NPC LLM backend is swappable via `NPC_LLM_BASE_URL` + `NPC_LLM_MODEL` in the persona's env file — no code change needed to point at OpenAI / Groq / Together / vLLM / Ollama / etc.
+
+- **Persona binding model**: each NPC bot embodies one persona forever (declared via `NPC_PERSONA_KEY` in its env file, validated against `NPC_PERSONAS_BY_KEY` at startup). On `npc_register` the NPC bot tells Master its `persona_key`; Master stores it on `NpcEntry`. When `/wolf start` runs in `reactive_voice` mode, `WolfCog._select_llm_seat_personas` pulls online NPC bots from the registry (skipping any already assigned to another active game) and uses their personas as the LLM seats — there is no separate "Master rolls personas" step. If fewer NPC bots are online than the LLM-seat shortfall, `/wolf start` fails with a friendly message. In `rounds` mode (no NPC bot processes), the same path falls through to a random `pick_personas(NPC_PERSONAS, ...)` draw because Master drives those LLM seats internally without VC playback.
+- **Seat assignment**: `_on_reactive_phase_enter` in `main.py` pairs online NPC bots with unassigned LLM seats via `npc_registry.assign()`. The arbiter only dispatches to NPCs with an assigned seat.
+- **Entry point**: `WOLFBOT_NPC_ENV=envs/npc/.env.<persona> uv run wolfbot-npc` (each persona has its own committed `envs/npc/.env.<persona>.example` template; copy it to `envs/npc/.env.<persona>`, fill in the secrets — `NPC_DISCORD_TOKEN`, `MASTER_NPC_PSK`, `NPC_LLM_API_KEY`, `DISCORD_GUILD_ID`, `MAIN_VOICE_CHANNEL_ID` — and start one process per persona). See [envs/npc/README.md](envs/npc/README.md) for the persona / TTS_VOICE_ID table.
 
 The system prompt is **composed per actor** by `src/wolfbot/llm/prompt_builder.py`, not loaded verbatim. Three programmatically-generated blocks are layered onto `src/wolfbot/prompts/llm_system_prompt.md`: `_build_game_rules_block()` (9-player ruleset derived from `ROLE_DISTRIBUTION` + `VILLAGE_SIZE` so the canonical numbers aren't duplicated, plus the shared reasoning heuristics every seat sees — currently CO evaluation: a **never-countered** single role-CO is presumed near-real, but a **sole survivor** of a contested CO history (same role had ≥2 COs, others died) is **not** auto-trusted; topical mention of a CO ("the seer CO 〜について") is distinguished from self-declaration; counter-COs and divination/attack alignment feed the judgment), `_ROLE_STRATEGIES[role]` (role-scoped tactical hints — wolf/madman carry day-phased fake-CO playbooks that deliberately mirror each other, knight carries peaceful-morning guard-CO guidance, seer/medium/villager carry judgment-integrity rules (villager strategy explicitly forbids 「村人CO」/「素村CO」 and equivalents); cross-leak tests assert one role never sees another's strategy), and `_build_speech_profile_block(persona)` (the persona's 話法 section). Routing when editing: shared heuristics every seat should see → `_build_game_rules_block`; role-specific strategy → `_ROLE_STRATEGIES`; base framing / output format / hard invariants → the markdown template. The markdown is a template, not the whole prompt.
 

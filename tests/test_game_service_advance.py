@@ -585,6 +585,91 @@ async def test_host_abort_ends_game(
     assert any(c.name == "on_game_end" for c in disc.calls)
 
 
+async def test_host_abort_invokes_on_reactive_game_end_callback(
+    repo: SqliteRepo,
+) -> None:
+    """The reactive_voice plumbing release path must fire on host_abort so
+    NPC bots leave VC. Mirrors `discord.on_game_end` but on a separate hook
+    so reactive_voice plumbing stays out of the GameService core."""
+    disc = FakeDiscordAdapter()
+    llm = FakeLLMAdapter()
+    reg = EngineRegistry()
+    fired: list[str] = []
+
+    async def on_end(game_id: str) -> None:
+        fired.append(game_id)
+
+    service = GameService(
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        rng=random.Random(0),
+        on_reactive_game_end=on_end,
+    )
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+
+    ok = await service.host_abort(game.id)
+    assert ok
+    assert fired == [game.id]
+
+
+async def test_host_abort_invokes_finalize_hook(
+    repo: SqliteRepo,
+) -> None:
+    """The finalize hook (used to export viewer JSON) must fire on host_abort."""
+    disc = FakeDiscordAdapter()
+    llm = FakeLLMAdapter()
+    reg = EngineRegistry()
+    finalized: list[str] = []
+
+    async def on_finalize(game_id: str) -> None:
+        finalized.append(game_id)
+
+    service = GameService(
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        rng=random.Random(0),
+        on_game_end_finalize=on_finalize,
+    )
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+
+    ok = await service.host_abort(game.id)
+    assert ok
+    assert finalized == [game.id]
+
+
+async def test_finalize_hook_swallows_exceptions(
+    repo: SqliteRepo,
+) -> None:
+    """A failing finalize hook (e.g. export disk-full) MUST NOT block teardown."""
+    disc = FakeDiscordAdapter()
+    llm = FakeLLMAdapter()
+    reg = EngineRegistry()
+
+    async def on_finalize(_game_id: str) -> None:
+        raise RuntimeError("disk full")
+
+    service = GameService(
+        repo=repo,
+        discord=disc,
+        llm=llm,
+        wake=reg,
+        rng=random.Random(0),
+        on_game_end_finalize=on_finalize,
+    )
+    game = await _make_game_in_setup(repo)
+    await service.advance(game.id)
+
+    # Abort should still succeed despite the finalize hook raising.
+    ok = await service.host_abort(game.id)
+    assert ok
+
+
 async def test_host_abort_returns_false_when_already_ended(
     repo: SqliteRepo,
     svc: tuple[GameService, FakeDiscordAdapter, FakeLLMAdapter, EngineRegistry, FakeClock],
@@ -1870,20 +1955,12 @@ async def test_mixed_human_llm_wolf_split_triggers_early_wake(
     wakes: list[str] = []
     reg.wake = lambda gid: wakes.append(gid)  # type: ignore[method-assign]
 
-    await service.submit_night_action(
-        game.id, 2, SubmissionType.SEER_DIVINE, 9, day=1
-    )
-    await service.submit_night_action(
-        game.id, 3, SubmissionType.KNIGHT_GUARD, 2, day=1
-    )
+    await service.submit_night_action(game.id, 2, SubmissionType.SEER_DIVINE, 9, day=1)
+    await service.submit_night_action(game.id, 3, SubmissionType.KNIGHT_GUARD, 2, day=1)
     # Wolves split: human picks 4, LLM picks 5. Human-wolf priority resolves
     # in favor of seat 4, so the night is decided.
-    await service.submit_night_action(
-        game.id, 1, SubmissionType.WOLF_ATTACK, 4, day=1
-    )
-    await service.submit_night_action(
-        game.id, 9, SubmissionType.WOLF_ATTACK, 5, day=1
-    )
+    await service.submit_night_action(game.id, 1, SubmissionType.WOLF_ATTACK, 4, day=1)
+    await service.submit_night_action(game.id, 9, SubmissionType.WOLF_ATTACK, 5, day=1)
 
     assert wakes == [game.id]
 

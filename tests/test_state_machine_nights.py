@@ -622,11 +622,12 @@ def test_llm_shortfall_padding_count() -> None:
     """Given N humans, pick_personas(9-N) returns exactly the shortfall."""
     import random as _r
 
-    from wolfbot.llm.personas import pick_personas
+    from wolfbot.llm.persona_base import pick_personas
+    from wolfbot.npc.personas import NPC_PERSONAS
 
     rng = _r.Random(0)
     for n in range(0, 10):
-        picks = pick_personas(9 - n, rng)
+        picks = pick_personas(NPC_PERSONAS, 9 - n, rng)
         assert len(picks) == 9 - n
         assert len({p.key for p in picks}) == 9 - n
 

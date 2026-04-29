@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from random import Random
 
+from wolfbot.domain.durations import current_phase_durations
 from wolfbot.domain.enums import (
     FACTION_JA,
     ROLE_JA,
@@ -55,23 +56,44 @@ from wolfbot.domain.rules import (
     resolve_wolf_attack,
 )
 
-VOTE_DURATION = 60
-RUNOFF_DURATION = 60
-NIGHT_DURATION = 90
-
-# Re-check interval used by `plan_day_discussion_wait` — engine sleeps this long
-# between checks when the discussion deadline has passed but at least one alive
-# LLM seat hasn't completed both rounds. The LLM completion path also calls
-# `wake.wake(game_id)`, so this is a fallback ceiling, not the typical wait time.
-DAY_DISCUSSION_GRACE = 30
-
 # Initial deadline for DAY_RUNOFF_SPEECH. Acts as a safety net so a hung LLM
 # task doesn't freeze the game; the LLM dispatcher's per-seat `finally` block
 # always advances `runoff_speech_done` so the engine can move on.
+#
+# Not part of :class:`PhaseDurations` because it's a hard safety floor rather
+# than a tunable phase length — adjust here if real LLM submissions need more
+# headroom, but don't expose it to the duration_factor knob.
 RUNOFF_SPEECH_DEADLINE = 60
 
-# Re-check interval used by `plan_runoff_speech_wait`, mirroring DAY_DISCUSSION_GRACE.
-RUNOFF_SPEECH_GRACE = 30
+
+# Backwards-compatible re-exports of the historical ``int`` constants.
+# Per :pep:`562`, this module-level ``__getattr__`` is consulted when a
+# name is not found in the module's normal namespace, so
+# ``state_machine.VOTE_DURATION`` returns the *current* singleton value
+# at access time rather than a stale snapshot from import.
+#
+# Note: ``from wolfbot.domain.state_machine import VOTE_DURATION`` still
+# binds the local name to the value resolved at import time, so any
+# tests that rely on dynamic re-reading must access the constant via
+# ``current_phase_durations()`` directly. The aliases here exist so
+# (a) tests that assert against the default value keep working, and
+# (b) any third-party caller that reads the module attribute gets the
+# current value.
+_DURATION_ALIASES: dict[str, str] = {
+    "VOTE_DURATION": "vote",
+    "RUNOFF_DURATION": "runoff",
+    "NIGHT_DURATION": "night",
+    "DAY_DISCUSSION_GRACE": "day_discussion_grace",
+    "RUNOFF_SPEECH_GRACE": "runoff_speech_grace",
+}
+
+
+def __getattr__(name: str) -> int:
+    field = _DURATION_ALIASES.get(name)
+    if field is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value: int = getattr(current_phase_durations(), field)
+    return value
 
 
 # ---------------------------------------------------------------- helpers
@@ -83,14 +105,22 @@ def _name(seats: Mapping[int, Seat], seat_no: int) -> str:
 
 
 def _public_log(
-    game: Game, kind: str, text: str, now_epoch: int, phase: Phase | None = None
+    game: Game,
+    kind: str,
+    text: str,
+    now_epoch: int,
+    phase: Phase | None = None,
+    actor_seat: int | None = None,
 ) -> LogEntry:
+    # `actor_seat` is forwarded so EXECUTION (target) and MORNING (victim)
+    # carry the affected seat. Master Levi narration reads this field to
+    # voice the actual seat label instead of "対象不明".
     return LogEntry(
         game_id=game.id,
         day=game.day_number,
         phase=phase or game.phase,
         kind=kind,
-        actor_seat=None,
+        actor_seat=actor_seat,
         visibility="PUBLIC",
         text=text,
         created_at=now_epoch,
@@ -307,7 +337,7 @@ def plan_day_discussion_to_vote(game: Game, now_epoch: int) -> Transition:
     return Transition(
         next_phase=Phase.DAY_VOTE,
         next_day=game.day_number,
-        new_deadline_epoch=now_epoch + VOTE_DURATION,
+        new_deadline_epoch=now_epoch + current_phase_durations().vote,
         public_logs=(pub,),
     )
 
@@ -394,7 +424,7 @@ def plan_day_vote_resolve(
         return Transition(
             next_phase=Phase.DAY_RUNOFF,
             next_day=game.day_number,
-            new_deadline_epoch=now_epoch + RUNOFF_DURATION,
+            new_deadline_epoch=now_epoch + current_phase_durations().runoff,
             public_logs=(pub,),
             clear_force_skip=True,
         )
@@ -409,7 +439,7 @@ def plan_day_vote_resolve(
     return Transition(
         next_phase=Phase.NIGHT,
         next_day=game.day_number,
-        new_deadline_epoch=now_epoch + NIGHT_DURATION,
+        new_deadline_epoch=now_epoch + current_phase_durations().night,
         public_logs=(pub,),
         clear_force_skip=True,
     )
@@ -479,7 +509,7 @@ def plan_day_runoff_resolve(
     return Transition(
         next_phase=Phase.NIGHT,
         next_day=game.day_number,
-        new_deadline_epoch=now_epoch + NIGHT_DURATION,
+        new_deadline_epoch=now_epoch + current_phase_durations().night,
         public_logs=(pub,),
         clear_force_skip=True,
     )
@@ -510,7 +540,7 @@ def _apply_execution(
         return Transition(
             next_phase=Phase.NIGHT,
             next_day=game.day_number,
-            new_deadline_epoch=now_epoch + NIGHT_DURATION,
+            new_deadline_epoch=now_epoch + current_phase_durations().night,
             public_logs=(pub,),
             clear_force_skip=clear_force,
         )
@@ -521,6 +551,7 @@ def _apply_execution(
             kind="EXECUTION",
             text=f"{exec_name} が処刑されました。{tally_suffix}",
             now_epoch=now_epoch,
+            actor_seat=executed_seat,
         ),
     )
     updates = (
@@ -554,7 +585,7 @@ def _apply_execution(
     return Transition(
         next_phase=Phase.NIGHT,
         next_day=game.day_number,
-        new_deadline_epoch=now_epoch + NIGHT_DURATION,
+        new_deadline_epoch=now_epoch + current_phase_durations().night,
         player_updates=updates,
         public_logs=public_logs,
         newly_dead_seats=(executed_seat,),
@@ -773,6 +804,7 @@ def plan_night_resolve(
             text=morning_text,
             now_epoch=now_epoch,
             phase=Phase.DAY_DISCUSSION,
+            actor_seat=killed_seat,
         ),
     )
 
@@ -848,7 +880,7 @@ def plan_day_discussion_wait(game: Game, now_epoch: int) -> Transition:
     return Transition(
         next_phase=Phase.DAY_DISCUSSION,
         next_day=game.day_number,
-        new_deadline_epoch=now_epoch + DAY_DISCUSSION_GRACE,
+        new_deadline_epoch=now_epoch + current_phase_durations().day_discussion_grace,
     )
 
 
@@ -875,7 +907,7 @@ def plan_runoff_speech_to_runoff(
     return Transition(
         next_phase=Phase.DAY_RUNOFF,
         next_day=game.day_number,
-        new_deadline_epoch=now_epoch + RUNOFF_DURATION,
+        new_deadline_epoch=now_epoch + current_phase_durations().runoff,
         public_logs=(pub,),
     )
 
@@ -891,17 +923,24 @@ def plan_runoff_speech_wait(game: Game, now_epoch: int) -> Transition:
     return Transition(
         next_phase=Phase.DAY_RUNOFF_SPEECH,
         next_day=game.day_number,
-        new_deadline_epoch=now_epoch + RUNOFF_SPEECH_GRACE,
+        new_deadline_epoch=now_epoch + current_phase_durations().runoff_speech_grace,
     )
 
 
+# Names listed below that are NOT bound at module level
+# (DAY_DISCUSSION_GRACE / NIGHT_DURATION / RUNOFF_DURATION /
+# RUNOFF_SPEECH_GRACE / VOTE_DURATION) are exported dynamically through
+# the module-level ``__getattr__`` defined above (PEP 562). They are
+# intentionally part of the public API for backwards compatibility with
+# code that imports the historical constants. Ruff cannot see the
+# dynamic binding, hence the ``noqa: F822`` markers.
 __all__ = [
-    "DAY_DISCUSSION_GRACE",
-    "NIGHT_DURATION",
-    "RUNOFF_DURATION",
+    "DAY_DISCUSSION_GRACE",  # noqa: F822 — see PEP 562 __getattr__ above
+    "NIGHT_DURATION",  # noqa: F822
+    "RUNOFF_DURATION",  # noqa: F822
     "RUNOFF_SPEECH_DEADLINE",
-    "RUNOFF_SPEECH_GRACE",
-    "VOTE_DURATION",
+    "RUNOFF_SPEECH_GRACE",  # noqa: F822
+    "VOTE_DURATION",  # noqa: F822
     "plan_day_discussion_to_vote",
     "plan_day_discussion_wait",
     "plan_day_runoff_resolve",

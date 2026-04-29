@@ -24,7 +24,8 @@ DDL: list[str] = [
         wolves_channel_id TEXT,
         created_at INTEGER NOT NULL,
         ended_at INTEGER,
-        force_skip_pending INTEGER NOT NULL DEFAULT 0
+        force_skip_pending INTEGER NOT NULL DEFAULT 0,
+        discussion_mode TEXT NOT NULL DEFAULT 'rounds'
     )
     """,
     """
@@ -150,6 +151,100 @@ DDL: list[str] = [
         PRIMARY KEY (game_id, day, seat_no)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS speech_events (
+        event_id TEXT PRIMARY KEY,
+        game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        phase_id TEXT NOT NULL,
+        day INTEGER NOT NULL,
+        phase TEXT NOT NULL,
+        source TEXT NOT NULL,
+        speaker_kind TEXT NOT NULL,
+        speaker_seat INTEGER,
+        text TEXT NOT NULL,
+        stt_confidence REAL,
+        audio_start_ms INTEGER,
+        audio_end_ms INTEGER,
+        alive_seat_nos_json TEXT,
+        summary TEXT,
+        co_declaration TEXT,
+        addressed_seat_no INTEGER,
+        addressed_seat_nos_json TEXT,
+        role_callout TEXT,
+        created_at_ms INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_speech_events_phase
+        ON speech_events(game_id, phase_id, created_at_ms)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_speech_events_seat
+        ON speech_events(game_id, phase_id, speaker_seat)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS npc_speak_requests (
+        request_id TEXT PRIMARY KEY,
+        game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        phase_id TEXT NOT NULL,
+        npc_id TEXT NOT NULL,
+        seat_no INTEGER NOT NULL,
+        logic_packet_id TEXT NOT NULL,
+        suggested_intent TEXT NOT NULL,
+        max_chars INTEGER NOT NULL,
+        max_duration_ms INTEGER NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 0,
+        expires_at_ms INTEGER NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        selection_reason TEXT,
+        public_state_snapshot_json TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_npc_speak_requests_game_phase
+        ON npc_speak_requests(game_id, phase_id, expires_at_ms)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS npc_speak_results (
+        request_id TEXT PRIMARY KEY,
+        game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        phase_id TEXT NOT NULL,
+        npc_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        text TEXT,
+        used_logic_ids_json TEXT,
+        intent TEXT,
+        estimated_duration_ms INTEGER,
+        failure_reason TEXT,
+        received_at_ms INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_npc_speak_results_phase
+        ON npc_speak_results(game_id, phase_id, received_at_ms)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS npc_playback_events (
+        request_id TEXT PRIMARY KEY,
+        game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        phase_id TEXT NOT NULL,
+        npc_id TEXT NOT NULL,
+        speech_event_id TEXT,
+        authorized_at_ms INTEGER NOT NULL,
+        playback_deadline_ms INTEGER NOT NULL,
+        finished_at_ms INTEGER,
+        outcome TEXT,
+        failure_reason TEXT,
+        tts_outcome TEXT,
+        tts_duration_ms INTEGER,
+        tts_failure_reason TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_npc_playback_events_open
+        ON npc_playback_events(game_id, finished_at_ms)
+        WHERE finished_at_ms IS NULL
+    """,
 ]
 
 
@@ -173,6 +268,10 @@ async def migrate(db_path: str | Path) -> None:
             await db.execute(
                 "ALTER TABLE games ADD COLUMN force_skip_pending INTEGER NOT NULL DEFAULT 0"
             )
+        if "discussion_mode" not in cols:
+            await db.execute(
+                "ALTER TABLE games ADD COLUMN discussion_mode TEXT NOT NULL DEFAULT 'rounds'"
+            )
         async with db.execute("PRAGMA table_info(seats)") as cur:
             cols = {row[1] async for row in cur}
         if "dm_channel_id" not in cols:
@@ -192,5 +291,36 @@ async def migrate(db_path: str | Path) -> None:
             await db.execute(
                 "ALTER TABLE llm_speech_counts "
                 "ADD COLUMN runoff_speech_done INTEGER NOT NULL DEFAULT 0"
+            )
+        async with db.execute("PRAGMA table_info(speech_events)") as cur:
+            cols = {row[1] async for row in cur}
+        if "summary" not in cols:
+            await db.execute("ALTER TABLE speech_events ADD COLUMN summary TEXT")
+        if "co_declaration" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events ADD COLUMN co_declaration TEXT"
+            )
+        if "addressed_seat_no" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events ADD COLUMN addressed_seat_no INTEGER"
+            )
+        if "addressed_seat_nos_json" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events ADD COLUMN addressed_seat_nos_json TEXT"
+            )
+        if "role_callout" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events ADD COLUMN role_callout TEXT"
+            )
+        async with db.execute("PRAGMA table_info(npc_speak_requests)") as cur:
+            cols = {row[1] async for row in cur}
+        if "selection_reason" not in cols:
+            await db.execute(
+                "ALTER TABLE npc_speak_requests ADD COLUMN selection_reason TEXT"
+            )
+        if "public_state_snapshot_json" not in cols:
+            await db.execute(
+                "ALTER TABLE npc_speak_requests "
+                "ADD COLUMN public_state_snapshot_json TEXT"
             )
         await db.commit()

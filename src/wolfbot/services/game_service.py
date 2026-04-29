@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from random import Random
 from typing import Protocol, runtime_checkable
 
@@ -143,6 +143,10 @@ class GameService:
         wake: WakeSink,
         clock: Callable[[], int] = lambda: int(time.time()),
         rng: Random | None = None,
+        on_reactive_phase_enter: Callable[[str], Awaitable[None]] | None = None,
+        on_reactive_game_end: Callable[[str], Awaitable[None]] | None = None,
+        on_game_end_finalize: Callable[[str], Awaitable[None]] | None = None,
+        phase_d_state_pusher: object | None = None,
     ) -> None:
         self.repo = repo
         self.discord = discord
@@ -151,6 +155,28 @@ class GameService:
         self.clock = clock
         self.rng = rng or Random()
         self._advance_locks: dict[str, asyncio.Lock] = {}
+        self._on_reactive_phase_enter = on_reactive_phase_enter
+        # Symmetric to `on_reactive_phase_enter`: invoked at natural end and
+        # host abort so reactive_voice plumbing (NPC seat assignments, VC
+        # joins) can be released.
+        self._on_reactive_game_end = on_reactive_game_end
+        # Fires once per game-end (natural victory OR host abort), AFTER
+        # ``repo.end_game`` has committed, so the hook sees the row in its
+        # final ended_at state. Used to trigger the viewer JSON export
+        # without blocking gameplay — exceptions are logged + swallowed.
+        self._on_game_end_finalize = on_game_end_finalize
+        # Phase-D: optional state pusher that fans out PrivateStateUpdate
+        # messages to NPC bots after each apply_transition. Constructed
+        # in main.py only when reactive_voice is enabled; rounds-mode
+        # never sets it so the existing path is byte-for-byte unchanged.
+        self._phase_d_state_pusher = phase_d_state_pusher
+
+    def set_phase_d_state_pusher(self, pusher: object) -> None:
+        """Late-bind the Phase-D pusher. main.py constructs the pusher
+        only after the NPC registry exists (inside the reactive_voice
+        wiring block), which lands after GameService itself is built;
+        this setter breaks the order dependency."""
+        self._phase_d_state_pusher = pusher
 
     def _lock_for(self, game_id: str) -> asyncio.Lock:
         lock = self._advance_locks.get(game_id)
@@ -238,12 +264,35 @@ class GameService:
             else:
                 await self._safe_post_public(new_game, entry.text, entry.kind)
 
+        # Phase-D: fan out PrivateStateUpdate messages to NPC bots so each
+        # seat's in-memory mirror absorbs the seer/medium/guard results,
+        # alive-set changes, and day_advanced ticks before the next
+        # decision request fires. No-op for rounds-mode games (the pusher
+        # short-circuits on `discussion_mode != "reactive_voice"`).
+        pusher = self._phase_d_state_pusher
+        if pusher is not None:
+            push_after_advance = getattr(pusher, "push_after_advance", None)
+            if push_after_advance is not None:
+                try:
+                    await push_after_advance(
+                        game=new_game,
+                        prev_phase=previous_phase,
+                        private_logs=transition.private_logs,
+                        public_logs=transition.public_logs,
+                    )
+                except Exception:
+                    log.exception("phase_d_state_push_failed game=%s", game_id)
+
         # 4. Announce WAITING status if we paused.
         if transition.requires_host_decision and transition.pending is not None:
             try:
                 await self.discord.announce_waiting(new_game, transition.pending, seats)
             except Exception:
                 log.exception("waiting announce failed for %s", game_id)
+
+        # 4.5. Emit discussion_phase_summary when leaving a public-speech phase.
+        if previous_phase in (Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH):
+            await self._emit_discussion_phase_summary(game, previous_phase)
 
         # 5. On entering DAY_VOTE / DAY_RUNOFF / NIGHT / DAY_DISCUSSION /
         #    DAY_RUNOFF_SPEECH, kick off DMs and LLM tasks.
@@ -255,7 +304,15 @@ class GameService:
                 await self.discord.on_game_end(new_game, seats)
             except Exception:
                 log.exception("on_game_end failed for %s", game_id)
+            if self._on_reactive_game_end is not None:
+                try:
+                    await self._on_reactive_game_end(game_id)
+                except Exception:
+                    log.exception(
+                        "on_reactive_game_end failed for %s", game_id
+                    )
             await self.repo.end_game(game_id, ended_at_epoch=self.clock())
+            await self._run_finalize_hook(game_id)
 
         # 7. Wake the engine so it reschedules on the new deadline.
         self.wake.wake(game_id)
@@ -276,6 +333,14 @@ class GameService:
             # alive LLM seat has completed both speech rounds. Otherwise either
             # park (no-op return None — engine sleeps to deadline) or commit a
             # short same-phase grace transition.
+            #
+            # Under reactive_voice mode there are no fixed rounds; LLMs speak
+            # event-driven via SpeakArbiter, so the deadline is the sole gate.
+            deadline_passed = game.deadline_epoch is not None and now >= game.deadline_epoch
+            if game.discussion_mode == "reactive_voice":
+                if deadline_passed:
+                    return plan_day_discussion_to_vote(game, now)
+                return None
             seats_by_no = {s.seat_no: s for s in seats}
             alive_llm_seats = [
                 p.seat_no
@@ -290,7 +355,6 @@ class GameService:
                 if progress[3] < 2:  # discussion_rounds_done
                     rounds_done = False
                     break
-            deadline_passed = game.deadline_epoch is not None and now >= game.deadline_epoch
             if deadline_passed and rounds_done:
                 return plan_day_discussion_to_vote(game, now)
             if deadline_passed and not rounds_done:
@@ -387,6 +451,25 @@ class GameService:
             # Same-phase grace re-commit must not redispatch.
             if previous_phase is Phase.DAY_RUNOFF_SPEECH:
                 return
+            # In reactive_voice mode the rounds-mode batch (Master gameplay
+            # LLM → Discord text post) skips the entire NPC-bot TTS path,
+            # so candidates' final speeches end up as silent text. Route
+            # through the reactive phase-enter callback instead — it joins
+            # VC, seeds the phase baseline, assigns NPCs to seats, and
+            # kicks SpeakArbiter, which now picks tied candidates one at a
+            # time and dispatches via the NPC bot pipeline (with VOICEVOX
+            # playback). `runoff_speech_done` is marked by the arbiter as
+            # each candidate's SpeakResult or failure path resolves.
+            if new_game.discussion_mode == "reactive_voice":
+                if self._on_reactive_phase_enter is not None:
+                    try:
+                        await self._on_reactive_phase_enter(new_game.id)
+                    except Exception:
+                        log.exception(
+                            "reactive_voice runoff phase enter failed for %s",
+                            new_game.id,
+                        )
+                return
             round0 = await self.repo.load_votes(new_game.id, day=new_game.day_number, round_=0)
             alive_set = {p.seat_no for p in players_after if p.alive}
             tied = list(compute_vote_result(round0, alive_set).tied)
@@ -435,10 +518,58 @@ class GameService:
             if previous_phase is Phase.DAY_DISCUSSION:
                 return
             alive_players = [p for p in players_after if p.alive]
+            # Mode-fixed dispatch: under reactive_voice we skip the rounds-mode
+            # LLM batch entirely. Reactive speech is driven event-by-event by
+            # SpeakArbiter via the WS server, not by the timer-driven engine.
+            if new_game.discussion_mode == "reactive_voice":
+                log.info(
+                    "reactive_voice_phase_entered game=%s day=%d",
+                    new_game.id,
+                    new_game.day_number,
+                )
+                if self._on_reactive_phase_enter is not None:
+                    try:
+                        await self._on_reactive_phase_enter(new_game.id)
+                    except Exception:
+                        log.exception(
+                            "reactive_phase_enter callback failed for %s", new_game.id
+                        )
+                return
             try:
                 await self.llm.submit_llm_discussion_rounds(new_game, alive_players, seats)
             except Exception:
                 log.exception("llm discussion rounds dispatch failed for %s", new_game.id)
+
+    async def _emit_discussion_phase_summary(self, game: Game, phase: Phase) -> None:
+        """Emit the discussion_phase_summary structured-log event.
+
+        Called when transitioning away from DAY_DISCUSSION or DAY_RUNOFF_SPEECH.
+        Best-effort: failures are logged but do not block the advance.
+        """
+        try:
+            from wolfbot.domain.discussion import make_phase_id
+            from wolfbot.services.discussion_phase_summary import emit_phase_summary
+            from wolfbot.services.discussion_service import DiscussionService
+
+            # Access the DiscussionService and repo through the LLM adapter
+            # which holds a reference. The summary emitter needs both.
+            ds: DiscussionService | None = getattr(self.llm, "discussion_service", None)
+            if ds is None:
+                return
+            phase_id = make_phase_id(game.id, game.day_number, phase)
+            await emit_phase_summary(
+                repo=self.repo,
+                discussion=ds,
+                game_id=game.id,
+                phase_id=phase_id,
+                mode=game.discussion_mode,
+            )
+        except Exception:
+            log.exception(
+                "discussion_phase_summary emission failed for game=%s phase=%s",
+                game.id,
+                phase.value,
+            )
 
     async def _safe_post_public(self, game: Game, text: str, kind: str) -> None:
         try:
@@ -748,6 +879,12 @@ class GameService:
         game = await self.repo.load_game(game_id)
         if game is None:
             return
+        # Under reactive_voice, LLM speech is driven event-by-event by the
+        # SpeakArbiter via the WS server — there are no fixed rounds to
+        # resume. Skip entirely so we don't spawn a legacy two-round batch
+        # that would violate the per-game mode contract.
+        if game.discussion_mode == "reactive_voice":
+            return
         seats = await self.repo.load_seats(game_id)
         seats_by_no = {s.seat_no: s for s in seats}
         players = await self.repo.load_players(game_id)
@@ -923,9 +1060,30 @@ class GameService:
             await self.discord.on_game_end(game, seats)
         except Exception:
             log.exception("on_game_end failed during abort %s", game_id)
+        if self._on_reactive_game_end is not None:
+            try:
+                await self._on_reactive_game_end(game_id)
+            except Exception:
+                log.exception(
+                    "on_reactive_game_end failed during abort %s", game_id
+                )
         await self.repo.end_game(game_id, ended_at_epoch=self.clock())
+        await self._run_finalize_hook(game_id)
         self.wake.wake(game_id)
         return True
+
+    async def _run_finalize_hook(self, game_id: str) -> None:
+        """Fire the post-game-end finalize hook (export, archival, etc).
+
+        Errors are logged and swallowed — finalization MUST NOT prevent
+        the engine from cleaning up the ended game.
+        """
+        if self._on_game_end_finalize is None:
+            return
+        try:
+            await self._on_game_end_finalize(game_id)
+        except Exception:
+            log.exception("on_game_end_finalize failed for %s", game_id)
 
 
 def new_game_id() -> str:

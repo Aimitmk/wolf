@@ -15,7 +15,7 @@ import re
 import pytest
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
-from wolfbot.domain.models import Game, LogEntry, NightAction, Seat, Vote
+from wolfbot.domain.models import Game, LogEntry, NightAction, Player, Seat, Vote
 from wolfbot.llm.prompt_builder import task_daytime_speech, task_night_action, task_vote
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.llm_service import LLMAction, LLMAdapter
@@ -122,6 +122,100 @@ async def test_submit_llm_votes_returns_before_decider_completes(repo: SqliteRep
     release.set()
     await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
     assert len(gs.votes) == 2
+
+
+async def test_submit_llm_votes_reactive_voice_routes_to_dispatcher(
+    repo: SqliteRepo,
+) -> None:
+    """Phase-D: reactive_voice games must skip the gameplay decider and ask
+    each NPC bot for its own vote. The decider must not be invoked at all
+    when the dispatcher is wired."""
+    game_rounds, seats = await _seed_vote_game(repo)
+    # Re-create the game row with discussion_mode=reactive_voice so the
+    # branch in submit_llm_votes triggers.
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET discussion_mode=? WHERE id=?",
+        ("reactive_voice", game_rounds.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+    game = (await repo.load_game(game_rounds.id))
+    assert game is not None
+    assert game.discussion_mode == "reactive_voice"
+
+    captured_dispatch: list[dict[int, int | None]] = []
+
+    class _StubDispatcher:
+        async def dispatch_votes(
+            self, *, game_id: str, day: int, round_: int,
+            voters: list[Player],  # type: ignore[name-defined]
+            seats: list[Seat],
+            candidate_seats: list[int],
+            public_state_summary: str = "",
+        ) -> dict[int, int | None]:
+            # Pretend NPC bots all chose seat 1 (the human).
+            result = {v.seat_no: 1 for v in voters}
+            captured_dispatch.append(result)
+            return result
+
+    gs = _FakeGameService()
+
+    class _UnusedDecider:
+        async def decide(self, *args: object, **kwargs: object) -> LLMAction:
+            raise AssertionError("gameplay decider must not be invoked in reactive_voice")
+
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=_UnusedDecider(),  # type: ignore[arg-type]
+        rng=random.Random(0),
+        npc_decision_dispatcher=_StubDispatcher(),
+    )
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+
+    players = await repo.load_players(game.id)
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # Both LLM seats voted seat 1 via the dispatcher.
+    assert len(captured_dispatch) == 1
+    voted_seats = {v[1] for v in gs.votes}
+    assert voted_seats == {2, 3}
+    targets = {v[1]: v[2] for v in gs.votes}
+    assert targets[2] == 1 and targets[3] == 1
+
+
+async def test_submit_llm_votes_reactive_voice_falls_back_when_no_dispatcher(
+    repo: SqliteRepo,
+) -> None:
+    """Without a dispatcher the reactive_voice branch can't fire, so the
+    historical gameplay-LLM decider is still used (back-compat for tests
+    that don't wire the dispatcher)."""
+    game_rounds, seats = await _seed_vote_game(repo)
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET discussion_mode=? WHERE id=?",
+        ("reactive_voice", game_rounds.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+    game = (await repo.load_game(game_rounds.id))
+    assert game is not None
+
+    gs = _FakeGameService()
+    decider = _ScriptedDecider(
+        [
+            LLMAction(intent="vote", target_name="H1", reason_summary="", confidence=0.5),
+            LLMAction(intent="vote", target_name="H1", reason_summary="", confidence=0.5),
+        ]
+    )
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    # No npc_decision_dispatcher configured.
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+
+    players = await repo.load_players(game.id)
+    await adapter.submit_llm_votes(game, players, seats, candidates=None, round_=0)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+    # Fell back to the gameplay decider.
+    assert decider.call_count == 2
 
 
 async def test_run_votes_aborts_when_phase_stale_at_dispatch(repo: SqliteRepo) -> None:
@@ -1710,7 +1804,7 @@ async def test_ask_system_prompt_seer_includes_counter_co_strategy(
     counter-CO (when a fake seer appears), and black-pull CO guidance so the
     true seer doesn't stay silent and cede single-truth treatment to a fake."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
-    assert "まだ占い師 CO が出ていない" in system_prompt
+    assert "占い師 CO が一切出ていない" in system_prompt
     assert "対抗 CO" in system_prompt
     assert "時系列で公開" in system_prompt
     assert "黒を引いた場合" in system_prompt
@@ -2513,12 +2607,14 @@ async def test_gemini_decider_sends_response_json_schema_and_thinking_level() ->
 
 def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """The provider-aware factory must wire the right decider class for each
-    LLM_PROVIDER value. Construction goes through Settings so the validator
-    runs end-to-end. The Gemini branch stubs `google.genai.Client` so the
-    test never depends on a live ADC environment."""
+    GAMEPLAY_LLM_PROVIDER value. Construction goes through MasterSettings so
+    the validator runs end-to-end and the projection through
+    ``gameplay_decider_config()`` is exercised. The Gemini branch stubs
+    ``google.genai.Client`` so the test never depends on a live ADC
+    environment."""
     from pydantic import SecretStr
 
-    from wolfbot.config import Settings
+    from wolfbot.config import MasterSettings
     from wolfbot.services.llm_service import (
         DeepSeekLLMActionDecider,
         GeminiLLMActionDecider,
@@ -2540,29 +2636,35 @@ def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) 
         "MAIN_TEXT_CHANNEL_ID": 2,
         "MAIN_VOICE_CHANNEL_ID": 3,
     }
-    s_xai = Settings(  # type: ignore[arg-type]
+    s_xai = MasterSettings(  # type: ignore[arg-type]
         _env_file=None,
         **base_kwargs,
-        LLM_PROVIDER="xai",
-        XAI_API_KEY=SecretStr("x"),
+        GAMEPLAY_LLM_PROVIDER="xai",
+        GAMEPLAY_LLM_API_KEY=SecretStr("x"),
     )
-    assert isinstance(make_llm_decider(s_xai), XAILLMActionDecider)
+    assert isinstance(
+        make_llm_decider(s_xai.gameplay_decider_config()), XAILLMActionDecider
+    )
 
-    s_ds = Settings(  # type: ignore[arg-type]
+    s_ds = MasterSettings(  # type: ignore[arg-type]
         _env_file=None,
         **base_kwargs,
-        LLM_PROVIDER="deepseek",
-        DEEPSEEK_API_KEY=SecretStr("d"),
+        GAMEPLAY_LLM_PROVIDER="deepseek",
+        GAMEPLAY_LLM_API_KEY=SecretStr("d"),
     )
-    assert isinstance(make_llm_decider(s_ds), DeepSeekLLMActionDecider)
+    assert isinstance(
+        make_llm_decider(s_ds.gameplay_decider_config()), DeepSeekLLMActionDecider
+    )
 
-    s_gem = Settings(  # type: ignore[arg-type]
+    s_gem = MasterSettings(  # type: ignore[arg-type]
         _env_file=None,
         **base_kwargs,
-        LLM_PROVIDER="gemini",
-        GEMINI_VERTEX_PROJECT="my-project",
+        GAMEPLAY_LLM_PROVIDER="gemini",
+        GAMEPLAY_LLM_VERTEX_PROJECT="my-project",
     )
-    assert isinstance(make_llm_decider(s_gem), GeminiLLMActionDecider)
+    assert isinstance(
+        make_llm_decider(s_gem.gameplay_decider_config()), GeminiLLMActionDecider
+    )
 
 
 def test_make_gemini_decider_constructs_vertex_ai_client(
@@ -2602,3 +2704,220 @@ def test_make_gemini_decider_constructs_vertex_ai_client(
     assert decider.model == "gemini-3-flash-preview"
     assert decider.thinking_level == "high"
     assert decider.timeout == 15.0
+
+
+# ---------------------------------------------------------- trace integration
+#
+# These verify that each provider's ``decide()`` actually flushes a JSONL
+# trace line carrying the right ``provider`` tag, the model name, the raw
+# response text, and token usage extracted from the SDK reply. The kwargs
+# tests above only check the request side; without these the trace could
+# silently regress (e.g. a provider rename, missing token extraction, or a
+# refactor that drops ``log_llm_call`` from one branch's ``finally``) and
+# still pass CI. Also covers the error path so a failure recorded into the
+# trace has ``response=None`` and a non-empty ``error`` string.
+
+
+class _FakeChatCompletionsWithUsage:
+    """Like ``_FakeChatCompletions`` but the response carries ``.usage`` so
+    the OpenAI-shaped token extractor returns real integers."""
+
+    def __init__(
+        self, content: str, usage: tuple[int, int, int] = (1500, 200, 1700)
+    ) -> None:
+        self._content = content
+        self._usage = usage
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        prompt, completion, total = self._usage
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content=self._content))
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                total_tokens=total,
+            ),
+        )
+
+
+class _FakeAsyncOpenAIWithUsage:
+    """OpenAI-shaped fake whose responses include ``usage``."""
+
+    def __init__(self, content: str, usage: tuple[int, int, int] = (1500, 200, 1700)) -> None:
+        from types import SimpleNamespace
+
+        self.chat = SimpleNamespace(
+            completions=_FakeChatCompletionsWithUsage(content, usage)
+        )
+
+
+class _FakeGenAIModelsWithUsage:
+    """``generate_content`` fake whose response exposes ``usage_metadata``
+    so ``extract_gemini_vertex_tokens`` returns real integers."""
+
+    def __init__(self, content: str, usage: tuple[int, int, int] = (2000, 300, 2300)) -> None:
+        self._content = content
+        self._usage = usage
+        self.calls: list[dict[str, object]] = []
+
+    async def generate_content(self, **kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        prompt, completion, total = self._usage
+        return SimpleNamespace(
+            text=self._content,
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=prompt,
+                candidates_token_count=completion,
+                total_token_count=total,
+            ),
+        )
+
+
+class _FakeGenAIClientWithUsage:
+    def __init__(self, content: str, usage: tuple[int, int, int] = (2000, 300, 2300)) -> None:
+        from types import SimpleNamespace
+
+        self.aio = SimpleNamespace(models=_FakeGenAIModelsWithUsage(content, usage))
+
+
+def _read_trace_jsonl(trace_dir, game_id: str = "g_trace") -> list[dict]:
+    import json
+
+    path = trace_dir / game_id / "gameplay.jsonl"
+    assert path.exists(), f"trace file not written: {path}"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.fixture
+def trace_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("WOLFBOT_LLM_TRACE_DIR", str(tmp_path))
+    monkeypatch.delenv("WOLFBOT_LLM_TRACE_DISABLED", raising=False)
+    return tmp_path
+
+
+async def test_xai_decider_writes_trace_with_response_and_tokens(
+    trace_dir,
+) -> None:
+    from wolfbot.services.llm_service import XAILLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    fake = _FakeAsyncOpenAIWithUsage(_canned_action_json())
+    decider = XAILLMActionDecider(client=fake, model="grok-4-1-fast")  # type: ignore[arg-type]
+    with trace_context(game_id="g_trace", phase="DAY_DISCUSSION", day=1):
+        await decider.decide("sys-xai", "ctx-xai")
+
+    rows = _read_trace_jsonl(trace_dir)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "xai"
+    assert row["model"] == "grok-4-1-fast"
+    assert row["role"] == "gameplay"
+    assert row["system_prompt"] == "sys-xai"
+    assert row["user_prompt"] == "ctx-xai"
+    assert '"intent": "speak"' in row["response"]
+    assert row["error"] is None
+    assert row["tokens"] == {"prompt": 1500, "completion": 200, "total": 1700}
+    assert row["phase"] == "DAY_DISCUSSION"
+    assert row["day"] == 1
+
+
+async def test_deepseek_decider_writes_trace_with_thinking_metadata(
+    trace_dir,
+) -> None:
+    from wolfbot.services.llm_service import DeepSeekLLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    fake = _FakeAsyncOpenAIWithUsage(_canned_action_json(), usage=(900, 110, 1010))
+    decider = DeepSeekLLMActionDecider(
+        client=fake,  # type: ignore[arg-type]
+        model="deepseek-v4-flash",
+        thinking="enabled",
+        reasoning_effort="max",
+    )
+    with trace_context(game_id="g_trace"):
+        await decider.decide("sys-ds", "ctx-ds")
+
+    rows = _read_trace_jsonl(trace_dir)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "deepseek"
+    assert row["model"] == "deepseek-v4-flash"
+    assert row["error"] is None
+    assert row["tokens"] == {"prompt": 900, "completion": 110, "total": 1010}
+    # System prompt is the full one-with-JSON-contract, not the bare input.
+    assert "sys-ds" in row["system_prompt"]
+    assert "json" in row["system_prompt"].lower()
+    # DeepSeek-specific knobs surfaced via extra metadata.
+    assert row["metadata"]["thinking"] == "enabled"
+    assert row["metadata"]["reasoning_effort"] == "max"
+
+
+async def test_gemini_decider_writes_trace_with_thinking_level(trace_dir) -> None:
+    from wolfbot.services.llm_service import GeminiLLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    fake = _FakeGenAIClientWithUsage(_canned_action_json(), usage=(1800, 220, 2020))
+    decider = GeminiLLMActionDecider(
+        client=fake, model="gemini-3-flash-preview", thinking_level="medium"
+    )
+    with trace_context(game_id="g_trace"):
+        await decider.decide("sys-gem", "ctx-gem")
+
+    rows = _read_trace_jsonl(trace_dir)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "gemini"
+    assert row["model"] == "gemini-3-flash-preview"
+    assert row["error"] is None
+    assert row["tokens"] == {"prompt": 1800, "completion": 220, "total": 2020}
+    assert row["system_prompt"] == "sys-gem"
+    assert row["user_prompt"] == "ctx-gem"
+    assert row["metadata"]["thinking_level"] == "medium"
+
+
+async def test_decider_error_path_writes_trace_with_null_response(
+    trace_dir,
+) -> None:
+    """When the underlying SDK call raises, the trace line records the error
+    string, leaves ``response`` as None, and tokens as None — so the viewer
+    can show that an LLM round failed without crashing on missing fields."""
+    from wolfbot.services.llm_service import XAILLMActionDecider
+    from wolfbot.services.llm_trace import trace_context
+
+    class _Boom:
+        async def create(self, **kwargs: object) -> object:
+            raise RuntimeError("upstream API exploded")
+
+    class _BoomChat:
+        completions = _Boom()
+
+    class _BoomClient:
+        chat = _BoomChat()
+
+    # tenacity retries 4 times before giving up; suppress the final raise so
+    # we can inspect the trace.
+    decider = XAILLMActionDecider(client=_BoomClient(), model="grok-x")  # type: ignore[arg-type]
+    with (
+        trace_context(game_id="g_trace"),
+        pytest.raises(RuntimeError, match="exploded"),
+    ):
+        await decider.decide("sys", "ctx")
+
+    rows = _read_trace_jsonl(trace_dir)
+    # 4 retry attempts → 4 trace lines (each finally fires once).
+    assert len(rows) == 4
+    for row in rows:
+        assert row["provider"] == "xai"
+        assert row["response"] is None
+        assert row["tokens"] is None
+        assert row["error"] is not None
+        assert "RuntimeError" in row["error"]
+        assert "exploded" in row["error"]

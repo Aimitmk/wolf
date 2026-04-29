@@ -17,9 +17,10 @@ from wolfbot.domain.enums import (
     Phase,
     Role,
     SubmissionType,
+    format_co_claim_options,
 )
 from wolfbot.domain.models import Game, Player, Seat
-from wolfbot.llm.personas import Persona
+from wolfbot.llm.persona_base import Persona
 
 SYSTEM_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "prompts" / "llm_system_prompt.md"
 
@@ -75,6 +76,16 @@ def _build_game_rules_block() -> str:
         "根拠なくその CO 者を処刑候補にしない。\n"
         "- ただし単独 CO は絶対確定ではない。公開ログ上の発言破綻・投票矛盾・判定結果の矛盾・"
         "噛み筋との不整合など、通常より強い根拠がある場合に限り疑ってよい。\n"
+        "- **単独 CO 者を疑う『強い根拠』には、具体的な公開情報の矛盾が必要である。**"
+        "他のプレイヤー (人間プレイヤー含む) が『〜は怪しい』『〜は人狼』と単に表明しただけ、"
+        "占い結果や霊媒結果の具体的な指摘・投票や噛み筋の矛盾の指摘がない直感的疑い表明は、"
+        "単独 CO 真置きルールを上書きする根拠としては弱い。"
+        "そうした表明に同調して単独 CO 者へ票を入れる前に、自分視点で『単独 CO 者を切る具体的な公開情報』が"
+        "1 つでも挙げられるかを確認する。挙げられないなら同調しない。"
+        "特に真役職を持つ自分は、公開情報と矛盾しない単独 CO を切ると村の情報を失う側に動くことになる。\n"
+        "- 人間プレイヤーの直感的な疑い表明は、議論を再評価するきっかけとして参照してよいが、"
+        "それ自体を独立した証拠として扱わない。人間も狼/狂人として騙る可能性があるし、"
+        "村役でも誤推理するため、根拠の中身 (具体的な公開情報の指摘) で重み付けする。\n"
         "- ただし「現在生存している CO 者が 1 人だけ」というだけでは単独 CO 扱いしない。"
         "同じ役職 CO が過去に 2 人以上存在したことがある場合、対抗者が処刑・襲撃などで死亡して"
         "現在 1 人だけ残っていても、その残存 CO 者を自動的に真置きしない。\n"
@@ -313,6 +324,13 @@ _ROLE_STRATEGIES: dict[Role, str] = {
         "- day 1 の占い師騙りは強い選択肢だが、無条件の既定行動ではない。"
         "狂人らしい騙りが既に出ている、CO 数が増えすぎている、相方が危険位置にいる場合は、"
         "潜伏して発言・投票・噛み筋で白さを取る方がよいことがある。\n"
+        "- ただし公開ログで占い師・霊媒師・騎士の名乗り出が呼びかけられている "
+        "(`未回答の役職呼びかけ` / `pending_role_callouts` に該当役職がある) のに "
+        "対抗 CO がまだ出ていない場合、原則として騙りに出る方を優先する。"
+        "単独 CO を放置すると村は『単独 CO = 真寄り』として真占いを真置きしやすくなり、"
+        "狼陣営は判定情報を打ち返す手段を失う。"
+        "潜伏を選ぶのは、相方が既に危険位置で吊られそう、対抗を出すと 4-1 以上に膨らんでローラー必至、"
+        "等の具体的かつ強い理由がある場合に限る。漠然とした『村が勝手に吊ってくれそう』では潜伏しない。\n"
         "- 黒出しは真占い師・真霊媒師・真騎士に当てると破綻や対抗 CO のリスクがある。"
         "吊りやすさだけでなく翌日の霊媒結果・投票・噛み筋まで考えて出す。\n"
         "- day 1 に占い師騙りを選ぶ場合、初回の占い結果は NIGHT_0 ランダム白に合わせて必ず白を主張する。"
@@ -359,6 +377,17 @@ _ROLE_STRATEGIES: dict[Role, str] = {
         "護衛濃厚な真役職を噛みに行く場合は、その位置を残すと黒を引かれる・"
         "霊媒で破綻する・盤面を固められる、といった GJ リスクを承知で"
         "勝負する理由を持つ。\n"
+        "- **前夜の襲撃が GJ で平和な朝になった場合 (= 自分が昨夜噛んだ対象が今朝も生存)、"
+        "その対象を今夜も同じく噛むのを最優先候補にする。** "
+        "騎士は連続護衛禁止のため、昨夜守った相手を今夜は守れない。"
+        "盤面 (CO 構成・吊り筋・白要素) が大きく変わっておらず、その対象の襲撃価値が"
+        "依然として最高位なら、今夜の同一対象襲撃で確実に決着できる。"
+        "切り替えるのは、(a) 翌日の議論で対象の襲撃価値が大きく低下した "
+        "(例: 確白扱いされ吊り対象から外れた)、(b) 別位置で対象を超える緊急襲撃価値の"
+        "情報役が新規に登場した、(c) 人狼チャットで相方と切替方針を明示的に合意した、"
+        "のいずれかが揃ったときに限る。"
+        "「読まれそう」「対称的すぎる」のような漠然とした不安では切り替えない — "
+        "対象が騎士に2連続では絶対に守れない以上、再噛みは数学的に成立する。\n"
         "- 騎士候補を噛むのは「騎士探し」として有効で、"
         "翌日以降に安全に情報役を噛む準備として価値がある。"
         "ただし噛み筋が露骨な意見噛みや相方を不自然に白くする形に見えないかを"
@@ -426,6 +455,13 @@ _ROLE_STRATEGIES: dict[Role, str] = {
         "- 占い師騙りは狂人の強い基本候補で、day 1 に検討する価値が高い。"
         "ただし無条件ではなく、既に複数の占い師 CO が出ている、CO 数が膨らみすぎる、"
         "盤面的に潜伏して混乱させた方が得な場合はその限りではない。\n"
+        "- 公開ログで占い師・霊媒師・騎士の名乗り出が呼びかけられている "
+        "(`未回答の役職呼びかけ` / `pending_role_callouts` に該当役職がある) のに "
+        "対抗 CO がまだ出ていない場合、原則として騙りに出る方を優先する。"
+        "単独 CO を放置すると村は『単独 CO = 真寄り』として真役職を真置きしやすく、"
+        "狂人としても判定情報を撹乱する手段を失う。"
+        "潜伏を選ぶのは、CO 群が既に過密で誤爆リスクが上回る、等の具体的かつ強い理由がある場合に限る。"
+        "漠然とした『村が勝手に吊ってくれそう』では潜伏しない。\n"
         "- day 1 に占い師騙りを選ぶ場合、初回の占い結果は NIGHT_0 ランダム白に合わせて必ず白を主張する。"
         "初日に黒を出す主張はこの bot の実ルール上の時系列と矛盾し破綻するため、絶対にしない。\n"
         "- 黒出しは day 2 以降にだけ検討する。前夜に占ったという想定で、"
@@ -498,9 +534,12 @@ _ROLE_STRATEGIES: dict[Role, str] = {
         "完全な村置きとしては扱わない。\n"
         "- CO タイミング・対抗 CO の有無・投票と判定の噛み合いを重視し、"
         "偽占い視点の破綻を探す。\n"
-        "- 公開ログ上まだ占い師 CO が出ていない状態で議論が進む場合は、"
-        "初日ランダム白と以後の占い結果を時系列で出して早めに CO する選択肢を強く持つ。"
-        "真占いが沈黙し続けると、偽 CO を単独真として扱わせてしまう。\n"
+        "- **day 1 の議論中盤までに占い師 CO が一切出ていない場合は、原則として CO する。**"
+        "初日ランダム白と以後の占い結果を時系列で出すこと。"
+        "真占いが沈黙し続けると、偽 CO を単独真として扱わせてしまうし、"
+        "占い結果が活かせないまま村が情報不足で負ける。"
+        "潜伏を選ぶのは「狂人らしい騙りが既に出ている」「相方候補の偽 CO を釣り出す具体的な計画がある」など"
+        "明確な理由があるときだけにし、漠然とした様子見では潜伏しない。\n"
         "- 偽占い師 CO が出た場合は、原則として早めに対抗 CO し、"
         "初日ランダム白を含む全判定履歴を時系列で公開する。潜伏を続けるなら理由が必要。\n"
         "- 黒を引いた場合は、CO して黒結果・過去の白結果・投票理由を明示し、"
@@ -540,10 +579,12 @@ _ROLE_STRATEGIES: dict[Role, str] = {
         "- 自分の霊媒結果が占い視点に与える影響 (真占い補強、偽占い否定など) を整理して発言する。\n"
         "- 処刑された相手が狂人でも、霊媒結果は『人狼ではありませんでした』になる。"
         "黒になるのは本物の人狼だけで、白結果だけでは村置き確定にはならない。\n"
-        "- 処刑が発生した翌日は、霊媒結果を公開して議論の軸を作る価値が高い。"
-        "沈黙すると偽霊媒 CO を単独真として扱わせてしまうリスクがある。\n"
-        "- 処刑がまだ発生していない段階では断定を増やしすぎず、"
-        "占い師 CO への反応を観察する。\n"
+        "- **処刑が発生した翌日は、原則として早めに霊媒師 CO を出して結果を公開する。**"
+        "沈黙すると偽霊媒 CO を単独真として扱わせてしまい、判定情報も活かせない。"
+        "潜伏を選ぶのは、占い師 CO の真贋整理を先に進めたい等の具体的理由があるときだけにする。\n"
+        "- day 1 (まだ処刑前) は霊媒結果がないので CO を急ぐ必要はないが、"
+        "占い師 CO の整理が進んだ後の発言で「霊媒の見立て」を示すことで信頼を取りやすくなる。"
+        "完全な潜伏ではなく、能動的な意見を出して立ち位置を作る。\n"
         "- 対抗霊媒が出た場合は、自分の結果履歴と相手の矛盾を時系列で整理し、"
         "ローラーで自分も巻き込まれる可能性を織り込んで発言する。\n"
         "- 占い師 CO を処刑して霊媒結果が白だった場合、それは占い師 CO 偽の証明ではない。"
@@ -658,7 +699,7 @@ _ROLE_STRATEGIES: dict[Role, str] = {
 }
 
 
-def _build_strategy_block(role: Role) -> str:
+def build_strategy_block(role: Role) -> str:
     """Return role-specific tips for the given role only.
 
     Caller must pass a non-None Role; `build_system_prompt` is invoked after
@@ -669,8 +710,98 @@ def _build_strategy_block(role: Role) -> str:
     return _ROLE_STRATEGIES[role]
 
 
-def _build_speech_profile_block(persona: Persona) -> str:
+# Underscore alias retained for the historical "private" import path used
+# inside this module; new external callers (Master arbiter → SpeakRequest)
+# use the public `build_strategy_block` name.
+_build_strategy_block = build_strategy_block
+
+
+def _band(value: float, *, low: str, mid_low: str, mid: str, mid_high: str, high: str) -> str:
+    """Map a 0.0-1.0 axis to one of five qualitative bands.
+
+    Five-step granularity gives the LLM enough nuance without exposing the
+    raw float (which would invite spurious precision). Boundaries are
+    chosen so the neutral 0.5 default sits squarely on `mid`.
+    """
+    if value <= 0.2:
+        return low
+    if value <= 0.4:
+        return mid_low
+    if value <= 0.6:
+        return mid
+    if value <= 0.8:
+        return mid_high
+    return high
+
+
+def build_judgment_profile_block(persona: Persona) -> str:
+    """Render `JudgmentProfile` axes as labeled tendency bands.
+
+    Each axis is mapped to a qualitative band so the LLM has a concrete
+    behavioural lean without seeing the raw float. The block is paired
+    with a usage hint that names HARD/MEDIUM facts so the trust axes
+    have something concrete to attach to.
+    """
+    j = persona.judgment_profile
+    trust_hard = _band(
+        j.trust_hard_facts,
+        low="ほぼ無視 (理屈より直感)",
+        mid_low="やや軽視",
+        mid="標準",
+        mid_high="重視",
+        high="絶対視 (論理確定は揺るがない)",
+    )
+    trust_medium = _band(
+        j.trust_medium_facts,
+        low="ほぼ参考にしない",
+        mid_low="懐疑的に扱う",
+        mid="参考程度",
+        mid_high="やや信用する",
+        high="基本受け入れる",
+    )
+    contrarian = _band(
+        j.contrarian_bias,
+        low="多数派にあえて逆らわない",
+        mid_low="やや迎合的",
+        mid="是々非々",
+        mid_high="多数派に懐疑的",
+        high="あえて逆張りする傾向",
+    )
+    aggression = _band(
+        j.aggression,
+        low="慎重で疑い先を出すのが遅い",
+        mid_low="控えめに疑う",
+        mid="標準的に疑い先を出す",
+        mid_high="積極的に疑い先を指す",
+        high="即座に処刑候補を名指しする",
+    )
+    bandwagon = _band(
+        j.bandwagon_tendency,
+        low="単独行動を好み流れに乗らない",
+        mid_low="独自路線を好む",
+        mid="状況次第",
+        mid_high="形成された流れに乗りやすい",
+        high="多数派・流れに強く乗る",
+    )
+    return (
+        f"- 論理確定 (HARD ファクト) への態度: {trust_hard}\n"
+        f"- 推測根拠 (MEDIUM ファクト) への態度: {trust_medium}\n"
+        f"- 多数派への姿勢: {contrarian}\n"
+        f"- 攻撃性 (疑い→処刑候補名指しまでの速さ): {aggression}\n"
+        f"- 流れへの追従度: {bandwagon}\n"
+        "- 上記は判断のクセであり、ルールや論理確定情報を上書きしない。"
+        "HARD ファクトは原則として受け入れた上で、態度に応じた言い回しに調整する。"
+        "MEDIUM ファクトは「態度」に応じて採用度合いを変える。"
+        "この性格を口調と判断の傾きとして表現してください。"
+    )
+
+
+def build_speech_profile_block(persona: Persona) -> str:
     """Render the persona's structured speech profile as a bullet block.
+
+    Public function (renamed from the historical underscored name) so the
+    Master arbiter can render the same block for the reactive_voice NPC
+    prompt as rounds-mode uses.
 
     Dispatches on `narration_mode`: silent-gesture personas (kukrushka) get a
     structurally different block — no `一人称` line, gesture examples instead —
@@ -704,6 +835,13 @@ def _build_speech_profile_block(persona: Persona) -> str:
     )
 
 
+# Underscore aliases for callers (and tests) that imported the historical
+# private names. The reactive_voice NPC system-prompt builder calls the
+# public names directly.
+_build_speech_profile_block = build_speech_profile_block
+_build_judgment_profile_block = build_judgment_profile_block
+
+
 def build_system_prompt(
     persona: Persona,
     role: Role,
@@ -724,9 +862,10 @@ def build_system_prompt(
     return (
         template.replace("{game_rules_block}", _build_game_rules_block())
         .replace("{persona_block}", persona_block)
-        .replace("{speech_profile_block}", _build_speech_profile_block(persona))
+        .replace("{judgment_profile_block}", build_judgment_profile_block(persona))
+        .replace("{speech_profile_block}", build_speech_profile_block(persona))
         .replace("{role_block}", role_block)
-        .replace("{strategy_block}", _build_strategy_block(role))
+        .replace("{strategy_block}", build_strategy_block(role))
         .replace("{phase_block}", phase_block)
         .replace("{task_block}", task_text)
     )
@@ -764,6 +903,7 @@ def build_user_context(
     public_logs: Sequence[dict[str, object]],
     private_logs: Sequence[dict[str, object]],
     last_own_public: str | None = None,
+    deduced_facts_block: str | None = None,
 ) -> str:
     seats_by_no = {s.seat_no: s for s in seats}
     alive_players = [p for p in players if p.alive]
@@ -802,6 +942,15 @@ def build_user_context(
 
     rope_block = _format_rope_block(players)
 
+    facts_section = ""
+    if deduced_facts_block:
+        facts_section = (
+            "\n## 公開情報からの確定/推測事実 (Master 整理)\n"
+            f"{deduced_facts_block}\n"
+            "HARD は論理的に確定。MEDIUM は強めの推測。"
+            "判断傾向に応じて態度を変えてよいが、HARD を覆す論拠は公開ログにある具体物だけにする。\n"
+        )
+
     return (
         f"あなたは座席 {my_seat.seat_no}『{my_seat.display_name}』です。\n"
         f"生存者: {alive_names}\n"
@@ -810,6 +959,7 @@ def build_user_context(
         f"{wolf_partner_block}"
         "\n"
         f"{rope_block}\n"
+        f"{facts_section}"
         "\n"
         "## あなたの私的メモ (他者には非公開)\n"
         f"{priv_block}\n"
@@ -833,21 +983,39 @@ def task_daytime_speech(
         f"現在は day {day_number} の議論フェイズです。"
         " 必要と感じた場合のみ `intent=speak` を返し、`public_message` に 80〜300 字で短い発言を書いてください。"
         " 発言したくない場合は `intent=skip` と明示してください。"
-        " 疑い先を出すときは、単体黒要素だけでなく、その人物が人狼なら相方候補は誰か、"
+        " 疑い先を出すときは、単体の怪しさだけでなく、その人物が人狼なら相方候補は誰か、"
         "2 人狼セットとして票筋・噛み筋が自然かも必要に応じて短く触れてください。"
         "全候補のペアを長く列挙せず、今の結論に効く 1〜2 点だけを出してください。"
+        "\n発話 (`public_message`) のルール:"
+        " 自然な日本語で喋ること。"
+        "「CO」「占いCO」「霊媒CO」「騎士CO」「黒判定」「白判定」「ライン」「グレー」「グレラン」"
+        "「縄」「PP」「RPP」「ローラー」「ロラ」「破綻」「確白」「確黒」「パンダ」「鉄板護衛」「捨て護衛」"
+        "「噛み筋」「票筋」「視点漏れ」「身内切り」「囲い」など、"
+        "プレイヤー間で使われがちなメタ用語は `public_message` 内で使わない"
+        "(これらは内部の `reason_summary` や思考メモには使ってよい)。"
+        "口に出すときは状況や感情として描写する"
+        "(例: 「あの白判定、無理に庇ってる気がして信用できない」「昨夜守ったのは◯◯です」"
+        "「あと処刑できる回数を考えると…」)。"
+        f"役職 CO したい場合は `co_declaration` を `{format_co_claim_options(separator=' / ')}` のいずれかに設定し、"
+        "`public_message` 側は「実は私、占い師なんだ」のように自然に名乗ってから能力結果を続ける。"
+        "`co_declaration` を設定しないなら `null`。"
     )
     if day_number >= 2 and discussion_round == 1:
         base += (
             " これは day 2 以降の 1 巡目発言です。"
-            " 占い師・霊媒師・騎士として CO 済み、または今 CO する場合は、"
+            " 占い師・霊媒師・騎士として既に名乗っている、または今初めて名乗る場合は、"
             "前夜の能力結果をこの発言で添えてください。"
             " 占い師なら対象 + 白/黒 + 占い理由、"
             "霊媒師なら前日処刑者 + 人狼/人狼ではない/結果なし、"
-            "騎士なら CO する局面で合法な護衛履歴 (護衛日 + 護衛先) を日付順に出し、"
-            "平和な朝なら護衛成功も合わせて主張します。"
-            " 結果を持つ、または結果を主張する役職 CO が 1 巡目で結果を出さないと、"
+            "騎士なら名乗る局面で合法な護衛履歴 (護衛日 + 護衛先) を日付順に出し、"
+            "平和な朝なら護衛成功も合わせて伝えます。"
+            " 結果を持つはずの役職を名乗っているのに 1 巡目で結果を出さないと、"
             "信用低下や破綻疑いにつながります。"
+            " ただし `public_message` 内ではこの「白/黒」「結果なし」のような内部メモ語彙を"
+            "そのまま読み上げず、「結果は人狼でした」「占ったけど人狼じゃなかった」"
+            "「占ってみた感触は白かな」のように自然な発話に書き直す。"
+            " 名乗り直すならこのターンで `co_declaration` を立て、"
+            "`public_message` でも自然な日本語で名乗りと結果を述べてください。"
         )
     if day_number == 1 and discussion_round == 1 and role in (Role.WEREWOLF, Role.MADMAN):
         base += (

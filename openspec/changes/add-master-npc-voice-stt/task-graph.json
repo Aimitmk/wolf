@@ -1,0 +1,457 @@
+{
+  "version": "1.0",
+  "change_id": "add-master-npc-voice-stt",
+  "bundles": [
+    {
+      "id": "speech-event-bus-foundation",
+      "title": "Speech Event Bus Foundation",
+      "goal": "Introduce the canonical SpeechEvent model, persistence, and service APIs that every discussion mode can write to and rebuild from.",
+      "depends_on": [],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/speech-event-bus/spec.md",
+        "src/wolfbot/persistence/schema.py",
+        "src/wolfbot/persistence/sqlite_repo.py"
+      ],
+      "outputs": [
+        "src/wolfbot/domain/discussion.py#SpeechEvent",
+        "src/wolfbot/services/discussion_service.py",
+        "src/wolfbot/persistence/schema.py#speech_events",
+        "tests/test_discussion_service.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Define SpeechEvent domain types, source enums, and serialization rules.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Add the additive speech_events migration and store/repository interfaces.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Implement speech event write, read, and rebuild helpers for the master process.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add persistence and round-trip rebuild tests for SpeechEvent streams.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "day-discussion",
+        "llm-seats"
+      ],
+      "size_score": 4
+    },
+    {
+      "id": "public-discussion-state",
+      "title": "Public Discussion State Derivation",
+      "goal": "Build a deterministic PublicDiscussionState fold over speech_events for the active phase.",
+      "depends_on": [
+        "speech-event-bus-foundation"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/day-discussion/spec.md",
+        "src/wolfbot/domain/discussion.py#SpeechEvent"
+      ],
+      "outputs": [
+        "src/wolfbot/domain/discussion.py#PublicDiscussionState",
+        "src/wolfbot/domain/discussion.py#apply_speech_event",
+        "src/wolfbot/domain/discussion.py#rebuild_public_state_from_events",
+        "tests/test_public_discussion_state.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Define the PublicDiscussionState value object and its deterministic fields.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Implement apply_speech_event and rebuild_public_state_from_events as a pure fold.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Encode co-claim and silence rules directly from event order without LLM summaries.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add regression and property-style tests that verify bitwise reproducibility from a fresh rebuild.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "day-discussion",
+        "llm-seats"
+      ],
+      "size_score": 4
+    },
+    {
+      "id": "rounds-mode-speechevent-backfill",
+      "title": "Rounds Mode SpeechEvent Backfill",
+      "goal": "Make the existing rounds discussion path write canonical SpeechEvents without changing current gameplay behavior.",
+      "depends_on": [
+        "speech-event-bus-foundation"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/day-discussion/spec.md",
+        "src/wolfbot/services/llm_service.py",
+        "src/wolfbot/services/game_service.py",
+        "src/wolfbot/services/discussion_service.py"
+      ],
+      "outputs": [
+        "src/wolfbot/services/llm_service.py#rounds-speech-event-writes",
+        "src/wolfbot/services/game_service.py#rounds-discussion-path",
+        "tests/test_llm_service.py",
+        "tests/test_llm_trigger.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Route rounds-mode utterance generation through the SpeechEvent store.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Preserve existing log entries and llm_speech_counts side effects for rounds mode.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Add regression coverage that proves current rounds behavior remains unchanged.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "day-discussion",
+        "llm-seats"
+      ],
+      "size_score": 3
+    },
+    {
+      "id": "master-speech-control-surface",
+      "title": "Master Speech Control Surface",
+      "goal": "Add the master-owned protocol, endpoints, registry, and audit-table schema that external voice workers connect to.",
+      "depends_on": [
+        "public-discussion-state"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/npc-voice-pipeline/spec.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/voice-ingest/spec.md",
+        "src/wolfbot/domain/discussion.py#PublicDiscussionState",
+        "src/wolfbot/persistence/schema.py"
+      ],
+      "outputs": [
+        "src/wolfbot/services/master_ws_server.py",
+        "src/wolfbot/services/master_ingest_service.py",
+        "src/wolfbot/services/npc_registry.py",
+        "src/wolfbot/persistence/schema.py#npc_speak_requests",
+        "src/wolfbot/persistence/schema.py#npc_speak_results",
+        "src/wolfbot/persistence/schema.py#npc_playback_events",
+        "tests/test_master_ws_server.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Define the shared WebSocket envelope, message schemas, and PSK handshake rules.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Add additive migrations and repository hooks for npc_speak_requests, npc_speak_results, and npc_playback_events.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Implement the master WebSocket server, NPC registration and heartbeat tracking, and localhost ingest and registry endpoints.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add fakes and protocol-focused tests for registration, heartbeats, and endpoint contracts.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "discord-integration",
+        "day-discussion"
+      ],
+      "size_score": 4
+    },
+    {
+      "id": "master-arbitration-and-recovery",
+      "title": "Master Arbitration And Recovery",
+      "goal": "Build the master logic and arbiter that selects NPC speech, enforces serial gating, and finalizes stale or interrupted work.",
+      "depends_on": [
+        "public-discussion-state",
+        "master-speech-control-surface"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/npc-voice-pipeline/spec.md",
+        "src/wolfbot/domain/discussion.py#PublicDiscussionState",
+        "src/wolfbot/services/master_ws_server.py",
+        "src/wolfbot/services/npc_registry.py",
+        "src/wolfbot/services/discussion_service.py"
+      ],
+      "outputs": [
+        "src/wolfbot/services/master_logic_service.py",
+        "src/wolfbot/services/speak_arbiter.py",
+        "src/wolfbot/services/recovery_service.py#reactive-voice-sweep",
+        "tests/test_reactive_voice_master.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Build logic packet generation from PublicDiscussionState and seat pressure inputs.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Implement SpeakArbiter dispatch, authorization and rejection flow, serial speech gates, and stale result handling.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Finalize restart recovery rules for pending speak and playback rows plus in-memory gate rebuild.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add master-side tests for serial speech, stale responses, and restart rebuild behavior.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "day-discussion",
+        "discord-integration",
+        "llm-seats"
+      ],
+      "size_score": 4
+    },
+    {
+      "id": "voice-ingest-worker",
+      "title": "Voice Ingest Worker",
+      "goal": "Capture human voice, filter NPC audio, run VAD and STT, and send canonical speech events to the master.",
+      "depends_on": [
+        "speech-event-bus-foundation",
+        "master-speech-control-surface"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/voice-ingest/spec.md",
+        "src/wolfbot/services/master_ingest_service.py",
+        "src/wolfbot/config.py"
+      ],
+      "outputs": [
+        "src/wolfbot/services/voice_ingest_service.py",
+        "src/wolfbot/services/stt_service.py",
+        "src/wolfbot/services/voice_ingest_client.py",
+        "tests/test_voice_ingest_service.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Add VAD, STT, and master-client protocols plus configuration for the voice-ingest worker.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Implement NPC registry refresh and Discord packet filtering for bot user IDs.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Implement VAD buffering, STT submission, and speech_event ingestion with explicit drop paths for low-confidence and error cases.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add tests for one-human-one-event, NPC exclusion, and low-confidence or error drops.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "discord-integration"
+      ],
+      "size_score": 4
+    },
+    {
+      "id": "npc-voice-worker",
+      "title": "NPC Voice Worker",
+      "goal": "Run a per-NPC bot process that registers with the master, generates short utterances, and only plays after authorization.",
+      "depends_on": [
+        "master-speech-control-surface"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/npc-voice-pipeline/spec.md",
+        "src/wolfbot/config.py",
+        "src/wolfbot/llm/prompt_builder.py",
+        "src/wolfbot/services/master_ws_server.py"
+      ],
+      "outputs": [
+        "src/wolfbot/npc_bot_main.py",
+        "src/wolfbot/services/npc_client.py",
+        "src/wolfbot/services/npc_speech_service.py",
+        "src/wolfbot/services/tts_service.py",
+        "src/wolfbot/services/voice_playback_service.py",
+        "tests/test_npc_voice_worker.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Implement the NPC-side master client with register, heartbeat, and request and result handling.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Build short-utterance NPC generation, TTS synthesis, and in-memory audio cache services.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Gate playback on explicit authorization and emit playback_finished and playback_failed events.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add integration tests with fake master, TTS, and playback services.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "discord-integration",
+        "llm-seats"
+      ],
+      "size_score": 4
+    },
+    {
+      "id": "reactive-voice-mode-plumbing",
+      "title": "Reactive Voice Mode Plumbing",
+      "goal": "Wire reactive_voice as a mode-fixed day-discussion path without regressing rounds mode.",
+      "depends_on": [
+        "rounds-mode-speechevent-backfill",
+        "master-arbitration-and-recovery",
+        "voice-ingest-worker",
+        "npc-voice-worker"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/day-discussion/spec.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/llm-seats/spec.md",
+        "src/wolfbot/config.py",
+        "src/wolfbot/services/game_service.py",
+        "src/wolfbot/main.py"
+      ],
+      "outputs": [
+        "src/wolfbot/config.py#LLM_DISCUSSION_MODE",
+        "src/wolfbot/services/game_service.py#reactive-voice-dispatch",
+        "src/wolfbot/main.py#voice-worker-startup",
+        "tests/test_reactive_voice_mode.py",
+        "tests/test_game_service_advance.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Add LLM_DISCUSSION_MODE selection and freeze the chosen discussion mode for each game instance.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Dispatch DAY_DISCUSSION between rounds and reactive_voice without changing rounds semantics.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Wire master, voice-ingest, and NPC worker lifecycle management for reactive_voice sessions.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add end-to-end reactive_voice and rounds-regression tests.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "day-discussion",
+        "discord-integration",
+        "llm-seats"
+      ],
+      "size_score": 4
+    },
+    {
+      "id": "cross-component-observability",
+      "title": "Cross-Component Observability",
+      "goal": "Standardize structured logs and phase summaries across master, voice-ingest, and NPC workers for debugging and recovery.",
+      "depends_on": [
+        "master-arbitration-and-recovery",
+        "voice-ingest-worker",
+        "npc-voice-worker",
+        "reactive-voice-mode-plumbing"
+      ],
+      "inputs": [
+        "openspec/changes/add-master-npc-voice-stt/design.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/day-discussion/spec.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/voice-ingest/spec.md",
+        "openspec/changes/add-master-npc-voice-stt/specs/npc-voice-pipeline/spec.md",
+        "src/wolfbot/services/master_logic_service.py",
+        "src/wolfbot/services/voice_ingest_service.py",
+        "src/wolfbot/services/npc_speech_service.py"
+      ],
+      "outputs": [
+        "src/wolfbot/services/structured_logging.py",
+        "src/wolfbot/services/recovery_service.py#discussion-phase-summary",
+        "tests/test_observability.py"
+      ],
+      "status": "done",
+      "tasks": [
+        {
+          "id": "1",
+          "title": "Define a shared structured logging helper and required fields for trace, phase, request, seat, and source identifiers.",
+          "status": "done"
+        },
+        {
+          "id": "2",
+          "title": "Instrument master, voice-ingest, and NPC worker flows for drops, authorization, playback, and timeout events.",
+          "status": "done"
+        },
+        {
+          "id": "3",
+          "title": "Emit discussion_phase_summary at each phase end using speech_events and playback audit rows.",
+          "status": "done"
+        },
+        {
+          "id": "4",
+          "title": "Add log fixture tests that assert required events and per-phase speech counts.",
+          "status": "done"
+        }
+      ],
+      "owner_capabilities": [
+        "day-discussion",
+        "discord-integration",
+        "llm-seats"
+      ],
+      "size_score": 4
+    }
+  ],
+  "generated_at": "2026-04-26T06:10:31.890Z",
+  "generated_from": "design.md"
+}

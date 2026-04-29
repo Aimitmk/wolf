@@ -1,0 +1,1424 @@
+{
+  "game": {
+    "id": "g_sample_001",
+    "guild_id": "1498215601808867421",
+    "host_user_id": "146810000000000001",
+    "discussion_mode": "rounds",
+    "created_at_ms": 1714291200000,
+    "ended_at_ms": 1714292020000,
+    "victory": "village",
+    "main_text_channel_id": "1498215837528621055",
+    "main_vc_channel_id": "1498215837528621056"
+  },
+  "seats": [
+    {
+      "seat_no": 1,
+      "display_name": "あなた",
+      "is_llm": false,
+      "persona_key": null,
+      "discord_user_id": "146810000000000001",
+      "role": "VILLAGER",
+      "alive": true,
+      "death_cause": null,
+      "death_day": null
+    },
+    {
+      "seat_no": 2,
+      "display_name": "🌙 セツ",
+      "is_llm": true,
+      "persona_key": "setsu",
+      "discord_user_id": "1498225401372086313",
+      "role": "SEER",
+      "alive": true,
+      "death_cause": null,
+      "death_day": null
+    },
+    {
+      "seat_no": 3,
+      "display_name": "🍷 ジーナ",
+      "is_llm": true,
+      "persona_key": "gina",
+      "discord_user_id": "1498225401372086314",
+      "role": "WEREWOLF",
+      "alive": false,
+      "death_cause": "EXECUTION",
+      "death_day": 1
+    },
+    {
+      "seat_no": 4,
+      "display_name": "🎲 SQ",
+      "is_llm": true,
+      "persona_key": "sq",
+      "discord_user_id": "1498225401372086315",
+      "role": "VILLAGER",
+      "alive": true,
+      "death_cause": null,
+      "death_day": null
+    },
+    {
+      "seat_no": 5,
+      "display_name": "🔮 ラキオ",
+      "is_llm": true,
+      "persona_key": "raqio",
+      "discord_user_id": "1498225401372086316",
+      "role": "MEDIUM",
+      "alive": true,
+      "death_cause": null,
+      "death_day": null
+    },
+    {
+      "seat_no": 6,
+      "display_name": "🛡 ステラ",
+      "is_llm": true,
+      "persona_key": "stella",
+      "discord_user_id": "1498225401372086317",
+      "role": "KNIGHT",
+      "alive": true,
+      "death_cause": null,
+      "death_day": null
+    },
+    {
+      "seat_no": 7,
+      "display_name": "⚔ シゲミチ",
+      "is_llm": true,
+      "persona_key": "shigemichi",
+      "discord_user_id": "1498225401372086318",
+      "role": "WEREWOLF",
+      "alive": false,
+      "death_cause": "EXECUTION",
+      "death_day": 2
+    },
+    {
+      "seat_no": 8,
+      "display_name": "☄ コメット",
+      "is_llm": true,
+      "persona_key": "comet",
+      "discord_user_id": "1498225401372086319",
+      "role": "MADMAN",
+      "alive": true,
+      "death_cause": null,
+      "death_day": null
+    },
+    {
+      "seat_no": 9,
+      "display_name": "📐 ジョナス",
+      "is_llm": true,
+      "persona_key": "jonas",
+      "discord_user_id": "1498225401372086320",
+      "role": "VILLAGER",
+      "alive": true,
+      "death_cause": null,
+      "death_day": null
+    }
+  ],
+  "phases": [
+    {
+      "day": 0,
+      "phase": "SETUP",
+      "started_at_ms": 1714291230000,
+      "public_logs": [
+        {
+          "kind": "SETUP_COMPLETE",
+          "actor_seat": null,
+          "text": "参加者 9 名で人狼ゲームを開始します。役職は各DMをご確認ください。",
+          "created_at_ms": 1714291230000
+        }
+      ],
+      "speech_events": [],
+      "votes": [],
+      "night_actions": []
+    },
+    {
+      "day": 0,
+      "phase": "NIGHT_0",
+      "started_at_ms": 1714291235000,
+      "public_logs": [],
+      "speech_events": [],
+      "votes": [],
+      "night_actions": [
+        {
+          "day": 0,
+          "actor_seat": 2,
+          "kind": "DIVINE_NIGHT0_RANDOM_WHITE",
+          "target_seat": 9,
+          "submitted_at_ms": 1714291238000
+        }
+      ]
+    },
+    {
+      "day": 1,
+      "phase": "DAY_DISCUSSION",
+      "started_at_ms": 1714291260000,
+      "public_logs": [
+        {
+          "kind": "PHASE_CHANGE",
+          "actor_seat": null,
+          "text": "夜が明けました。1 日目の議論を開始致します。制限時間は 300 秒でございます。",
+          "created_at_ms": 1714291260000
+        }
+      ],
+      "speech_events": [
+        {
+          "event_id": "sp_2_1714291275000",
+          "source": "text",
+          "speaker_seat": 2,
+          "text": "占い師COします。初日ランダム白で席9 ジョナスを占いました。白判定です。",
+          "stt_confidence": null,
+          "summary": "seat 2 COs seer; seat 9 white",
+          "co_declaration": "seer",
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291275000
+        },
+        {
+          "event_id": "sp_3_1714291290000",
+          "source": "text",
+          "speaker_seat": 3,
+          "text": "私も占い師です。席4 SQを占って白でした。席2は何かおかしい。",
+          "stt_confidence": null,
+          "summary": "seat 3 counter-COs seer; seat 4 white",
+          "co_declaration": "seer",
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291290000
+        },
+        {
+          "event_id": "sp_5_1714291310000",
+          "source": "text",
+          "speaker_seat": 5,
+          "text": "霊媒師COはまだしません。今日処刑が出てから結果を出します。",
+          "stt_confidence": null,
+          "summary": "seat 5 plans medium CO after first execution",
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291310000
+        },
+        {
+          "event_id": "sp_9_1714291330000",
+          "source": "text",
+          "speaker_seat": 9,
+          "text": "席2の白判定をもらった9番です。占い理由が筋が通ってる。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291330000
+        },
+        {
+          "event_id": "sp_4_1714291350000",
+          "source": "text",
+          "speaker_seat": 4,
+          "text": "占いが2人いる。どちらが本物か議論したい。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291350000
+        },
+        {
+          "event_id": "sp_6_1714291370000",
+          "source": "text",
+          "speaker_seat": 6,
+          "text": "占いCOの2人をしっかり見極めましょう。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291370000
+        },
+        {
+          "event_id": "sp_7_1714291390000",
+          "source": "text",
+          "speaker_seat": 7,
+          "text": "席3が偽のように見える。占い理由が雑な印象。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291390000
+        },
+        {
+          "event_id": "sp_8_1714291410000",
+          "source": "text",
+          "speaker_seat": 8,
+          "text": "私は席2が怪しいと感じる。席3を信じたい。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291410000
+        },
+        {
+          "event_id": "sp_1_1714291430000",
+          "source": "text",
+          "speaker_seat": 1,
+          "text": "席3の占い理由がパッとしない。席2の方が信用できそう。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291430000
+        },
+        {
+          "event_id": "sp_2_1714291460000",
+          "source": "text",
+          "speaker_seat": 2,
+          "text": "席3の理由が薄いです。席3を投票候補にしたい。",
+          "stt_confidence": null,
+          "summary": "seat 2 nominates seat 3",
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291460000
+        },
+        {
+          "event_id": "sp_3_1714291475000",
+          "source": "text",
+          "speaker_seat": 3,
+          "text": "席2が偽です。みなさん席2に投票してください。",
+          "stt_confidence": null,
+          "summary": "seat 3 nominates seat 2",
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291475000
+        },
+        {
+          "event_id": "sp_5_1714291490000",
+          "source": "text",
+          "speaker_seat": 5,
+          "text": "占い騙りなら2が真の可能性が高い気がする。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291490000
+        },
+        {
+          "event_id": "sp_9_1714291510000",
+          "source": "text",
+          "speaker_seat": 9,
+          "text": "席2に白を貰った立場として、席3が偽だと考える。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291510000
+        }
+      ],
+      "votes": [],
+      "night_actions": []
+    },
+    {
+      "day": 1,
+      "phase": "DAY_VOTE",
+      "started_at_ms": 1714291560000,
+      "public_logs": [
+        {
+          "kind": "PHASE_CHANGE",
+          "actor_seat": null,
+          "text": "議論時間が終了しました。投票フェイズへ移行致します。制限時間は 60 秒でございます。",
+          "created_at_ms": 1714291560000
+        },
+        {
+          "kind": "EXECUTION",
+          "actor_seat": 3,
+          "text": "席3 🍷 ジーナ が処刑されました。\n\n投票内訳: 席3=5票 / 席2=3票 / 席3=1票",
+          "created_at_ms": 1714291620000
+        }
+      ],
+      "speech_events": [],
+      "votes": [
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 1,
+          "target_seat": 3,
+          "submitted_at_ms": 1714291565000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 2,
+          "target_seat": 3,
+          "submitted_at_ms": 1714291570000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 3,
+          "target_seat": 2,
+          "submitted_at_ms": 1714291575000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 4,
+          "target_seat": 3,
+          "submitted_at_ms": 1714291580000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 5,
+          "target_seat": 3,
+          "submitted_at_ms": 1714291585000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 6,
+          "target_seat": 3,
+          "submitted_at_ms": 1714291590000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 7,
+          "target_seat": 2,
+          "submitted_at_ms": 1714291595000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 8,
+          "target_seat": 2,
+          "submitted_at_ms": 1714291600000
+        },
+        {
+          "day": 1,
+          "round": 1,
+          "voter_seat": 9,
+          "target_seat": 3,
+          "submitted_at_ms": 1714291605000
+        }
+      ],
+      "night_actions": []
+    },
+    {
+      "day": 1,
+      "phase": "NIGHT",
+      "started_at_ms": 1714291620000,
+      "public_logs": [
+        {
+          "kind": "PHASE_CHANGE",
+          "actor_seat": null,
+          "text": "夜のフェイズへ移行致します。制限時間は 90 秒でございます。",
+          "created_at_ms": 1714291620000
+        }
+      ],
+      "speech_events": [],
+      "votes": [],
+      "night_actions": [
+        {
+          "day": 1,
+          "actor_seat": 2,
+          "kind": "DIVINE",
+          "target_seat": 7,
+          "submitted_at_ms": 1714291640000
+        },
+        {
+          "day": 1,
+          "actor_seat": 6,
+          "kind": "GUARD",
+          "target_seat": 2,
+          "submitted_at_ms": 1714291655000
+        },
+        {
+          "day": 1,
+          "actor_seat": 7,
+          "kind": "ATTACK",
+          "target_seat": 2,
+          "submitted_at_ms": 1714291680000
+        }
+      ]
+    },
+    {
+      "day": 2,
+      "phase": "DAY_DISCUSSION",
+      "started_at_ms": 1714291710000,
+      "public_logs": [
+        {
+          "kind": "MORNING",
+          "actor_seat": null,
+          "text": "平和な朝です。昨晩の犠牲者はいません。",
+          "created_at_ms": 1714291710000
+        },
+        {
+          "kind": "PHASE_CHANGE",
+          "actor_seat": null,
+          "text": "2 日目の議論を開始致します。制限時間は 240 秒でございます。",
+          "created_at_ms": 1714291710000
+        }
+      ],
+      "speech_events": [
+        {
+          "event_id": "sp_2_1714291730000",
+          "source": "text",
+          "speaker_seat": 2,
+          "text": "席7を占いました。黒判定です。席7 シゲミチが人狼です。",
+          "stt_confidence": null,
+          "summary": "seat 2 reveals seat 7 is wolf",
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291730000
+        },
+        {
+          "event_id": "sp_5_1714291750000",
+          "source": "text",
+          "speaker_seat": 5,
+          "text": "霊媒結果: 席3 ジーナは人狼でした。占い騙りで確定です。",
+          "stt_confidence": null,
+          "summary": "seat 5 confirms seat 3 was wolf",
+          "co_declaration": "medium",
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291750000
+        },
+        {
+          "event_id": "sp_6_1714291770000",
+          "source": "text",
+          "speaker_seat": 6,
+          "text": "騎士COします。昨夜は席2を護衛して、襲撃を弾きました。",
+          "stt_confidence": null,
+          "summary": "seat 6 reveals knight, guarded seat 2",
+          "co_declaration": "knight",
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291770000
+        },
+        {
+          "event_id": "sp_7_1714291790000",
+          "source": "text",
+          "speaker_seat": 7,
+          "text": "私は人狼じゃない。席2の占いは捏造です。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291790000
+        },
+        {
+          "event_id": "sp_8_1714291810000",
+          "source": "text",
+          "speaker_seat": 8,
+          "text": "席2 セツが本当に占い師なら、席7 黒は信じざるを得ない。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291810000
+        },
+        {
+          "event_id": "sp_1_1714291830000",
+          "source": "text",
+          "speaker_seat": 1,
+          "text": "占い・霊媒・騎士の3CO全部噛み合ってるので席7処刑で行きましょう。",
+          "stt_confidence": null,
+          "summary": null,
+          "co_declaration": null,
+          "addressed_seat_no": null,
+          "created_at_ms": 1714291830000
+        }
+      ],
+      "votes": [],
+      "night_actions": []
+    },
+    {
+      "day": 2,
+      "phase": "DAY_VOTE",
+      "started_at_ms": 1714291960000,
+      "public_logs": [
+        {
+          "kind": "EXECUTION",
+          "actor_seat": 7,
+          "text": "席7 ⚔ シゲミチ が処刑されました。\n\n投票内訳: 席7=7票 / 席2=1票",
+          "created_at_ms": 1714292020000
+        },
+        {
+          "kind": "VICTORY",
+          "actor_seat": null,
+          "text": "村人陣営の勝利!",
+          "created_at_ms": 1714292020000
+        },
+        {
+          "kind": "ROLE_REVEAL",
+          "actor_seat": null,
+          "text": "役職公開:\n席1 あなた = 村人 (生存)\n席2 🌙 セツ = 占い師 (生存)\n席3 🍷 ジーナ = 人狼 (1日目処刑)\n席4 🎲 SQ = 村人 (生存)\n席5 🔮 ラキオ = 霊媒師 (生存)\n席6 🛡 ステラ = 騎士 (生存)\n席7 ⚔ シゲミチ = 人狼 (2日目処刑)\n席8 ☄ コメット = 狂人 (生存)\n席9 📐 ジョナス = 村人 (生存)",
+          "created_at_ms": 1714292020000
+        }
+      ],
+      "speech_events": [],
+      "votes": [
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 1,
+          "target_seat": 7,
+          "submitted_at_ms": 1714291970000
+        },
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 2,
+          "target_seat": 7,
+          "submitted_at_ms": 1714291975000
+        },
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 4,
+          "target_seat": 7,
+          "submitted_at_ms": 1714291980000
+        },
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 5,
+          "target_seat": 7,
+          "submitted_at_ms": 1714291985000
+        },
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 6,
+          "target_seat": 7,
+          "submitted_at_ms": 1714291990000
+        },
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 7,
+          "target_seat": 2,
+          "submitted_at_ms": 1714291995000
+        },
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 8,
+          "target_seat": 7,
+          "submitted_at_ms": 1714292000000
+        },
+        {
+          "day": 2,
+          "round": 1,
+          "voter_seat": 9,
+          "target_seat": 7,
+          "submitted_at_ms": 1714292005000
+        }
+      ],
+      "night_actions": []
+    },
+    {
+      "day": 2,
+      "phase": "GAME_OVER",
+      "started_at_ms": 1714292020000,
+      "public_logs": [],
+      "speech_events": [],
+      "votes": [],
+      "night_actions": []
+    }
+  ],
+  "trace": [
+    {
+      "ts": "2026-04-28T08:00:15+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=2 persona=setsu role=SEER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席2の役職 SEER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席2として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"占い師COします。初日ランダム白で席9 ジョナスを占いました。白判定です。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": \"seer\"}",
+      "latency_ms": 1328,
+      "tokens": {
+        "prompt": 272,
+        "completion": 174,
+        "total": 446
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:00:33+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=3 persona=gina role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席3の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席3として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"私も占い師です。席4 SQを占って白でした。席2は何かおかしい。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": \"seer\"}",
+      "latency_ms": 1151,
+      "tokens": {
+        "prompt": 276,
+        "completion": 169,
+        "total": 445
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:00:51+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=5 persona=raqio role=MEDIUM",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席5の役職 MEDIUM として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席5として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"霊媒師COはまだしません。今日処刑が出てから結果を出します。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": null}",
+      "latency_ms": 1663,
+      "tokens": {
+        "prompt": 274,
+        "completion": 165,
+        "total": 439
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:01:09+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=9 persona=jonas role=VILLAGER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席9の役職 VILLAGER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席9として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"席2の白判定をもらった9番です。占い理由が筋が通ってる。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": null}",
+      "latency_ms": 1601,
+      "tokens": {
+        "prompt": 276,
+        "completion": 163,
+        "total": 439
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:01:27+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=4 persona=sq role=VILLAGER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席4の役職 VILLAGER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席4として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"占いが2人いる。どちらが本物か議論したい。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": null}",
+      "latency_ms": 1557,
+      "tokens": {
+        "prompt": 276,
+        "completion": 156,
+        "total": 432
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:01:45+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=6 persona=stella role=KNIGHT",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席6の役職 KNIGHT として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席6として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"占いCOの2人をしっかり見極めましょう。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": null}",
+      "latency_ms": 1385,
+      "tokens": {
+        "prompt": 274,
+        "completion": 155,
+        "total": 429
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:02:03+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=7 persona=shigemichi role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席7の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席7として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"席3が偽のように見える。占い理由が雑な印象。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": null}",
+      "latency_ms": 1309,
+      "tokens": {
+        "prompt": 276,
+        "completion": 157,
+        "total": 433
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:02:21+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 1,
+      "actor": "seat=8 persona=comet role=MADMAN",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席8の役職 MADMAN として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=1)\n\n公開ログ抜粋:\n(SETUP) 参加者 9 名で人狼ゲームを開始します。\n(PHASE_CHANGE) 1 日目の議論を開始致します。\n\nあなたの履歴: 初日議論ラウンド1, 席8として発話\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"私は席2が怪しいと感じる。席3を信じたい。\", \"target_name\": null, \"reason_summary\": \"1巡目の方針提示\", \"confidence\": 0.7, \"co_declaration\": null}",
+      "latency_ms": 2216,
+      "tokens": {
+        "prompt": 274,
+        "completion": 156,
+        "total": 430
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:05+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=2 persona=setsu role=SEER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席2の役職 SEER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席3 🍷 ジーナ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席3 🍷 ジーナ\", \"reason_summary\": \"占い理由が薄い席3を投票\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1278,
+      "tokens": {
+        "prompt": 275,
+        "completion": 145,
+        "total": 420
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:10+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=3 persona=gina role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席3の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席2 🌙 セツ\", \"reason_summary\": \"対抗占い師の席2を投票\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 2309,
+      "tokens": {
+        "prompt": 278,
+        "completion": 143,
+        "total": 421
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:15+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=4 persona=sq role=VILLAGER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席4の役職 VILLAGER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席2 🌙 セツ、席3 🍷 ジーナ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席3 🍷 ジーナ\", \"reason_summary\": \"席3の論理が破綻気味\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1964,
+      "tokens": {
+        "prompt": 279,
+        "completion": 143,
+        "total": 422
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:20+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=5 persona=raqio role=MEDIUM",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席5の役職 MEDIUM として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席2 🌙 セツ、席3 🍷 ジーナ、席4 🎲 SQ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席3 🍷 ジーナ\", \"reason_summary\": \"席3を吊って霊媒結果を取りたい\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1165,
+      "tokens": {
+        "prompt": 276,
+        "completion": 148,
+        "total": 424
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:25+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=6 persona=stella role=KNIGHT",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席6の役職 KNIGHT として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席2 🌙 セツ、席3 🍷 ジーナ、席4 🎲 SQ、席5 🔮 ラキオ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席3 🍷 ジーナ\", \"reason_summary\": \"占いCO 2人だが席3の方が偽臭\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1161,
+      "tokens": {
+        "prompt": 276,
+        "completion": 149,
+        "total": 425
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:30+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=7 persona=shigemichi role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席7の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席2 🌙 セツ、席3 🍷 ジーナ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席8 ☄ コメット、席9 📐 ジョナス\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席2 🌙 セツ\", \"reason_summary\": \"席2が偽だと判断\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1291,
+      "tokens": {
+        "prompt": 277,
+        "completion": 140,
+        "total": 417
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:35+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=8 persona=comet role=MADMAN",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席8の役職 MADMAN として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席2 🌙 セツ、席3 🍷 ジーナ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席9 📐 ジョナス\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席2 🌙 セツ\", \"reason_summary\": \"席3を信じる立場\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1547,
+      "tokens": {
+        "prompt": 275,
+        "completion": 140,
+        "total": 415
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:05:40+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 1,
+      "actor": "seat=9 persona=jonas role=VILLAGER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席9の役職 VILLAGER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=1)\n\n投票先として合法な候補は: 席2 🌙 セツ、席3 🍷 ジーナ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット\n席1 あなたは合法候補に含まれません(あなた自身)\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席3 🍷 ジーナ\", \"reason_summary\": \"白を貰った相手が偽でないとすれば席3が偽\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1576,
+      "tokens": {
+        "prompt": 277,
+        "completion": 153,
+        "total": 430
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:06:20+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "NIGHT",
+      "day": 1,
+      "actor": "seat=2 persona=setsu role=SEER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席2の役職 SEER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: NIGHT (day=1)\n\nあなたは占い師。占い対象を 1 名選んでください。\n合法候補: 席4 SQ、席5 ラキオ、席6 ステラ、席7 シゲミチ、席8 コメット、席9 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"night_action\", \"public_message\": \"\", \"target_name\": \"席7 ⚔ シゲミチ\", \"reason_summary\": \"票筋的に席7が黒臭い、占って確定したい\", \"confidence\": 0.75, \"co_declaration\": null}",
+      "latency_ms": 2134,
+      "tokens": {
+        "prompt": 243,
+        "completion": 161,
+        "total": 404
+      },
+      "error": null,
+      "metadata": {
+        "task": "night_action"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:06:35+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "NIGHT",
+      "day": 1,
+      "actor": "seat=6 persona=stella role=KNIGHT",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席6の役職 KNIGHT として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: NIGHT (day=1)\n\nあなたは騎士。護衛対象を 1 名選んでください。\n合法候補: 席1 あなた、席2 セツ、席4 SQ、席5 ラキオ、席7 シゲミチ、席8 コメット、席9 ジョナス\n前夜護衛: なし\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"night_action\", \"public_message\": \"\", \"target_name\": \"席2 🌙 セツ\", \"reason_summary\": \"占い真目の席2を護衛するのが最有力\", \"confidence\": 0.8, \"co_declaration\": null}",
+      "latency_ms": 2332,
+      "tokens": {
+        "prompt": 259,
+        "completion": 156,
+        "total": 415
+      },
+      "error": null,
+      "metadata": {
+        "task": "night_action"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:06:55+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "NIGHT",
+      "day": 1,
+      "actor": "seat=7 persona=shigemichi role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席7の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: NIGHT (day=1)\n\n人狼チャット: 相方は席3だったが処刑された。襲撃先を選んでください。\n合法候補: 席1、席2、席4、席5、席6、席8、席9\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"占い真の席2を噛むのが最優先。次点は霊媒候補の席5。\", \"target_name\": null, \"reason_summary\": \"占い噛みで情報遮断\", \"confidence\": 0.7, \"co_declaration\": null}",
+      "latency_ms": 1154,
+      "tokens": {
+        "prompt": 234,
+        "completion": 162,
+        "total": 396
+      },
+      "error": null,
+      "metadata": {
+        "task": "wolf_chat"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:07:00+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "NIGHT",
+      "day": 1,
+      "actor": "seat=7 persona=shigemichi role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席7の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: NIGHT (day=1)\n\nあなたは人狼。襲撃対象を 1 名選んでください。\n合法候補: 席1、席2、席4、席5、席6、席8、席9\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"night_action\", \"public_message\": \"\", \"target_name\": \"席2 🌙 セツ\", \"reason_summary\": \"占い噛みで進行を支配\", \"confidence\": 0.75, \"co_declaration\": null}",
+      "latency_ms": 2249,
+      "tokens": {
+        "prompt": 223,
+        "completion": 150,
+        "total": 373
+      },
+      "error": null,
+      "metadata": {
+        "task": "night_action"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:07:50+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 2,
+      "actor": "seat=2 persona=setsu role=SEER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席2の役職 SEER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=2)\n\n公開ログ抜粋:\n(MORNING) 平和な朝です。昨晩の犠牲者はいません。\n(EXECUTION_PREV_DAY) 席3 ジーナ が処刑されました。\n\nあなたの行動: 席2として発話を準備\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"席7を占いました。黒判定です。席7 シゲミチが人狼です。\", \"target_name\": null, \"reason_summary\": \"情報整理して投票誘導\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1507,
+      "tokens": {
+        "prompt": 272,
+        "completion": 166,
+        "total": 438
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:08:10+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 2,
+      "actor": "seat=5 persona=raqio role=MEDIUM",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席5の役職 MEDIUM として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=2)\n\n公開ログ抜粋:\n(MORNING) 平和な朝です。昨晩の犠牲者はいません。\n(EXECUTION_PREV_DAY) 席3 ジーナ が処刑されました。\n\nあなたの行動: 席5として発話を準備\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"霊媒結果: 席3 ジーナは人狼でした。占い騙りで確定です。\", \"target_name\": null, \"reason_summary\": \"情報整理して投票誘導\", \"confidence\": 0.85, \"co_declaration\": \"medium\"}",
+      "latency_ms": 2216,
+      "tokens": {
+        "prompt": 274,
+        "completion": 171,
+        "total": 445
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:08:30+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 2,
+      "actor": "seat=6 persona=stella role=KNIGHT",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席6の役職 KNIGHT として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=2)\n\n公開ログ抜粋:\n(MORNING) 平和な朝です。昨晩の犠牲者はいません。\n(EXECUTION_PREV_DAY) 席3 ジーナ が処刑されました。\n\nあなたの行動: 席6として発話を準備\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"騎士COします。昨夜は席2を護衛して、襲撃を弾きました。\", \"target_name\": null, \"reason_summary\": \"情報整理して投票誘導\", \"confidence\": 0.85, \"co_declaration\": \"knight\"}",
+      "latency_ms": 1959,
+      "tokens": {
+        "prompt": 274,
+        "completion": 170,
+        "total": 444
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:08:50+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 2,
+      "actor": "seat=7 persona=shigemichi role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席7の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=2)\n\n公開ログ抜粋:\n(MORNING) 平和な朝です。昨晩の犠牲者はいません。\n(EXECUTION_PREV_DAY) 席3 ジーナ が処刑されました。\n\nあなたの行動: 席7として発話を準備\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"私は人狼じゃない。席2の占いは捏造です。\", \"target_name\": null, \"reason_summary\": \"情報整理して投票誘導\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 1551,
+      "tokens": {
+        "prompt": 276,
+        "completion": 158,
+        "total": 434
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:09:10+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_DISCUSSION",
+      "day": 2,
+      "actor": "seat=8 persona=comet role=MADMAN",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席8の役職 MADMAN として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_DISCUSSION (day=2)\n\n公開ログ抜粋:\n(MORNING) 平和な朝です。昨晩の犠牲者はいません。\n(EXECUTION_PREV_DAY) 席3 ジーナ が処刑されました。\n\nあなたの行動: 席8として発話を準備\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"speak\", \"public_message\": \"席2 セツが本当に占い師なら、席7 黒は信じざるを得ない。\", \"target_name\": null, \"reason_summary\": \"情報整理して投票誘導\", \"confidence\": 0.85, \"co_declaration\": null}",
+      "latency_ms": 2019,
+      "tokens": {
+        "prompt": 274,
+        "completion": 167,
+        "total": 441
+      },
+      "error": null,
+      "metadata": {
+        "task": "discussion"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:11:50+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 2,
+      "actor": "seat=2 persona=setsu role=SEER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席2の役職 SEER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=2)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席7 ⚔ シゲミチ\", \"reason_summary\": \"占い・霊媒・騎士の3CO一致から席7が確定\", \"confidence\": 0.95, \"co_declaration\": null}",
+      "latency_ms": 2306,
+      "tokens": {
+        "prompt": 248,
+        "completion": 155,
+        "total": 403
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:11:55+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 2,
+      "actor": "seat=4 persona=sq role=VILLAGER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席4の役職 VILLAGER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=2)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席7 ⚔ シゲミチ\", \"reason_summary\": \"占い・霊媒・騎士の3CO一致から席7が確定\", \"confidence\": 0.95, \"co_declaration\": null}",
+      "latency_ms": 1669,
+      "tokens": {
+        "prompt": 252,
+        "completion": 155,
+        "total": 407
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:12:00+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 2,
+      "actor": "seat=5 persona=raqio role=MEDIUM",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席5の役職 MEDIUM として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=2)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席7 ⚔ シゲミチ\", \"reason_summary\": \"占い・霊媒・騎士の3CO一致から席7が確定\", \"confidence\": 0.95, \"co_declaration\": null}",
+      "latency_ms": 1113,
+      "tokens": {
+        "prompt": 250,
+        "completion": 155,
+        "total": 405
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:12:05+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 2,
+      "actor": "seat=6 persona=stella role=KNIGHT",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席6の役職 KNIGHT として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=2)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席7 ⚔ シゲミチ\", \"reason_summary\": \"占い・霊媒・騎士の3CO一致から席7が確定\", \"confidence\": 0.95, \"co_declaration\": null}",
+      "latency_ms": 1426,
+      "tokens": {
+        "prompt": 250,
+        "completion": 155,
+        "total": 405
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:12:10+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 2,
+      "actor": "seat=7 persona=shigemichi role=WEREWOLF",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席7の役職 WEREWOLF として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=2)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席2 🌙 セツ\", \"reason_summary\": \"占い結果を疑う\", \"confidence\": 0.95, \"co_declaration\": null}",
+      "latency_ms": 1965,
+      "tokens": {
+        "prompt": 252,
+        "completion": 139,
+        "total": 391
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:12:15+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 2,
+      "actor": "seat=8 persona=comet role=MADMAN",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席8の役職 MADMAN として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=2)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席7 ⚔ シゲミチ\", \"reason_summary\": \"占い・霊媒・騎士の3CO一致から席7が確定\", \"confidence\": 0.95, \"co_declaration\": null}",
+      "latency_ms": 1796,
+      "tokens": {
+        "prompt": 250,
+        "completion": 155,
+        "total": 405
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:12:20+00:00",
+      "role": "gameplay",
+      "provider": "xai",
+      "model": "grok-4-1-fast",
+      "phase": "DAY_VOTE",
+      "day": 2,
+      "actor": "seat=9 persona=jonas role=VILLAGER",
+      "system_prompt": "あなたは人狼ゲームのプレイヤーです。あなたは席9の役職 VILLAGER として振る舞ってください。公開ログ、私的ログ、合法候補から、JSON 形式で行動を返してください。",
+      "user_prompt": "現在のフェイズ: DAY_VOTE (day=2)\n\n投票先として合法な候補は: 席2 🌙 セツ、席4 🎲 SQ、席5 🔮 ラキオ、席6 🛡 ステラ、席7 ⚔ シゲミチ、席8 ☄ コメット、席9 📐 ジョナス\n\n以下のいずれかの intent を返してください: speak / vote / night_action / skip",
+      "response": "{\"intent\": \"vote\", \"public_message\": \"\", \"target_name\": \"席7 ⚔ シゲミチ\", \"reason_summary\": \"占い・霊媒・騎士の3CO一致から席7が確定\", \"confidence\": 0.95, \"co_declaration\": null}",
+      "latency_ms": 1669,
+      "tokens": {
+        "prompt": 252,
+        "completion": 155,
+        "total": 407
+      },
+      "error": null,
+      "metadata": {
+        "task": "vote"
+      }
+    },
+    {
+      "ts": "2026-04-28T08:02:50+00:00",
+      "role": "voice_stt",
+      "provider": "gemini",
+      "model": "gemini-2.0-flash-lite",
+      "phase": "g_sample_001::day1::DAY_DISCUSSION::1",
+      "day": 1,
+      "actor": "speaker_user_id=146810000000000001 seat=1 segment=seg_170000",
+      "system_prompt": "あなたは人狼ゲームの音声ログ分析エンジンです。渡された音声(日本語)を書き起こし、JSON で返してください。",
+      "user_prompt": "[audio bytes=82000 mime=audio/wav]",
+      "response": "{\"transcript\": \"席3の占い理由がパッとしない。席2の方が信用できそう。\", \"summary\": \"席3の占い理由がパッとしない。席2の方が信用できそう。\", \"confidence\": 0.91, \"co_claim\": null, \"vote_target_seat\": null, \"stance\": {}, \"addressed_name\": null}",
+      "latency_ms": 959,
+      "tokens": {
+        "prompt": 330,
+        "completion": 189,
+        "total": 519
+      },
+      "error": null,
+      "metadata": {
+        "audio_bytes": 82000,
+        "language": "ja-JP",
+        "segment_id": "seg_170000"
+      },
+      "file_stem": "voice_stt"
+    },
+    {
+      "ts": "2026-04-28T08:09:30+00:00",
+      "role": "voice_stt",
+      "provider": "gemini",
+      "model": "gemini-2.0-flash-lite",
+      "phase": "g_sample_001::day2::DAY_DISCUSSION::1",
+      "day": 2,
+      "actor": "speaker_user_id=146810000000000001 seat=1 segment=seg_570000",
+      "system_prompt": "あなたは人狼ゲームの音声ログ分析エンジンです。渡された音声(日本語)を書き起こし、JSON で返してください。",
+      "user_prompt": "[audio bytes=110000 mime=audio/wav]",
+      "response": "{\"transcript\": \"占い・霊媒・騎士の3CO全部噛み合ってるので席7処刑で行きましょう。\", \"summary\": \"占い・霊媒・騎士の3CO全部噛み合ってるので席7処刑で行きま\", \"confidence\": 0.88, \"co_claim\": null, \"vote_target_seat\": null, \"stance\": {}, \"addressed_name\": null}",
+      "latency_ms": 1020,
+      "tokens": {
+        "prompt": 357,
+        "completion": 199,
+        "total": 556
+      },
+      "error": null,
+      "metadata": {
+        "audio_bytes": 110000,
+        "language": "ja-JP",
+        "segment_id": "seg_570000"
+      },
+      "file_stem": "voice_stt"
+    },
+    {
+      "ts": "2026-04-28T08:00:15+00:00",
+      "role": "npc_speech",
+      "provider": "openai-compat",
+      "model": "grok-4-1-fast",
+      "phase": "g_sample_001::day1::DAY_DISCUSSION::1",
+      "day": 1,
+      "actor": "npc_id=npc_setsu seat=2 persona=setsu",
+      "system_prompt": "あなたはNPC 'setsu' として人狼ゲームに参加しています。短いリアクティブ発話 (最大80字) を JSON で返してください。",
+      "user_prompt": "現在のフェイズ ID: g_sample_001::day1::DAY_DISCUSSION::1\nあなたの席: 席2\n\n公開状況: 議論ラウンド1進行中。\n候補発話タイミング: あり。\nあなたの席=2 (セツ)。短い反応的発話を作ってください。",
+      "response": "{\"intent\": \"speak\", \"text\": \"占い師COします。初日ランダム白で席9 ジョナスを占いました。\", \"co_declaration\": \"seer\", \"used_logic_ids\": [\"lc_co_seer\", \"lc_white_jonas\"]}",
+      "latency_ms": 1481,
+      "tokens": {
+        "prompt": 191,
+        "completion": 140,
+        "total": 331
+      },
+      "error": null,
+      "metadata": {
+        "request_id": "req_2_15000",
+        "logic_packet_id": "lp_2_15000",
+        "suggested_intent": "speak",
+        "max_chars": 80
+      },
+      "file_stem": "npc_setsu"
+    },
+    {
+      "ts": "2026-04-28T08:08:10+00:00",
+      "role": "npc_speech",
+      "provider": "openai-compat",
+      "model": "grok-4-1-fast",
+      "phase": "g_sample_001::day2::DAY_DISCUSSION::1",
+      "day": 2,
+      "actor": "npc_id=npc_raqio seat=5 persona=raqio",
+      "system_prompt": "あなたはNPC 'raqio' として人狼ゲームに参加しています。短いリアクティブ発話 (最大80字) を JSON で返してください。",
+      "user_prompt": "現在のフェイズ ID: g_sample_001::day2::DAY_DISCUSSION::1\nあなたの席: 席5\n\n議論ラウンド進行中。霊媒結果を出すタイミング。",
+      "response": "{\"intent\": \"speak\", \"text\": \"霊媒結果: 席3 ジーナは人狼でした。占い騙りで確定です。\", \"co_declaration\": \"medium\", \"used_logic_ids\": [\"lc_medium_co\", \"lc_seat3_wolf\"]}",
+      "latency_ms": 1044,
+      "tokens": {
+        "prompt": 152,
+        "completion": 141,
+        "total": 293
+      },
+      "error": null,
+      "metadata": {
+        "request_id": "req_5_490000",
+        "logic_packet_id": "lp_5_490000",
+        "suggested_intent": "speak",
+        "max_chars": 80
+      },
+      "file_stem": "npc_raqio"
+    }
+  ]
+}

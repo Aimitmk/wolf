@@ -36,7 +36,20 @@ class RecoveryDiscordAdapter(Protocol):
     async def reconcile(
         self, game: Game, seats: Sequence[Seat], players: Sequence[Player]
     ) -> None: ...
-    async def announce_recovery(self, game: Game, pending: PendingDecision | None) -> None: ...
+    async def announce_recovery(
+        self, game: Game, pending: PendingDecision | None) -> None: ...
+
+
+class ReactiveVoiceRecoverySweep(Protocol):
+    """Callable that closes in-flight npc_speak_requests and npc_playback_events."""
+
+    async def __call__(self, game_id: str) -> None: ...
+
+
+class ReactiveVoiceReenter(Protocol):
+    """Callable that triggers arbiter dispatch after recovery."""
+
+    async def __call__(self, game_id: str) -> None: ...
 
 
 class RecoveryService:
@@ -47,12 +60,16 @@ class RecoveryService:
         registry: EngineRegistry,
         discord: RecoveryDiscordAdapter,
         clock: Callable[[], int] = lambda: int(time.time()),
+        reactive_voice_sweep: ReactiveVoiceRecoverySweep | None = None,
+        reactive_voice_reenter: ReactiveVoiceReenter | None = None,
     ) -> None:
         self.repo = repo
         self.game_service = game_service
         self.registry = registry
         self.discord = discord
         self.clock = clock
+        self._reactive_voice_sweep = reactive_voice_sweep
+        self._reactive_voice_reenter = reactive_voice_reenter
 
     async def recover_all(self) -> list[str]:
         games = await self.repo.load_active_games()
@@ -102,6 +119,16 @@ class RecoveryService:
         except Exception:
             log.exception("announce_recovery failed for %s", game.id)
 
+        # Step 2.5: sweep open reactive_voice audit rows so in-flight requests
+        # and playback windows from before the restart are closed with
+        # failure_reason=master_restart (npc-voice-pipeline spec §Recovery).
+        if game.discussion_mode == "reactive_voice" and self._reactive_voice_sweep is not None:
+            try:
+                await self._reactive_voice_sweep(game.id)
+            except Exception:
+                log.exception(
+                    "reactive_voice recovery sweep failed for %s", game.id)
+
         # Step 3: attach and start engine. Pass the recovery clock so tests
         # using FakeClock get deterministic timing — otherwise the engine
         # uses time.time() and may race ahead of the test's logical clock,
@@ -120,7 +147,8 @@ class RecoveryService:
         try:
             await self.game_service.resend_pending_dms(game.id)
         except Exception:
-            log.exception("resend_pending_dms during recovery failed for %s", game.id)
+            log.exception(
+                "resend_pending_dms during recovery failed for %s", game.id)
 
         # Step 5: resume LLM speech progress for DAY_DISCUSSION /
         # DAY_RUNOFF_SPEECH if any per-seat round/runoff_speech_done is still
@@ -128,4 +156,18 @@ class RecoveryService:
         try:
             await self.game_service.resume_llm_speech_progress(game.id)
         except Exception:
-            log.exception("resume_llm_speech_progress during recovery failed for %s", game.id)
+            log.exception(
+                "resume_llm_speech_progress during recovery failed for %s", game.id)
+
+        # Step 6: re-enter the arbiter for reactive_voice games in a public
+        # speech phase so NPCs resume speaking after restart.
+        if (
+            game.discussion_mode == "reactive_voice"
+            and game.phase in (Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH)
+            and self._reactive_voice_reenter is not None
+        ):
+            try:
+                await self._reactive_voice_reenter(game.id)
+            except Exception:
+                log.exception(
+                    "reactive_voice reenter dispatch failed for %s", game.id)

@@ -12,7 +12,12 @@
   thinking_level. Authenticates via ADC/IAM (no API key); Vertex AI Express mode
   is deliberately unsupported.
 - `FakeLLMActionDecider`: deterministic stub for tests/offline dry runs.
-- `make_llm_decider(settings)`: provider-aware factory; branches on `LLM_PROVIDER`.
+- `make_llm_decider(cfg)`: provider-aware factory; branches on
+  `LLMDeciderConfig.provider`.  ``cfg`` is built by
+  ``MasterSettings.gameplay_decider_config()`` from ``GAMEPLAY_LLM_*``
+  env vars (the symmetrical NPC factory in
+  :mod:`wolfbot.npc.generator_factory` consumes the same config dataclass
+  built from ``NPC_LLM_*`` instead).
 - `LLMAdapter`: implements the LLMAdapter Protocol consumed by game_service; iterates
   LLM seats and submits their actions via GameService.submit_*.
 """
@@ -34,15 +39,22 @@ from tenacity import (
     wait_exponential,
 )
 
-from wolfbot.domain.enums import Phase, Role, SubmissionType
-from wolfbot.domain.models import Game, LogEntry, Player, Seat
+from wolfbot.domain.discussion import CoClaim, make_phase_id
+from wolfbot.domain.enums import (
+    CO_CLAIM_VALUES,
+    CoDeclaration,
+    Phase,
+    Role,
+    SubmissionType,
+)
+from wolfbot.domain.models import Game, LogEntry, Player, Seat, Vote
 from wolfbot.domain.rules import (
     legal_attack_targets,
     legal_divine_targets,
     legal_guard_targets,
     previous_guard_seat_for_night,
 )
-from wolfbot.llm.personas import PERSONAS_BY_KEY
+from wolfbot.llm.decider_config import LLMDeciderConfig
 from wolfbot.llm.prompt_builder import (
     build_system_prompt,
     build_user_context,
@@ -51,12 +63,20 @@ from wolfbot.llm.prompt_builder import (
     task_vote,
     task_wolf_chat,
 )
+from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+from wolfbot.services.llm_trace import (
+    CallTimer,
+    extract_gemini_vertex_tokens,
+    extract_openai_tokens,
+    log_llm_call,
+    trace_context,
+)
 
 if TYPE_CHECKING:  # avoid importing heavy modules unless needed
     from openai import AsyncOpenAI
 
-    from wolfbot.config import Settings
     from wolfbot.persistence.sqlite_repo import SqliteRepo
+    from wolfbot.services.discussion_service import DiscussionService
     from wolfbot.services.game_service import GameService
 
 # Sleep ranges between consecutive LLM speeches inside DAY_DISCUSSION rounds.
@@ -73,6 +93,19 @@ class MessagePoster(Protocol):
 
 
 log = logging.getLogger(__name__)
+
+
+def _classify_task_text(task_text: str) -> str:
+    """Coarse tag of which `task_*` produced this prompt — for trace metadata only."""
+    if "投票先として合法な候補は" in task_text:
+        return "vote"
+    if "対象を 1 名選んでください" in task_text:
+        return "night_action"
+    if "人狼チャット" in task_text:
+        return "wolf_chat"
+    if "議論フェイズ" in task_text or "演説" in task_text:
+        return "discussion"
+    return "unknown"
 
 
 def seat_token(seat: Seat) -> str:
@@ -96,6 +129,7 @@ class LLMAction(BaseModel):
     target_name: str | None = None
     reason_summary: str = ""
     confidence: float = 0.5
+    co_declaration: CoDeclaration | None = None
 
 
 RESPONSE_SCHEMA: dict[str, object] = {
@@ -110,6 +144,7 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "target_name",
             "reason_summary",
             "confidence",
+            "co_declaration",
         ],
         "properties": {
             "intent": {
@@ -120,6 +155,10 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "target_name": {"type": ["string", "null"]},
             "reason_summary": {"type": "string", "maxLength": 200},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "co_declaration": {
+                "type": ["string", "null"],
+                "enum": [*CO_CLAIM_VALUES, None],
+            },
         },
     },
 }
@@ -172,22 +211,43 @@ class XAILLMActionDecider:
         reraise=True,
     )
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
-        # xAI model IDs aren't in the openai SDK's Literal, hence the ignore.
-        resp = await self.client.chat.completions.create(  # type: ignore[call-overload]
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_context},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": RESPONSE_SCHEMA,
-            },
-            timeout=self.timeout,
-        )
-        message = resp.choices[0].message
-        content = message.content or "{}"
-        return LLMAction.model_validate_json(content)
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        tokens: dict[str, int | None] | None = None
+        try:
+            # xAI model IDs aren't in the openai SDK's Literal, hence the ignore.
+            resp = await self.client.chat.completions.create(  # type: ignore[call-overload]
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_context},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": RESPONSE_SCHEMA,
+                },
+                timeout=self.timeout,
+            )
+            message = resp.choices[0].message
+            content = message.content or "{}"
+            tokens = extract_openai_tokens(resp)
+            return LLMAction.model_validate_json(content)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await log_llm_call(
+                role="gameplay",
+                provider="xai",
+                model=self.model,
+                system_prompt=system_prompt,
+                user_prompt=user_context,
+                response=content if err is None else None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                tokens=tokens,
+            )
 
 
 class DeepSeekLLMActionDecider:
@@ -237,11 +297,38 @@ class DeepSeekLLMActionDecider:
         }
         if self.thinking == "enabled":
             kwargs["reasoning_effort"] = self.reasoning_effort
-        # DeepSeek model IDs aren't in the openai SDK's Literal, hence the ignore.
-        resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
-        message = resp.choices[0].message
-        content = message.content or "{}"
-        return LLMAction.model_validate_json(content)
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        tokens: dict[str, int | None] | None = None
+        try:
+            # DeepSeek model IDs aren't in the openai SDK's Literal, hence the ignore.
+            resp = await self.client.chat.completions.create(**kwargs)  # type: ignore[call-overload]
+            message = resp.choices[0].message
+            content = message.content or "{}"
+            tokens = extract_openai_tokens(resp)
+            return LLMAction.model_validate_json(content)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await log_llm_call(
+                role="gameplay",
+                provider="deepseek",
+                model=self.model,
+                system_prompt=full_system,
+                user_prompt=user_context,
+                response=content if err is None else None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                tokens=tokens,
+                extra={
+                    "thinking": self.thinking,
+                    "reasoning_effort": self.reasoning_effort
+                    if self.thinking == "enabled"
+                    else None,
+                },
+            )
 
 
 class GeminiLLMActionDecider:
@@ -275,22 +362,152 @@ class GeminiLLMActionDecider:
     async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
         from google.genai import types
 
-        resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
-            model=self.model,
-            contents=user_context,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_json_schema=RESPONSE_SCHEMA["schema"],
-                thinking_config=types.ThinkingConfig(
-                    # SDK normalizes the string into ThinkingLevel at runtime;
-                    # the type annotation is enum-only, so silence the check.
-                    thinking_level=self.thinking_level,  # type: ignore[arg-type]
+        timer = CallTimer()
+        content = ""
+        err: str | None = None
+        tokens: dict[str, int | None] | None = None
+        try:
+            resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
+                model=self.model,
+                contents=user_context,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_json_schema=RESPONSE_SCHEMA["schema"],
+                    thinking_config=types.ThinkingConfig(
+                        # SDK normalizes the string into ThinkingLevel at runtime;
+                        # the type annotation is enum-only, so silence the check.
+                        thinking_level=self.thinking_level,  # type: ignore[arg-type]
+                    ),
                 ),
-            ),
+            )
+            content = resp.text or "{}"
+            tokens = extract_gemini_vertex_tokens(resp)
+            return LLMAction.model_validate_json(content)
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            await log_llm_call(
+                role="gameplay",
+                provider="gemini",
+                model=self.model,
+                system_prompt=system_prompt,
+                user_prompt=user_context,
+                response=content if err is None else None,
+                latency_ms=timer.elapsed_ms,
+                error=err,
+                tokens=tokens,
+                extra={"thinking_level": self.thinking_level},
+            )
+
+
+class MockLLMActionDecider:
+    """Offline mock decider used when ``GAMEPLAY_LLM_PROVIDER=mock``.
+
+    Returns deterministic LLMActions based on phrases unique to each
+    ``task_*`` prompt generator in :mod:`wolfbot.llm.prompt_builder`.
+    Vote and night-action targets are intentionally ``None`` so
+    :meth:`LLMAdapter._resolve_target` falls back to a uniform-random
+    legal target — sidestepping the brittle "parse legal candidates out
+    of user_context" path while still producing valid game progression.
+
+    Speech messages are persona-blind canned phrases drawn round-robin
+    from a per-instance counter, kept under 80 chars to fit the discussion
+    text length convention. The Master Gameplay LLM only generates speech
+    in ``rounds`` mode; in ``reactive_voice`` mode the speech path is
+    routed to NPC bots and this decider produces only votes / night
+    actions / wolf-chat coordination text.
+    """
+
+    _SPEECHES: tuple[str, ...] = (
+        "状況を整理しましょうか。今のところ大きな決め手はないですね。",
+        "発言の少ない方が気になります。考えを聞きたいです。",
+        "占い結果が出るまで断定は避けたいですね。",
+        "票筋から見ると、何人か怪しい位置はあります。",
+        "今のところ私は様子を見たい立場です。",
+    )
+
+    _WOLF_CHAT: tuple[str, ...] = (
+        "情報を持ってそうな位置を狙いたい。",
+        "騎士候補から先に処理する案もある。",
+        "今夜は無難な相手に揃えよう。",
+    )
+
+    def __init__(
+        self,
+        *,
+        speeches: Sequence[str] | None = None,
+        wolf_chat: Sequence[str] | None = None,
+    ) -> None:
+        self._speeches: tuple[str, ...] = tuple(speeches or self._SPEECHES)
+        self._wolf_chat: tuple[str, ...] = tuple(wolf_chat or self._WOLF_CHAT)
+        self._speech_idx = 0
+        self._wolf_idx = 0
+        self.call_count = 0
+
+    def _next_speech(self) -> str:
+        text = self._speeches[self._speech_idx % len(self._speeches)]
+        self._speech_idx += 1
+        return text
+
+    def _next_wolf_chat(self) -> str:
+        text = self._wolf_chat[self._wolf_idx % len(self._wolf_chat)]
+        self._wolf_idx += 1
+        return text
+
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        self.call_count += 1
+        # `task_text` is injected into the *system* prompt (see
+        # `build_system_prompt`'s `{task_block}`), not the user context.
+        # We scan both so the dispatch keys work regardless of where a
+        # caller decides to put them.
+        haystack = f"{system_prompt}\n{user_context}"
+        if "投票先として合法な候補は" in haystack:
+            return LLMAction(
+                intent="vote",
+                target_name=None,
+                reason_summary="mock vote",
+                confidence=0.5,
+            )
+        if "対象を 1 名選んでください" in haystack:
+            # Deterministic target = smallest 席N appearing in the candidate
+            # list. For WOLF_ATTACK both wolves see the *same* candidate list
+            # (legal_attack_targets excludes all wolves), so they converge on
+            # one target — avoiding the wolf-attack split that would otherwise
+            # park the mock game in WAITING_HOST_DECISION every night.
+            return LLMAction(
+                intent="night_action",
+                target_name=self._pick_smallest_seat_token(haystack),
+                reason_summary="mock night action",
+                confidence=0.5,
+            )
+        if "人狼チャット" in haystack:
+            return LLMAction(
+                intent="speak",
+                public_message=self._next_wolf_chat(),
+                reason_summary="mock wolf chat",
+                confidence=0.5,
+            )
+        return LLMAction(
+            intent="speak",
+            public_message=self._next_speech(),
+            reason_summary="mock speech",
+            confidence=0.5,
         )
-        content = resp.text or "{}"
-        return LLMAction.model_validate_json(content)
+
+    @staticmethod
+    def _pick_smallest_seat_token(prompt: str) -> str | None:
+        # Parse only the "合法候補:" line — the rest of the prompt contains
+        # an example token ("例: `席3 Alice`") that would otherwise pollute
+        # the seat list and cause us to "pick" a non-candidate.
+        match = re.search(r"合法候補:[ \t]*([^\n]*)", prompt)
+        if match is None:
+            return None
+        seats = [int(m) for m in re.findall(r"席(\d+)", match.group(1))]
+        if not seats:
+            return None
+        return f"席{min(seats)}"
 
 
 class FakeLLMActionDecider:
@@ -330,6 +547,8 @@ class LLMAdapter:
         game_service_ref: dict[str, GameService] | None = None,
         rng: random.Random | None = None,
         clock: Callable[[], int] | None = None,
+        discussion_service: DiscussionService | None = None,
+        npc_decision_dispatcher: object | None = None,
     ) -> None:
         import time as _time
 
@@ -340,6 +559,17 @@ class LLMAdapter:
         self.rng = rng or random.Random()
         self._clock: Callable[[], int] = clock or (lambda: int(_time.time()))
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Phase-D: when set, reactive_voice games dispatch votes / night
+        # actions to NPC bots via WS instead of using `self.decider`. The
+        # type is widened to `object` to keep this module from importing
+        # the master-side dispatcher (which depends on websockets).
+        self._npc_decision_dispatcher = npc_decision_dispatcher
+        # Optional SpeechEvent emission. When None, behavior matches pre-
+        # speech-event-bus rounds mode: only PLAYER_SPEECH log + Discord post
+        # are produced. When set, every accepted utterance is also recorded
+        # as SpeechEvent(source=npc_generated) so PublicDiscussionState can
+        # rebuild a uniform timeline across rounds + reactive_voice modes.
+        self.discussion_service = discussion_service
 
     def set_game_service(self, gs: GameService) -> None:
         self._gs_slot["gs"] = gs
@@ -381,12 +611,155 @@ class LLMAdapter:
             llm_players = [p for p in llm_players if p.seat_no in restrict_to_seats]
         if not llm_players:
             return
-        task = asyncio.create_task(
-            self._run_night_actions(game, llm_players, players, seats, unresolved_seats),
-            name=f"llm-night-{game.id}-d{game.day_number}",
-        )
+        if (
+            game.discussion_mode == "reactive_voice"
+            and self._npc_decision_dispatcher is not None
+        ):
+            task = asyncio.create_task(
+                self._run_night_actions_via_npc_dispatcher(
+                    game, llm_players, players, seats, unresolved_seats
+                ),
+                name=f"npc-night-{game.id}-d{game.day_number}",
+            )
+        else:
+            task = asyncio.create_task(
+                self._run_night_actions(game, llm_players, players, seats, unresolved_seats),
+                name=f"llm-night-{game.id}-d{game.day_number}",
+            )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_night_actions_via_npc_dispatcher(
+        self,
+        game: Game,
+        llm_players: Sequence[Player],
+        all_players: Sequence[Player],
+        seats: Sequence[Seat],
+        unresolved_seats: frozenset[int] = frozenset(),
+    ) -> None:
+        """Reactive_voice night-action path: each role-actor seat dispatches
+        to its NPC bot. Wolf chat is intentionally skipped here — the
+        wolves coordinate through their `wolf_chat_history` mirror that
+        Master pushes via PrivateStateUpdate when wolves talk.
+        """
+        seats_by_no = {s.seat_no: s for s in seats}
+        prev = await self.repo.load_previous_guard(game.id)
+        prev_guard_seat = previous_guard_seat_for_night(prev, game.day_number)
+        # Stale-phase guard: bail if we already advanced past NIGHT.
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.ended_at is not None
+            or fresh.phase is not Phase.NIGHT
+            or fresh.day_number != game.day_number
+        ):
+            return
+        # Bucket players by night action kind so each kind dispatches as
+        # a single fan-out (matches the dispatcher API). Skip seats that
+        # already submitted unless they are unresolved (split wolves).
+        existing = await self.repo.load_night_actions(game.id, day=game.day_number)
+        already_by_seat: dict[int, set[SubmissionType]] = {}
+        for a in existing:
+            already_by_seat.setdefault(a.actor_seat, set()).add(a.kind)
+        buckets: dict[str, list[tuple[Player, SubmissionType, list[int]]]] = {
+            "wolf_attack": [],
+            "seer_divine": [],
+            "knight_guard": [],
+        }
+        kind_to_action: dict[SubmissionType, str] = {
+            SubmissionType.WOLF_ATTACK: "wolf_attack",
+            SubmissionType.SEER_DIVINE: "seer_divine",
+            SubmissionType.KNIGHT_GUARD: "knight_guard",
+        }
+        for player in llm_players:
+            kind, legal = self._role_to_kind(player, all_players, prev_guard_seat)
+            if kind is None or not legal:
+                continue
+            already = already_by_seat.get(player.seat_no, set())
+            if kind in already and player.seat_no not in unresolved_seats:
+                continue
+            action_label = kind_to_action.get(kind)
+            if action_label is None:
+                continue
+            buckets[action_label].append((player, kind, list(legal)))
+        dispatcher = self._npc_decision_dispatcher
+        # Phase-D pre-night wolf-chat coordination. Mirrors rounds-mode
+        # `_run_wolf_chat`: each alive wolf NPC gets a turn (sequential)
+        # to post a coordination line BEFORE the wolf_attack bucket
+        # fans out, so wolf B sees wolf A's proposed target via the
+        # wolf_chat_history the broker already pushed.
+        wolf_attack_items = buckets.get("wolf_attack", [])
+        if len(wolf_attack_items) >= 2:
+            wolves = [p for p, _kind, _legal in wolf_attack_items]
+            attack_legal: set[int] = set()
+            for _p, _kind, legal in wolf_attack_items:
+                attack_legal.update(legal)
+            try:
+                await dispatcher.dispatch_wolf_chat_lines(  # type: ignore[union-attr]
+                    game_id=game.id,
+                    day=game.day_number,
+                    wolves=wolves,
+                    seats=seats,
+                    candidate_seats=sorted(attack_legal),
+                    public_state_summary=await self._build_public_digest(game, seats),
+                )
+            except Exception:
+                log.exception(
+                    "phase_d_wolf_chat_dispatch_failed game=%s day=%d",
+                    game.id, game.day_number,
+                )
+
+        for action_label, items in buckets.items():
+            if not items:
+                continue
+            actors = [p for p, _kind, _legal in items]
+            # Use the union of legal targets for the request payload — the
+            # NPC bot picks any of them. (Per-actor legal sets only differ
+            # when there are 3+ wolves, which the 9-player ruleset never
+            # has.) We still validate per-actor on the response side.
+            union_legal: set[int] = set()
+            per_actor_legal: dict[int, set[int]] = {}
+            per_actor_kind: dict[int, SubmissionType] = {}
+            for player, kind, legal in items:
+                per_actor_legal[player.seat_no] = set(legal)
+                per_actor_kind[player.seat_no] = kind
+                union_legal.update(legal)
+            digest = await self._build_public_digest(game, seats)
+            try:
+                results = await dispatcher.dispatch_night_actions(  # type: ignore[union-attr]
+                    game_id=game.id,
+                    day=game.day_number,
+                    action_kind=action_label,
+                    actors=actors,
+                    seats=seats,
+                    candidate_seats=sorted(union_legal),
+                    public_state_summary=digest,
+                )
+            except Exception:
+                log.exception(
+                    "npc_night_dispatch_failed game=%s day=%d kind=%s",
+                    game.id, game.day_number, action_label,
+                )
+                continue
+            for actor in actors:
+                target = results.get(actor.seat_no)
+                if target is not None and target not in per_actor_legal[actor.seat_no]:
+                    log.info(
+                        "npc_night_decision_illegal_target game=%s seat=%d kind=%s target=%s",
+                        game.id, actor.seat_no, action_label, target,
+                    )
+                    target = None
+                kind = per_actor_kind[actor.seat_no]
+                try:
+                    await self.gs.submit_night_action(
+                        game.id, actor.seat_no, kind, target, game.day_number,
+                    )
+                except Exception:
+                    log.exception(
+                        "npc_night_submit_failed game=%s seat=%d kind=%s",
+                        game.id, actor.seat_no, kind.value,
+                    )
+        _ = seats_by_no  # lint: keep parameter live for log readers
 
     async def _run_night_actions(
         self,
@@ -574,6 +947,11 @@ class LLMAdapter:
 
         `restrict_to_seats` lets `resend_pending_dms` re-dispatch for only the
         LLM seats that still owe a vote after `/wolf extend`.
+
+        Phase-D: when ``game.discussion_mode == "reactive_voice"`` and a
+        decision dispatcher is configured, votes are routed to each
+        seat's NPC bot over WS instead of going through the gameplay
+        decider. Rounds mode (the historical path) is unchanged.
         """
         seats_by_no = {s.seat_no: s for s in seats}
         llm_voters = [
@@ -585,12 +963,239 @@ class LLMAdapter:
             llm_voters = [p for p in llm_voters if p.seat_no in restrict_to_seats]
         if not llm_voters:
             return
-        task = asyncio.create_task(
-            self._run_votes(game, llm_voters, players, seats, candidates, round_),
-            name=f"llm-votes-{game.id}-d{game.day_number}-r{round_}",
-        )
+        if (
+            game.discussion_mode == "reactive_voice"
+            and self._npc_decision_dispatcher is not None
+        ):
+            task = asyncio.create_task(
+                self._run_votes_via_npc_dispatcher(
+                    game, llm_voters, players, seats, candidates, round_
+                ),
+                name=f"npc-votes-{game.id}-d{game.day_number}-r{round_}",
+            )
+        else:
+            task = asyncio.create_task(
+                self._run_votes(game, llm_voters, players, seats, candidates, round_),
+                name=f"llm-votes-{game.id}-d{game.day_number}-r{round_}",
+            )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    async def _build_public_digest(self, game: Game, seats: Sequence[Seat]) -> str:
+        """Phase-D: render the Master-side public-info digest for an NPC
+        dispatch request. Best-effort — a missing DiscussionService or
+        an empty phase yields an empty string so the NPC sees the
+        historical no-digest behavior.
+
+        The vote / night decision happens AFTER the day's discussion has
+        ended, so ``game.phase`` at this point is DAY_VOTE / NIGHT etc.
+        Looking up speech events under that phase id returns zero rows
+        (speeches are persisted under DAY_DISCUSSION / DAY_RUNOFF_SPEECH
+        only). Pull from the day's DAY_DISCUSSION explicitly so the
+        digest carries the actual discussion content the NPC needs to
+        align its vote with what was said. DAY_RUNOFF_SPEECH events are
+        appended chronologically when present so a runoff vote also sees
+        the candidates' final speeches.
+        """
+        if self.discussion_service is None:
+            return ""
+        try:
+            from wolfbot.domain.discussion import (
+                make_phase_id as _make_phase_id,
+            )
+            from wolfbot.master.public_digest import build_public_digest
+            from wolfbot.services.discussion_service import (
+                apply_speech_event,
+            )
+
+            day = game.day_number
+            discussion_phase_id = _make_phase_id(
+                game.id, day, Phase.DAY_DISCUSSION
+            )
+            runoff_phase_id = _make_phase_id(
+                game.id, day, Phase.DAY_RUNOFF_SPEECH
+            )
+            events = list(
+                await self.discussion_service.load_phase(
+                    game.id, discussion_phase_id
+                )
+            )
+            runoff_events = list(
+                await self.discussion_service.load_phase(
+                    game.id, runoff_phase_id
+                )
+            )
+            # Append runoff events after discussion so they fold on top
+            # of the day's accumulated state. Both phases carry their
+            # own phase_baseline sentinel so the fold reads each
+            # baseline correctly when entering the next phase.
+            events.extend(runoff_events)
+            if not events:
+                return ""
+            state = None
+            for ev in events:
+                state = apply_speech_event(state, ev)
+            if state is None:
+                return ""
+            past_votes = await self._load_past_votes(game.id, day)
+            seat_names = {s.seat_no: s.display_name for s in seats}
+            return build_public_digest(
+                state=state,
+                recent_events=events,
+                seat_names=seat_names,
+                past_votes=past_votes,
+            )
+        except Exception:
+            log.exception(
+                "public_digest_build_failed game=%s day=%d",
+                game.id, game.day_number,
+            )
+            return ""
+
+    async def _load_past_votes(
+        self,
+        game_id: str,
+        current_day: int,
+    ) -> tuple[tuple[int, int, tuple[tuple[int, int | None], ...]], ...]:
+        """Load completed-day vote ballots so the digest can render the
+        full "who voted whom" history.
+
+        Mirrors `SpeakArbiter._load_past_votes` so the vote / night
+        decision LLM gets the same ballot ledger that day-discussion
+        speeches already see via the LogicPacket. Returns ``()`` when no
+        past day exists or any DB read fails — best-effort.
+        """
+        if current_day <= 1:
+            return ()
+        out: list[tuple[int, int, tuple[tuple[int, int | None], ...]]] = []
+        try:
+            for day in range(1, current_day):
+                for round_ in (0, 1):
+                    rows = await self.repo.load_votes(
+                        game_id, day=day, round_=round_,
+                    )
+                    if not rows:
+                        continue
+                    pairs = tuple(
+                        (v.voter_seat, v.target_seat)
+                        for v in sorted(rows, key=lambda v: v.voter_seat)
+                    )
+                    out.append((day, round_, pairs))
+        except Exception:
+            log.exception("digest_past_votes_load_failed game=%s", game_id)
+            return ()
+        return tuple(out)
+
+    async def _run_votes_via_npc_dispatcher(
+        self,
+        game: Game,
+        llm_voters: Sequence[Player],
+        all_players: Sequence[Player],
+        seats: Sequence[Seat],
+        candidates: Sequence[int] | None,
+        round_: int,
+    ) -> None:
+        """Reactive_voice vote path: fan out DecideVoteRequest, persist
+        targets, default to abstain on offline / timeout.
+        """
+        seats_by_no = {s.seat_no: s for s in seats}
+        expected_phase = Phase.DAY_VOTE if round_ == 0 else Phase.DAY_RUNOFF
+        # Re-load game and stop early if the phase already advanced. The
+        # dispatcher's per-vote round-trip is bounded by request_ttl_ms but
+        # a force-skip / abort can still beat it.
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.ended_at is not None
+            or fresh.phase is not expected_phase
+            or fresh.day_number != game.day_number
+        ):
+            return
+        # Build candidate set per voter — same shape as the decider path.
+        # We fan out only voters who have at least one legal target;
+        # voters with no legal target (e.g. last-survivor edge) abstain.
+        existing_votes = await self.repo.load_votes(
+            game.id, day=game.day_number, round_=round_
+        )
+        voted = {v.voter_seat for v in existing_votes}
+        per_voter_candidates: dict[int, list[int]] = {}
+        voters_to_dispatch: list[Player] = []
+        for v in llm_voters:
+            if v.seat_no in voted:
+                continue
+            if candidates is None:
+                cands = [
+                    s.seat_no
+                    for s in seats
+                    if s.seat_no != v.seat_no
+                    and any(
+                        p.seat_no == s.seat_no and p.alive for p in all_players
+                    )
+                ]
+            else:
+                cands = [
+                    s.seat_no
+                    for s in seats
+                    if s.seat_no in set(candidates) and s.seat_no != v.seat_no
+                ]
+            per_voter_candidates[v.seat_no] = cands
+            voters_to_dispatch.append(v)
+        if not voters_to_dispatch:
+            return
+        # Use the union of all per-voter candidate seats for the dispatch
+        # call — the NPC bot will pick from the seats given. (Each voter's
+        # legal set is identical in practice for the regular vote.)
+        union_candidates: set[int] = set()
+        for cs in per_voter_candidates.values():
+            union_candidates.update(cs)
+        dispatcher = self._npc_decision_dispatcher
+        digest = await self._build_public_digest(game, seats)
+        try:
+            results = await dispatcher.dispatch_votes(  # type: ignore[union-attr]
+                game_id=game.id,
+                day=game.day_number,
+                round_=round_,
+                voters=voters_to_dispatch,
+                seats=seats,
+                candidate_seats=sorted(union_candidates),
+                public_state_summary=digest,
+            )
+        except Exception:
+            log.exception(
+                "npc_vote_dispatch_failed game=%s day=%d round=%d",
+                game.id, game.day_number, round_,
+            )
+            return
+        # Persist each result. ``None`` (offline / timeout / explicit
+        # abstain) becomes ``target_seat=None`` on the Vote row so the
+        # viewer surfaces the seat as silent.
+        for voter in voters_to_dispatch:
+            target = results.get(voter.seat_no)
+            # Validate target is in the voter's legal set, otherwise abstain.
+            if target is not None and target not in per_voter_candidates.get(
+                voter.seat_no, []
+            ):
+                log.info(
+                    "npc_vote_decision_illegal_target game=%s seat=%d target=%s",
+                    game.id, voter.seat_no, target,
+                )
+                target = None
+            try:
+                await self.gs.submit_vote(
+                    game.id,
+                    voter.seat_no,
+                    target_seat=target,
+                    round_=round_,
+                    day=game.day_number,
+                )
+            except Exception:
+                log.exception(
+                    "npc_vote_submit_failed game=%s seat=%d round=%d",
+                    game.id, voter.seat_no, round_,
+                )
+        # Touch seats_by_no to keep the parameter live for log readers
+        # auditing the dispatch (lint guard).
+        _ = seats_by_no
 
     async def _run_votes(
         self,
@@ -714,6 +1319,22 @@ class LLMAdapter:
             for p in players
             if p.alive and p.seat_no in seats_by_no and seats_by_no[p.seat_no].is_llm
         ]
+        # Seed the phase baseline even when there are no LLM seats (all-human
+        # game). Human text events recorded by on_message need the sentinel to
+        # exist so PublicDiscussionState rebuild works.
+        if self.discussion_service is not None:
+            try:
+                alive_seat_nos = sorted(p.seat_no for p in players if p.alive)
+                await self.discussion_service.begin_phase_if_absent(
+                    game_id=game.id,
+                    day=game.day_number,
+                    phase=game.phase,
+                    alive_seat_nos=alive_seat_nos,
+                )
+            except Exception:
+                log.exception(
+                    "phase_baseline insert failed for %s day=%d", game.id, game.day_number
+                )
         if not llm_players:
             return
         task = asyncio.create_task(
@@ -731,6 +1352,8 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         ordered = sorted(llm_players, key=lambda p: p.seat_no)
+        # Phase baseline is seeded by submit_llm_discussion_rounds before the
+        # background task starts — no need to duplicate it here.
         for round_idx in (1, 2):
             for llm in ordered:
                 # Re-read live game state before each per-seat attempt so a
@@ -861,6 +1484,9 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
+        await self._emit_npc_speech_event(
+            fresh, player.seat_no, message, co_declaration=action.co_declaration
+        )
 
     # --------------------------------------------------- runoff candidate speech
     async def submit_llm_runoff_candidate_speeches(
@@ -904,6 +1530,21 @@ class LLMAdapter:
     ) -> None:
         seats_by_no = {s.seat_no: s for s in seats}
         ordered = sorted(llm_players, key=lambda p: p.seat_no)
+        # Phase baseline for runoff: alive seats at runoff entry.
+        if self.discussion_service is not None:
+            try:
+                all_players = await self.repo.load_players(game.id)
+                alive_seat_nos = sorted(p.seat_no for p in all_players if p.alive)
+                await self.discussion_service.begin_phase_if_absent(
+                    game_id=game.id,
+                    day=game.day_number,
+                    phase=game.phase,
+                    alive_seat_nos=alive_seat_nos,
+                )
+            except Exception:
+                log.exception(
+                    "runoff phase_baseline insert failed %s day=%d", game.id, game.day_number
+                )
         for llm in ordered:
             fresh = await self.repo.load_game(game.id)
             if (
@@ -995,6 +1636,54 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
+        await self._emit_npc_speech_event(
+            fresh, player.seat_no, message, co_declaration=action.co_declaration
+        )
+
+    async def _emit_npc_speech_event(
+        self,
+        game: Game,
+        speaker_seat: int,
+        text: str,
+        *,
+        co_declaration: str | None = None,
+    ) -> None:
+        """Persist a SpeechEvent(source=npc_generated) for an LLM utterance.
+
+        Wrapped in try/except so a SpeechEvent persistence hiccup does not
+        rollback the already-completed Discord post + PLAYER_SPEECH log.
+        Skips DiscussionService's own MessagePoster + LogSink hooks (they
+        would duplicate the LLM speech) by going through `_store.insert`
+        directly when available.
+        """
+        if self.discussion_service is None:
+            return
+        try:
+            from wolfbot.domain.discussion import make_phase_id
+            from wolfbot.services.discussion_service import (
+                make_npc_generated_event,
+            )
+
+            phase_id = make_phase_id(game.id, game.day_number, game.phase)
+            event = make_npc_generated_event(
+                game_id=game.id,
+                phase_id=phase_id,
+                day=game.day_number,
+                phase=game.phase,
+                speaker_seat=speaker_seat,
+                text=text,
+                co_declaration=co_declaration,
+            )
+            # Persist-only avoids re-posting the message to Discord (the
+            # rounds-mode path already posted it via MessagePoster) and
+            # avoids re-inserting the PLAYER_SPEECH LogEntry (already inserted).
+            await self.discussion_service.record_persist_only(event)
+        except Exception:
+            log.exception(
+                "SpeechEvent(npc_generated) write failed for game=%s seat=%s",
+                game.id,
+                speaker_seat,
+            )
 
     # ------------------------------------------------------ helpers
     async def _ask(
@@ -1006,7 +1695,7 @@ class LLMAdapter:
         seats: Sequence[Seat],
         task_text: str,
     ) -> LLMAction:
-        persona = PERSONAS_BY_KEY.get(seat.persona_key or "")
+        persona = NPC_PERSONAS_BY_KEY.get(seat.persona_key or "")
         if persona is None:
             return LLMAction(intent="skip", reason_summary="persona missing")
         assert player.role is not None
@@ -1014,6 +1703,7 @@ class LLMAdapter:
         private_logs = await self.repo.load_private_logs_for_audience(
             game.id, audience_seat=player.seat_no, limit=40
         )
+        deduced_block = await self._build_deduced_facts_block(game, players, seats)
         system = build_system_prompt(
             persona=persona,
             role=player.role,
@@ -1029,12 +1719,71 @@ class LLMAdapter:
             players=players,
             public_logs=public_logs,
             private_logs=private_logs,
+            deduced_facts_block=deduced_block,
         )
+        actor = (
+            f"seat={player.seat_no} persona={seat.persona_key} role={player.role.value}"
+        )
+        task_tag = _classify_task_text(task_text)
+        with trace_context(
+            game_id=game.id,
+            phase=game.phase.value,
+            day=game.day_number,
+            actor=actor,
+            metadata={"task": task_tag},
+        ):
+            try:
+                return await self.decider.decide(system, user)
+            except Exception:
+                log.exception(
+                    "LLM decide failed for seat %s game %s", player.seat_no, game.id
+                )
+                return LLMAction(intent="skip", reason_summary="decider error")
+
+    async def _build_deduced_facts_block(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+    ) -> str | None:
+        """Assemble Master's HARD/MEDIUM deduced facts for this turn.
+
+        Pulls CO history from the SpeechEvent fold and per-day vote rows
+        from the repo, then runs them through `deduction_service.deduce`.
+        Returns ``None`` (rather than the empty-marker string) on any
+        failure so the user-context template skips the section instead of
+        showing a confusing '(該当なし)' line.
+        """
         try:
-            return await self.decider.decide(system, user)
+            from wolfbot.services.deduction_service import deduce, render_facts_block
+            from wolfbot.services.discussion_service import rebuild_public_state_from_events
+
+            co_claims: tuple[CoClaim, ...] = ()
+            if self.discussion_service is not None:
+                phase_id = make_phase_id(game.id, game.day_number, game.phase)
+                events = await self.discussion_service.load_phase(game.id, phase_id)
+                state = rebuild_public_state_from_events(events)
+                if state is not None:
+                    co_claims = state.co_claims
+
+            votes_by_day: dict[int, list[Vote]] = {}
+            for past_day in range(1, game.day_number):
+                votes = await self.repo.load_votes(game.id, past_day, 0)
+                if votes:
+                    votes_by_day[past_day] = votes
+
+            facts = deduce(
+                co_claims=co_claims,
+                players=players,
+                seats=seats,
+                votes_by_day=votes_by_day,
+            )
+            if not facts:
+                return None
+            return render_facts_block(facts)
         except Exception:
-            log.exception("LLM decide failed for seat %s game %s", player.seat_no, game.id)
-            return LLMAction(intent="skip", reason_summary="decider error")
+            log.exception("deduce facts failed for game %s seat", game.id)
+            return None
 
     def _resolve_target(
         self,
@@ -1096,21 +1845,35 @@ class LLMAdapter:
 
 
 # ------------------------------------------------------------- factory
-def make_xai_decider(api_key: str, model: str, timeout: float = 30.0) -> XAILLMActionDecider:
-    """Build an xAI-backed decider. Imports openai lazily so tests can skip it.
+_XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1"
+_DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 
-    Kept for back-compat. New code should call `make_llm_decider(settings)`.
+
+def make_xai_decider(
+    api_key: str,
+    model: str,
+    *,
+    base_url: str | None = None,
+    timeout: float = 30.0,
+) -> XAILLMActionDecider:
+    """Build an OpenAI-Chat-Completions-compatible decider (xAI default).
+
+    ``base_url`` defaults to xAI Grok; override to point at OpenAI, Groq,
+    Together, vLLM, Ollama, or any other strict-json_schema-supporting
+    OpenAI-compat endpoint.  Imports ``openai`` lazily so tests skipping
+    LLM paths don't need the dep installed.
     """
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url or _XAI_DEFAULT_BASE_URL)
     return XAILLMActionDecider(client=client, model=model, timeout=timeout)
 
 
 def make_deepseek_decider(
     api_key: str,
     model: str,
-    base_url: str = "https://api.deepseek.com",
+    *,
+    base_url: str | None = None,
     thinking: Literal["enabled", "disabled"] = "enabled",
     reasoning_effort: Literal["high", "max"] = "max",
     timeout: float = 30.0,
@@ -1118,7 +1881,7 @@ def make_deepseek_decider(
     """Build a DeepSeek-backed decider. Imports openai lazily."""
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url or _DEEPSEEK_DEFAULT_BASE_URL)
     return DeepSeekLLMActionDecider(
         client=client,
         model=model,
@@ -1132,6 +1895,7 @@ def make_gemini_decider(
     project: str,
     location: str,
     model: str,
+    *,
     thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
     timeout: float = 30.0,
 ) -> GeminiLLMActionDecider:
@@ -1159,39 +1923,48 @@ def make_gemini_decider(
     )
 
 
-def make_llm_decider(settings: Settings, timeout: float = 30.0) -> LLMActionDecider:
-    """Provider-aware decider factory. Branches on `settings.LLM_PROVIDER`.
+def make_llm_decider(cfg: LLMDeciderConfig) -> LLMActionDecider:
+    """Provider-aware decider factory. Branches on ``cfg.provider``.
 
-    The Settings model_validator guarantees the relevant API key is non-None
-    by the time we get here; the asserts are a documentation aid for mypy.
+    The Settings model_validator that built ``cfg`` guarantees the
+    relevant credential is non-None / non-empty by the time we get here;
+    the asserts are a documentation aid for mypy.
+
+    The same factory is used for both Master's Gameplay LLM (built from
+    ``MasterSettings.gameplay_decider_config()``) and any ad-hoc gameplay
+    decider tests need.  NPC speech generation has its own factory in
+    :mod:`wolfbot.npc.generator_factory` because the NPC schema differs.
     """
-    if settings.LLM_PROVIDER == "xai":
-        assert settings.XAI_API_KEY is not None  # validated in Settings
+    if cfg.provider == "xai":
+        assert cfg.api_key is not None  # validated in Settings
         return make_xai_decider(
-            api_key=settings.XAI_API_KEY.get_secret_value(),
-            model=settings.XAI_MODEL,
-            timeout=timeout,
+            api_key=cfg.api_key.get_secret_value(),
+            model=cfg.model,
+            base_url=cfg.base_url,
+            timeout=cfg.timeout,
         )
-    if settings.LLM_PROVIDER == "deepseek":
-        assert settings.DEEPSEEK_API_KEY is not None  # validated in Settings
+    if cfg.provider == "deepseek":
+        assert cfg.api_key is not None  # validated in Settings
         return make_deepseek_decider(
-            api_key=settings.DEEPSEEK_API_KEY.get_secret_value(),
-            model=settings.DEEPSEEK_MODEL,
-            base_url=settings.DEEPSEEK_BASE_URL,
-            thinking=settings.DEEPSEEK_THINKING,
-            reasoning_effort=settings.DEEPSEEK_REASONING_EFFORT,
-            timeout=timeout,
+            api_key=cfg.api_key.get_secret_value(),
+            model=cfg.model,
+            base_url=cfg.base_url,
+            thinking=cfg.thinking,
+            reasoning_effort=cfg.reasoning_effort,
+            timeout=cfg.timeout,
         )
-    if settings.LLM_PROVIDER == "gemini":
-        assert settings.GEMINI_VERTEX_PROJECT is not None  # validated in Settings
+    if cfg.provider == "gemini":
+        assert cfg.vertex_project is not None  # validated in Settings
         return make_gemini_decider(
-            project=settings.GEMINI_VERTEX_PROJECT,
-            location=settings.GEMINI_VERTEX_LOCATION,
-            model=settings.GEMINI_MODEL,
-            thinking_level=settings.GEMINI_THINKING_LEVEL,
-            timeout=timeout,
+            project=cfg.vertex_project,
+            location=cfg.vertex_location,
+            model=cfg.model,
+            thinking_level=cfg.thinking_level,
+            timeout=cfg.timeout,
         )
-    raise ValueError(f"unknown LLM_PROVIDER: {settings.LLM_PROVIDER!r}")
+    if cfg.provider == "mock":
+        return MockLLMActionDecider()
+    raise ValueError(f"unknown provider: {cfg.provider!r}")
 
 
 __all__ = [
@@ -1202,6 +1975,7 @@ __all__ = [
     "LLMAction",
     "LLMActionDecider",
     "LLMAdapter",
+    "MockLLMActionDecider",
     "XAILLMActionDecider",
     "make_deepseek_decider",
     "make_gemini_decider",

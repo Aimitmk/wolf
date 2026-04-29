@@ -1,0 +1,29 @@
+# Next.js
+.next/
+out/
+build/
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.pnp.cjs
+
+# Production
+*.tsbuildinfo
+next-env.d.ts
+
+# Logs / env
+*.log
+.env*.local
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Auto-exported real-game JSON, written by GameService._on_game_end_finalize.
+# Sample data lives in sample-data/ and stays committed.
+games/*.json

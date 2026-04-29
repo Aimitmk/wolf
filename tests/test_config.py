@@ -1,8 +1,8 @@
-"""Tests for the env-driven Settings model.
+"""Tests for the env-driven Settings models.
 
-We pass `_env_file=None` everywhere so the repo's actual `.env` (which has
-real values for `DISCORD_TOKEN`, `XAI_API_KEY`, etc.) cannot leak into and
-mask validator failures we want to assert on.
+We pass `_env_file=None` everywhere so the repo's actual `.env.master`
+(which has real values) cannot leak into and mask validator failures we
+want to assert on.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from wolfbot.config import Settings
+from wolfbot.config import MasterSettings
 
 
 def _base_kwargs() -> dict[str, object]:
@@ -22,114 +22,183 @@ def _base_kwargs() -> dict[str, object]:
     }
 
 
-def test_default_provider_is_xai_and_requires_xai_key() -> None:
+# ----------------------------------------------------------- xAI provider
+def test_default_provider_is_xai_and_requires_gameplay_api_key() -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, **_base_kwargs())  # type: ignore[arg-type]
+        MasterSettings(_env_file=None, **_base_kwargs())  # type: ignore[arg-type]
 
 
 def test_xai_provider_with_key_constructs() -> None:
-    s = Settings(_env_file=None, **_base_kwargs(), XAI_API_KEY=SecretStr("k"))  # type: ignore[arg-type]
-    assert s.LLM_PROVIDER == "xai"
-    assert s.XAI_MODEL == "grok-4-1-fast"
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_API_KEY=SecretStr("k"),
+    )
+    assert s.GAMEPLAY_LLM_PROVIDER == "xai"
+    assert s.GAMEPLAY_LLM_MODEL == "grok-4-1-fast"
+    assert s.GAMEPLAY_LLM_BASE_URL is None
     # DeepSeek defaults still readable but unused on the xai path.
-    assert s.DEEPSEEK_BASE_URL == "https://api.deepseek.com"
-    assert s.DEEPSEEK_MODEL == "deepseek-v4-flash"
+    assert s.GAMEPLAY_LLM_THINKING == "enabled"
+    assert s.GAMEPLAY_LLM_REASONING_EFFORT == "max"
 
 
-def test_deepseek_provider_requires_deepseek_key() -> None:
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, **_base_kwargs(), LLM_PROVIDER="deepseek")  # type: ignore[arg-type]
-
-
-def test_deepseek_provider_does_not_require_xai_key() -> None:
-    s = Settings(  # type: ignore[arg-type]
+def test_xai_provider_can_override_base_url() -> None:
+    s = MasterSettings(  # type: ignore[arg-type]
         _env_file=None,
         **_base_kwargs(),
-        LLM_PROVIDER="deepseek",
-        DEEPSEEK_API_KEY=SecretStr("d"),
+        GAMEPLAY_LLM_API_KEY=SecretStr("k"),
+        GAMEPLAY_LLM_BASE_URL="http://localhost:11434/v1",
     )
-    assert s.XAI_API_KEY is None
-    assert s.DEEPSEEK_THINKING == "enabled"
-    assert s.DEEPSEEK_REASONING_EFFORT == "max"
-    assert s.DEEPSEEK_MODEL == "deepseek-v4-flash"
+    assert s.GAMEPLAY_LLM_BASE_URL == "http://localhost:11434/v1"
 
 
-def test_unknown_provider_rejected() -> None:
+# ------------------------------------------------------ DeepSeek provider
+def test_deepseek_provider_requires_api_key() -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, **_base_kwargs(), LLM_PROVIDER="claude")  # type: ignore[arg-type]
-
-
-def test_thinking_literal_is_strict() -> None:
-    base = {**_base_kwargs(), "LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": SecretStr("d")}
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, **base, DEEPSEEK_THINKING="off")  # type: ignore[arg-type]
-
-
-def test_reasoning_effort_literal_is_strict() -> None:
-    base = {**_base_kwargs(), "LLM_PROVIDER": "deepseek", "DEEPSEEK_API_KEY": SecretStr("d")}
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, **base, DEEPSEEK_REASONING_EFFORT="medium")  # type: ignore[arg-type]
-
-
-def test_gemini_provider_requires_gemini_vertex_project() -> None:
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, **_base_kwargs(), LLM_PROVIDER="gemini")  # type: ignore[arg-type]
-
-
-def test_gemini_provider_does_not_require_xai_or_deepseek_key() -> None:
-    s = Settings(  # type: ignore[arg-type]
-        _env_file=None,
-        **_base_kwargs(),
-        LLM_PROVIDER="gemini",
-        GEMINI_VERTEX_PROJECT="my-project",
-    )
-    assert s.XAI_API_KEY is None
-    assert s.DEEPSEEK_API_KEY is None
-    assert s.GEMINI_VERTEX_PROJECT == "my-project"
-    assert s.GEMINI_VERTEX_LOCATION == "global"
-    assert s.GEMINI_MODEL == "gemini-3-flash-preview"
-    assert s.GEMINI_THINKING_LEVEL == "high"
-
-
-def test_gemini_thinking_level_literal_is_strict() -> None:
-    base = {
-        **_base_kwargs(),
-        "LLM_PROVIDER": "gemini",
-        "GEMINI_VERTEX_PROJECT": "my-project",
-    }
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, **base, GEMINI_THINKING_LEVEL="off")  # type: ignore[arg-type]
-
-
-def test_gemini_api_key_alone_without_vertex_project_rejected() -> None:
-    """Stale GEMINI_API_KEY in env is silently dropped by extra='ignore';
-    the missing GEMINI_VERTEX_PROJECT still raises a ValidationError."""
-    with pytest.raises(ValidationError):
-        Settings(  # type: ignore[arg-type, call-arg]
+        MasterSettings(  # type: ignore[arg-type]
             _env_file=None,
             **_base_kwargs(),
-            LLM_PROVIDER="gemini",
-            GEMINI_API_KEY=SecretStr("g"),
+            GAMEPLAY_LLM_PROVIDER="deepseek",
         )
 
 
-def test_gemini_vertex_location_default_is_global() -> None:
-    s = Settings(  # type: ignore[arg-type]
+def test_deepseek_provider_with_key_constructs() -> None:
+    s = MasterSettings(  # type: ignore[arg-type]
         _env_file=None,
         **_base_kwargs(),
-        LLM_PROVIDER="gemini",
-        GEMINI_VERTEX_PROJECT="p",
+        GAMEPLAY_LLM_PROVIDER="deepseek",
+        GAMEPLAY_LLM_API_KEY=SecretStr("d"),
     )
-    assert s.GEMINI_VERTEX_LOCATION == "global"
+    assert s.GAMEPLAY_LLM_PROVIDER == "deepseek"
+    assert s.GAMEPLAY_LLM_THINKING == "enabled"
+    assert s.GAMEPLAY_LLM_REASONING_EFFORT == "max"
+
+
+def test_thinking_literal_is_strict() -> None:
+    with pytest.raises(ValidationError):
+        MasterSettings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            GAMEPLAY_LLM_PROVIDER="deepseek",
+            GAMEPLAY_LLM_API_KEY=SecretStr("d"),
+            GAMEPLAY_LLM_THINKING="off",
+        )
+
+
+def test_reasoning_effort_literal_is_strict() -> None:
+    with pytest.raises(ValidationError):
+        MasterSettings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            GAMEPLAY_LLM_PROVIDER="deepseek",
+            GAMEPLAY_LLM_API_KEY=SecretStr("d"),
+            GAMEPLAY_LLM_REASONING_EFFORT="medium",
+        )
+
+
+# -------------------------------------------------------- Gemini provider
+def test_gemini_provider_requires_vertex_project() -> None:
+    with pytest.raises(ValidationError):
+        MasterSettings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            GAMEPLAY_LLM_PROVIDER="gemini",
+        )
+
+
+def test_gemini_provider_does_not_require_api_key() -> None:
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_PROVIDER="gemini",
+        GAMEPLAY_LLM_VERTEX_PROJECT="my-project",
+    )
+    assert s.GAMEPLAY_LLM_API_KEY is None
+    assert s.GAMEPLAY_LLM_VERTEX_PROJECT == "my-project"
+    assert s.GAMEPLAY_LLM_VERTEX_LOCATION == "global"
+    assert s.GAMEPLAY_LLM_THINKING_LEVEL == "high"
+
+
+def test_gemini_thinking_level_literal_is_strict() -> None:
+    with pytest.raises(ValidationError):
+        MasterSettings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            GAMEPLAY_LLM_PROVIDER="gemini",
+            GAMEPLAY_LLM_VERTEX_PROJECT="p",
+            GAMEPLAY_LLM_THINKING_LEVEL="off",
+        )
 
 
 def test_gemini_empty_vertex_project_rejected() -> None:
     """Empty string in .env should be rejected at boot, not deferred to
     the SDK at first request time."""
     with pytest.raises(ValidationError):
-        Settings(  # type: ignore[arg-type]
+        MasterSettings(  # type: ignore[arg-type]
             _env_file=None,
             **_base_kwargs(),
-            LLM_PROVIDER="gemini",
-            GEMINI_VERTEX_PROJECT="",
+            GAMEPLAY_LLM_PROVIDER="gemini",
+            GAMEPLAY_LLM_VERTEX_PROJECT="",
         )
+
+
+# --------------------------------------------------------------- mock provider
+def test_mock_provider_does_not_require_api_key_or_vertex_project() -> None:
+    """``GAMEPLAY_LLM_PROVIDER=mock`` is for offline integration tests —
+    no credentials should be required."""
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_PROVIDER="mock",
+    )
+    assert s.GAMEPLAY_LLM_PROVIDER == "mock"
+    assert s.GAMEPLAY_LLM_API_KEY is None
+    assert s.GAMEPLAY_LLM_VERTEX_PROJECT is None
+
+
+def test_mock_decider_config_round_trips() -> None:
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_PROVIDER="mock",
+    )
+    cfg = s.gameplay_decider_config()
+    assert cfg.provider == "mock"
+    assert cfg.api_key is None
+
+
+# ---------------------------------------------------------------- common
+def test_unknown_provider_rejected() -> None:
+    with pytest.raises(ValidationError):
+        MasterSettings(  # type: ignore[arg-type]
+            _env_file=None,
+            **_base_kwargs(),
+            GAMEPLAY_LLM_PROVIDER="claude",
+        )
+
+
+def test_gameplay_decider_config_round_trips_xai() -> None:
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_API_KEY=SecretStr("k"),
+    )
+    cfg = s.gameplay_decider_config()
+    assert cfg.provider == "xai"
+    assert cfg.api_key is not None
+    assert cfg.api_key.get_secret_value() == "k"
+    assert cfg.model == "grok-4-1-fast"
+
+
+def test_gameplay_decider_config_round_trips_gemini() -> None:
+    s = MasterSettings(  # type: ignore[arg-type]
+        _env_file=None,
+        **_base_kwargs(),
+        GAMEPLAY_LLM_PROVIDER="gemini",
+        GAMEPLAY_LLM_VERTEX_PROJECT="p",
+    )
+    cfg = s.gameplay_decider_config()
+    assert cfg.provider == "gemini"
+    assert cfg.vertex_project == "p"
+    assert cfg.vertex_location == "global"
+    assert cfg.thinking_level == "high"

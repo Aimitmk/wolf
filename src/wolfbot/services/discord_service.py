@@ -15,14 +15,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from random import Random
+from typing import TYPE_CHECKING, Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from wolfbot.config import Settings
+from wolfbot.config import MasterSettings
 from wolfbot.domain.enums import (
     Phase,
     Role,
@@ -36,7 +37,8 @@ from wolfbot.domain.rules import (
     legal_guard_targets,
     previous_guard_seat_for_night,
 )
-from wolfbot.llm.personas import pick_personas
+from wolfbot.llm.persona_base import pick_personas
+from wolfbot.npc.personas import NPC_PERSONAS, NPC_PERSONAS_BY_KEY
 from wolfbot.persistence.sqlite_repo import (
     JoinLobbyResult,
     LeaveLobbyResult,
@@ -47,6 +49,10 @@ from wolfbot.services.llm_service import LLMAdapter
 from wolfbot.services.permission_manager import PermissionManager
 from wolfbot.services.timer_service import EngineRegistry, GameEngine
 from wolfbot.ui.views import NightActionView, VoteView
+
+if TYPE_CHECKING:
+    from wolfbot.master.npc_registry import NpcRegistry
+    from wolfbot.services.discussion_service import DiscussionService
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +116,12 @@ def _main_channel_should_llm_react(author_seat: int | None, players: Sequence[Pl
 
 
 # --------------------------------------------------------------- DiscordBotAdapter
+# Type alias: narrator callback. Returns True when the call has been
+# fully handled (the adapter must skip its default text post). Returns
+# False to fall through to the legacy main-text-channel behavior.
+PublicPostNarrator = Callable[[Game, str, str], Awaitable[bool]]
+
+
 class DiscordBotAdapter:
     """Implements the DiscordAdapter protocol by operating on a live discord.Client."""
 
@@ -117,8 +129,9 @@ class DiscordBotAdapter:
         self,
         bot: discord.Client,
         repo: SqliteRepo,
-        settings: Settings,
+        settings: MasterSettings,
         game_service_ref: dict[str, GameService] | None = None,
+        public_post_narrator: PublicPostNarrator | None = None,
     ) -> None:
         self.bot = bot
         self.repo = repo
@@ -127,9 +140,28 @@ class DiscordBotAdapter:
         # Circular: DiscordBotAdapter needs GameService (for submit callbacks passed into
         # Views) and GameService needs DiscordBotAdapter. We stash a dict to break the cycle.
         self._gs_slot: dict[str, GameService] = game_service_ref or {}
+        # Optional: in reactive_voice mode this routes Master narration
+        # (PHASE_CHANGE / MORNING / VICTORY / EXECUTION etc.) to TTS in
+        # VC + the VC's attached text chat for long content. Returns
+        # True to fully consume the post (suppress the main text-channel
+        # output); False to fall through unchanged.
+        self._narrator = public_post_narrator
+        # Late-bound: NPC registry (only set in reactive_voice mode) lets
+        # us look up bot user IDs to apply server-mute on non-discussion
+        # phases / death so dead NPCs visually show a red mute icon.
+        self._npc_registry: NpcRegistry | None = None
 
     def set_game_service(self, gs: GameService) -> None:
         self._gs_slot["gs"] = gs
+
+    def set_narrator(self, narrator: PublicPostNarrator | None) -> None:
+        """Late-bind the narrator. Used by main.py when the reactive_voice
+        pipeline is wired after `DiscordBotAdapter` construction."""
+        self._narrator = narrator
+
+    def set_npc_registry(self, npc_registry: NpcRegistry | None) -> None:
+        """Late-bind the NPC registry for bot-user server-mute reconciliation."""
+        self._npc_registry = npc_registry
 
     @property
     def gs(self) -> GameService:
@@ -143,6 +175,7 @@ class DiscordBotAdapter:
         self, game: Game, seats: Sequence[Seat], players: Sequence[Player]
     ) -> None:
         await self.perms.apply(game, seats, players)
+        await self._apply_npc_server_mute(game, players)
 
     async def kill_permissions(
         self, game: Game, seats: Sequence[Seat], seat_no: int, was_wolf: bool
@@ -151,12 +184,116 @@ class DiscordBotAdapter:
 
     async def reconcile(self, game: Game, seats: Sequence[Seat], players: Sequence[Player]) -> None:
         await self.perms.apply(game, seats, players)
+        await self._apply_npc_server_mute(game, players)
 
     async def on_game_end(self, game: Game, seats: Sequence[Seat]) -> None:
         await self.perms.on_game_end(game, seats)
+        # Clear server-mute on every NPC bot attached to this game so the
+        # next /wolf start finds them in a clean state. SeatReleased makes
+        # them disconnect, but Discord's server-mute flag persists across
+        # reconnects until cleared.
+        await self._clear_npc_server_mute(game)
+
+    async def _apply_npc_server_mute(
+        self, game: Game, players: Sequence[Player]
+    ) -> None:
+        """Tell each NPC bot to flip its *own* voice self-mute via WS.
+
+        We deliberately drive self-mute (not server-mute via
+        ``Member.edit(mute=...)``) because:
+          - server-mute requires MUTE_MEMBERS *and* the Master role to
+            sit strictly above every NPC bot's role in the guild
+            hierarchy — both fragile under typical multi-bot setups.
+          - self-mute is purely a per-client flag the bot owns; no
+            admin power needed.
+
+        Each NPC's :class:`NpcClient` handles ``set_mute_state`` and
+        calls ``Guild.change_voice_state(self_mute=...)`` on its own
+        voice connection. Visible result: the mic-muted icon next to
+        dead seats / non-discussion-phase bots.
+
+        Rule: a bot is unmuted only when its assigned seat is alive
+        AND the phase is DAY_DISCUSSION. Every other state mutes it.
+        """
+        if self._npc_registry is None:
+            return
+        from wolfbot.domain.ws_messages import SetMuteState
+
+        discussion_active = game.phase is Phase.DAY_DISCUSSION
+        player_by_seat = {p.seat_no: p for p in players}
+        now_ms = int(asyncio.get_running_loop().time() * 1000)
+        for entry in self._npc_registry.assigned_to_game(game.id):
+            seat_no = entry.assigned_seat
+            if seat_no is None or entry.send is None:
+                continue
+            player = player_by_seat.get(seat_no)
+            alive = True if player is None else bool(player.alive)
+            should_mute = not (alive and discussion_active)
+            try:
+                msg = SetMuteState(
+                    ts=now_ms,
+                    trace_id=f"mute-{game.id}-{seat_no}-{int(should_mute)}",
+                    npc_id=entry.npc_id,
+                    self_mute=should_mute,
+                )
+                await entry.send(msg.model_dump_json())
+            except Exception:
+                log.exception(
+                    "npc_set_mute_send_failed npc=%s seat=%d self_mute=%s",
+                    entry.npc_id,
+                    seat_no,
+                    should_mute,
+                )
+
+    async def _clear_npc_server_mute(self, game: Game) -> None:
+        """Send self_mute=False to every NPC attached to this game.
+
+        Best-effort cleanup at game end. SeatReleased makes them leave
+        VC anyway, but this keeps the protocol in a consistent state in
+        case a bot stays connected for a brief window before leaving.
+        """
+        if self._npc_registry is None:
+            return
+        from wolfbot.domain.ws_messages import SetMuteState
+
+        now_ms = int(asyncio.get_running_loop().time() * 1000)
+        for entry in self._npc_registry.assigned_to_game(game.id):
+            if entry.send is None:
+                continue
+            try:
+                msg = SetMuteState(
+                    ts=now_ms,
+                    trace_id=f"mute-clear-{game.id}-{entry.npc_id}",
+                    npc_id=entry.npc_id,
+                    self_mute=False,
+                )
+                await entry.send(msg.model_dump_json())
+            except Exception:
+                log.exception(
+                    "npc_set_mute_clear_failed npc=%s",
+                    entry.npc_id,
+                )
 
     # ------------------------------------------------------ channel posts
+    async def _maybe_narrate(self, game: Game, kind: str, text: str) -> bool:
+        """Route through the narrator if installed. Defensive try/except
+        so a narration failure never blocks the SpeechEvent /
+        permission flow that follows in GameService.advance."""
+        if self._narrator is None:
+            return False
+        try:
+            return await self._narrator(game, kind, text)
+        except Exception:
+            log.exception(
+                "narrator failed for game=%s kind=%s; falling back to text",
+                game.id,
+                kind,
+            )
+            return False
+
     async def post_public(self, game: Game, text: str, kind: str) -> None:
+        if await self._maybe_narrate(game, kind, text):
+            return
         channel = self._main_text(game)
         if channel is None:
             return
@@ -166,6 +303,8 @@ class DiscordBotAdapter:
             log.exception("post_public failed %s", game.id)
 
     async def post_morning(self, game: Game, text: str) -> None:
+        if await self._maybe_narrate(game, "MORNING", text):
+            return
         channel = self._main_text(game)
         if channel is None:
             return
@@ -365,7 +504,28 @@ class DiscordBotAdapter:
             log.exception("announce_recovery failed %s", game.id)
 
     # ------------------------------------------------------ helpers
-    def _main_text(self, game: Game) -> discord.TextChannel | None:
+    def _main_text(
+        self, game: Game
+    ) -> discord.TextChannel | discord.VoiceChannel | None:
+        """Resolve the channel where Master should post free-form text.
+
+        In ``reactive_voice`` mode Master must never leak text to the
+        guild's main text channel — every word out of Master is supposed
+        to land in either DM or the VC's attached text chat. We redirect
+        to the VC's text chat (Discord voice channels carry an attached
+        text chat at the same channel id since 2022; both ``VoiceChannel``
+        and ``TextChannel`` are ``Messageable``). In ``rounds`` mode the
+        legacy main-text behavior is preserved.
+        """
+        if game.discussion_mode == "reactive_voice" and game.main_vc_channel_id:
+            try:
+                vc_channel_id = int(game.main_vc_channel_id)
+            except (TypeError, ValueError):
+                vc_channel_id = None
+            if vc_channel_id is not None:
+                vc = self.bot.get_channel(vc_channel_id)
+                if isinstance(vc, discord.VoiceChannel | discord.TextChannel):
+                    return vc
         channel = self.bot.get_channel(int(game.main_text_channel_id))
         if isinstance(channel, discord.TextChannel):
             return channel
@@ -408,8 +568,13 @@ class WolfCog(commands.Cog):
         discord_adapter: DiscordBotAdapter,
         llm_adapter: LLMAdapter,
         registry: EngineRegistry,
-        settings: Settings,
+        settings: MasterSettings,
         rng: Random | None = None,
+        discussion_service: DiscussionService | None = None,
+        on_speech_recorded: Callable[[str], Awaitable[None]] | None = None,
+        npc_registry: NpcRegistry | None = None,
+        text_analyzer: Any = None,
+        on_reactive_game_start: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__()
         self.bot = bot
@@ -421,6 +586,80 @@ class WolfCog(commands.Cog):
         self.settings = settings
         self.rng = rng or Random()
         self._create_locks: dict[str, asyncio.Lock] = {}
+        self._discussion_service = discussion_service
+        self._on_speech_recorded = on_speech_recorded
+        # Set when reactive_voice pipeline is active.  In that mode `/wolf
+        # start` fills LLM seats from online NPC bots (each carrying a fixed
+        # persona) instead of randomly drawing from NPC_PERSONAS.
+        self._npc_registry = npc_registry
+        # Optional structured analyzer for text-channel utterances. Mirrors
+        # the voice path's `GeminiAudioAnalyzer` — extracts `addressed_name`
+        # and `co_declaration` so SpeakArbiter can route replies to the
+        # named NPC seat just like for voice. Wired only when reactive_voice
+        # is active and a Voice LLM key is set; falls back to plain raw
+        # capture when None.
+        self._text_analyzer = text_analyzer
+        # Pre-engine reactive_voice setup hook. Wired in main.py for
+        # reactive_voice mode; runs right after `claim_start_and_backfill`
+        # so Master + NPCs are in VC before SETUP_COMPLETE narration plays.
+        self._on_reactive_game_start = on_reactive_game_start
+
+    def _select_llm_seat_personas(
+        self,
+        *,
+        shortfall: int,
+        discussion_mode: str,
+    ) -> tuple[list[tuple[str, str]], str | None]:
+        """Choose ``(display_name, persona_key)`` pairs to back-fill LLM seats.
+
+        Two backfill strategies, switched on the game's discussion mode:
+
+        * ``rounds``: random draw from :data:`NPC_PERSONAS` (Master drives
+          these seats internally via xAI; no NPC bot process required).
+        * ``reactive_voice``: pull online NPC bots from the registry and use
+          *their* personas (each NPC bot is bound to a fixed persona at
+          startup).  Fails with a friendly message if not enough bots are
+          online.
+
+        Returns ``(seats, None)`` on success or ``([], error_message)`` on
+        failure. The caller surfaces the error message via interaction
+        followup.
+        """
+        if discussion_mode == "reactive_voice" and self._npc_registry is not None:
+            online = [e for e in self._npc_registry.all_online() if e.persona_key]
+            # Skip bots already bound to another active game.
+            available = [e for e in online if e.assigned_seat is None]
+            if len(available) < shortfall:
+                return ([], (
+                    f"reactive_voice モードで LLM 席を {shortfall} 席埋める必要がありますが、"
+                    f"利用可能な NPC bot は {len(available)} 体だけです。"
+                    f"NPC bot プロセスを追加で起動するか、人間プレイヤーを集めてください。"
+                ))
+            # Deterministic ordering keeps tests/replay-friendly; pick the
+            # first `shortfall` bots in registration order.
+            chosen = available[:shortfall]
+            seen_keys: set[str] = set()
+            seats: list[tuple[str, str]] = []
+            for entry in chosen:
+                if entry.persona_key in seen_keys:
+                    return ([], (
+                        f"NPC bot {entry.npc_id} の persona_key={entry.persona_key} が"
+                        " 重複しています。bot ごとに別の persona を割り当ててください。"
+                    ))
+                seen_keys.add(entry.persona_key)
+                persona = NPC_PERSONAS_BY_KEY.get(entry.persona_key)
+                if persona is None:
+                    return ([], (
+                        f"NPC bot {entry.npc_id} の persona_key={entry.persona_key} は"
+                        f" 未知の persona です。"
+                    ))
+                seats.append((persona.display_name, persona.key))
+            return (seats, None)
+
+        # rounds mode (or no registry wired): random draw.
+        picks = pick_personas(NPC_PERSONAS, shortfall, self.rng)
+        return ([(p.display_name, p.key) for p in picks], None)
+
 
     def _create_lock_for(self, guild_id: str) -> asyncio.Lock:
         lock = self._create_locks.get(guild_id)
@@ -443,30 +682,146 @@ class WolfCog(commands.Cog):
             return
         channel_id = str(message.channel.id)
         is_main = channel_id == game.main_text_channel_id
+        # In reactive_voice mode Master posts narration into the VC's
+        # attached text chat (`main_vc_channel_id`), which is where
+        # players naturally end up typing replies — see `_post_to_vc_chat`
+        # in `main.py`. Accept that channel as a speech surface too,
+        # otherwise the human's typed message never enters the
+        # SpeechEvent pipeline and NPCs never react to it.
+        is_vc_chat = (
+            game.discussion_mode == "reactive_voice"
+            and channel_id == game.main_vc_channel_id
+        )
         is_wolves = game.wolves_channel_id is not None and channel_id == game.wolves_channel_id
-        if not (is_main or is_wolves):
+        if not (is_main or is_vc_chat or is_wolves):
             return
         author_seat = await self.repo.seat_of_user(game.id, str(message.author.id))
         players = await self.repo.load_players(game.id)
+        log.info(
+            "on_message_accepted game=%s seat=%s channel=%s "
+            "phase=%s is_main=%s is_vc_chat=%s is_wolves=%s",
+            game.id, author_seat, channel_id,
+            game.phase.value, is_main, is_vc_chat, is_wolves,
+        )
 
-        if is_main and game.phase is Phase.DAY_DISCUSSION:
+        if (is_main or is_vc_chat) and game.phase in (
+            Phase.DAY_DISCUSSION, Phase.DAY_RUNOFF_SPEECH
+        ):
             if not _main_channel_should_llm_react(author_seat, players):
                 return
-            try:
-                await self.repo.insert_log_public(
-                    LogEntry(
+            if self._discussion_service is not None and author_seat is not None:
+                # Full SpeechEvent path: record() persists the event row AND
+                # emits the PLAYER_SPEECH LogEntry (for source=text it skips
+                # the channel post since the original message is already visible).
+                try:
+                    from wolfbot.domain.discussion import make_phase_id
+                    from wolfbot.services.discussion_service import make_human_text_event
+
+                    alive_seat_nos = sorted(p.seat_no for p in players if p.alive)
+                    await self._discussion_service.begin_phase_if_absent(
                         game_id=game.id,
                         day=game.day_number,
                         phase=game.phase,
-                        kind="PLAYER_SPEECH",
-                        actor_seat=author_seat,
-                        visibility="PUBLIC",
-                        text=message.content,
-                        created_at=int(time.time()),
+                        alive_seat_nos=alive_seat_nos,
                     )
-                )
-            except Exception:
-                log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
+                    phase_id = make_phase_id(game.id, game.day_number, game.phase)
+
+                    # Mirror the voice path: when a TextAnalyzer is wired,
+                    # extract `addressed_name` + `co_declaration` so the
+                    # downstream SpeakArbiter / state fold see the same
+                    # structured signal regardless of whether the human
+                    # spoke or typed. Failures are best-effort — a slow or
+                    # broken analyzer must not block the SpeechEvent write.
+                    addressed_seat_no: int | None = None
+                    co_declaration: str | None = None
+                    role_callout: str | None = None
+                    if self._text_analyzer is not None:
+                        from wolfbot.services.llm_trace import trace_context
+
+                        try:
+                            with trace_context(
+                                game_id=game.id,
+                                phase=phase_id,
+                                day=game.day_number,
+                                actor=(
+                                    f"author_user_id={message.author.id} "
+                                    f"seat={author_seat}"
+                                ),
+                                metadata={"channel_id": channel_id},
+                            ):
+                                analysis = await self._text_analyzer.analyze(
+                                    text=message.content, timeout_s=8.0
+                                )
+                        except Exception:
+                            log.exception(
+                                "text_analyzer_failed game=%s seat=%s",
+                                game.id,
+                                author_seat,
+                            )
+                        else:
+                            co_declaration = analysis.co_declaration
+                            role_callout = analysis.role_callout
+                            if analysis.addressed_name:
+                                from wolfbot.master.ingest_service import (
+                                    resolve_seat_by_name,
+                                )
+
+                                seats = await self.repo.load_seats(game.id)
+                                alive_set = {
+                                    p.seat_no for p in players if p.alive
+                                }
+                                seat_no = resolve_seat_by_name(
+                                    analysis.addressed_name,
+                                    seats,
+                                    alive=frozenset(alive_set),
+                                )
+                                if seat_no is not None and seat_no != author_seat:
+                                    addressed_seat_no = seat_no
+
+                    event = make_human_text_event(
+                        game_id=game.id,
+                        phase_id=phase_id,
+                        day=game.day_number,
+                        phase=game.phase,
+                        speaker_seat=author_seat,
+                        text=message.content,
+                        co_declaration=co_declaration,
+                        addressed_seat_no=addressed_seat_no,
+                        role_callout=role_callout,
+                    )
+                    await self._discussion_service.record(event)
+                    # Trigger arbiter dispatch so NPCs can respond to new text.
+                    if self._on_speech_recorded is not None:
+                        try:
+                            await self._on_speech_recorded(game.id)
+                        except Exception:
+                            log.exception(
+                                "on_speech_recorded callback failed game=%s", game.id
+                            )
+                except Exception:
+                    log.exception(
+                        "SpeechEvent(text) write failed for game=%s seat=%s",
+                        game.id,
+                        author_seat,
+                    )
+            else:
+                # Legacy path: no DiscussionService wired (or spectator with
+                # no seat). Fall back to direct PLAYER_SPEECH log insert.
+                try:
+                    await self.repo.insert_log_public(
+                        LogEntry(
+                            game_id=game.id,
+                            day=game.day_number,
+                            phase=game.phase,
+                            kind="PLAYER_SPEECH",
+                            actor_seat=author_seat,
+                            visibility="PUBLIC",
+                            text=message.content,
+                            created_at=int(time.time()),
+                        )
+                    )
+                except Exception:
+                    log.exception("PLAYER_SPEECH log insert failed for %s", game.id)
             return
 
         if is_wolves and game.phase is Phase.NIGHT and author_seat is not None:
@@ -556,6 +911,13 @@ class WolfCog(commands.Cog):
                 await interaction.followup.send(create_failed_msg)
                 return
 
+            discussion_mode = self.settings.LLM_DISCUSSION_MODE
+            if discussion_mode not in ("rounds", "reactive_voice"):
+                log.warning(
+                    "LLM_DISCUSSION_MODE=%r invalid, falling back to 'rounds'",
+                    discussion_mode,
+                )
+                discussion_mode = "rounds"
             game = Game(
                 id=new_game_id(),
                 guild_id=guild_id,
@@ -567,6 +929,7 @@ class WolfCog(commands.Cog):
                 heaven_channel_id=str(heaven.id),
                 wolves_channel_id=str(wolves.id),
                 created_at=int(time.time()),
+                discussion_mode=discussion_mode,
             )
             try:
                 await self.repo.create_game(game)
@@ -694,8 +1057,16 @@ class WolfCog(commands.Cog):
             return
 
         shortfall = 9 - len(humans)
-        picks = pick_personas(shortfall, self.rng) if shortfall > 0 else []
-        llm_seats = [(p.display_name, p.key) for p in picks]
+        if shortfall > 0:
+            llm_seats, err = self._select_llm_seat_personas(
+                shortfall=shortfall,
+                discussion_mode=game.discussion_mode,
+            )
+            if err is not None:
+                await interaction.followup.send(err)
+                return
+        else:
+            llm_seats = []
 
         ok = await self.repo.claim_start_and_backfill(
             game.id,
@@ -710,6 +1081,17 @@ class WolfCog(commands.Cog):
 
         final_seats = await self.repo.load_seats(game.id)
         roster_lines = [f"席{seat.seat_no} {seat.display_name}" for seat in final_seats]
+
+        # Pre-engine reactive_voice hook: invite Master + NPC bots into VC
+        # *before* the engine fires SETUP_COMPLETE narration. Without this
+        # the day-1 announcement plays into an empty channel because NPCs
+        # only join VC on DAY_DISCUSSION entry. Best-effort — engine still
+        # starts on failure so the game can progress in text fallback.
+        if self._on_reactive_game_start is not None:
+            try:
+                await self._on_reactive_game_start(game.id)
+            except Exception:
+                log.exception("on_reactive_game_start failed for %s", game.id)
 
         engine = GameEngine(game_id=game.id, repo=self.repo, advance=self.gs.advance)
         await self.registry.attach(engine)
@@ -820,6 +1202,12 @@ class WolfCog(commands.Cog):
                 "ホストまたは管理者のみ abort できます。", ephemeral=True
             )
             return
+        # `host_abort` fans SeatReleased to every online NPC (each one
+        # then runs `change_voice_state` against the gateway). With 9
+        # bots this routinely overshoots Discord's 3 s interaction
+        # deadline, surfacing as "アプリケーションが応答しませんでした".
+        # Defer first, then reply via followup.
+        await interaction.response.defer(thinking=True)
         ok = await self.gs.host_abort(game.id)
         if ok:
             engine = self.registry.detach(game.id)
@@ -828,12 +1216,43 @@ class WolfCog(commands.Cog):
                     await engine.stop()
                 except Exception:
                     log.exception("engine.stop failed during abort %s", game.id)
-            await interaction.response.send_message("🛑 ゲームを強制終了しました。")
+            await interaction.followup.send("🛑 ゲームを強制終了しました。")
         else:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "終了できませんでした (既に終了している可能性があります)。",
                 ephemeral=True,
             )
+
+    @wolf.command(
+        name="settings",
+        description="フェイズ時間などの設定をホスト用 UI で調整",
+    )
+    async def settings_command(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "ギルド内で実行してください。", ephemeral=True
+            )
+            return
+        game = await self.repo.load_active_game_for_guild(
+            str(interaction.guild_id)
+        )
+        if game is None:
+            await interaction.response.send_message(
+                "進行中のゲームがありません。`/wolf create` で作成してから設定してください。",
+                ephemeral=True,
+            )
+            return
+        if str(interaction.user.id) != game.host_user_id:
+            await interaction.response.send_message(
+                "設定はホストのみが変更できます。", ephemeral=True
+            )
+            return
+        from wolfbot.ui.settings_view import render_initial_message
+
+        embed, view = render_initial_message(host_user_id=game.host_user_id)
+        await interaction.response.send_message(
+            embed=embed, view=view, ephemeral=True
+        )
 
     # ----------------------------------------------------------- internals
     async def _host_check(self, interaction: discord.Interaction) -> Game | None:

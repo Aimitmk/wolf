@@ -113,9 +113,11 @@ def _setup_world() -> tuple[FakeBot, FakeGuild, dict[str, FakeChannel], Game]:
     main = FakeChannel(id=1001, guild=guild)
     heaven = FakeChannel(id=1002, guild=guild)
     wolves = FakeChannel(id=1003, guild=guild)
+    vc = FakeChannel(id=9999, guild=guild)
     guild._channels[1001] = main
     guild._channels[1002] = heaven
     guild._channels[1003] = wolves
+    guild._channels[9999] = vc
     bot = FakeBot(_guilds={1: guild})
     game = Game(
         id="g",
@@ -129,7 +131,7 @@ def _setup_world() -> tuple[FakeBot, FakeGuild, dict[str, FakeChannel], Game]:
         wolves_channel_id="1003",
         created_at=0,
     )
-    return bot, guild, {"main": main, "heaven": heaven, "wolves": wolves}, game
+    return bot, guild, {"main": main, "heaven": heaven, "wolves": wolves, "vc": vc}, game
 
 
 async def test_apply_day_grants_alive_send_dead_read_only() -> None:
@@ -226,6 +228,85 @@ async def test_kill_flips_main_text_and_grants_heaven() -> None:
     assert heaven_calls[100 + 5]["send_messages"] is True
     # Wolves chat unaffected for non-wolf death
     assert 100 + 5 not in dict(ch["wolves"]._perm_calls)
+
+
+async def test_kill_revokes_vc_speak_permission() -> None:
+    """Dead players must not be able to speak in VC. We use channel
+    overrides (`speak=False, use_voice_activation=False`) rather than
+    server-mute so the override is scoped to this game's VC."""
+    bot, _, ch, game = _setup_world()
+    pm = PermissionManager(bot=bot)
+    seats = _nine_seats()
+
+    await pm.kill(game, seats, seat_no=5, was_wolf=False)
+
+    vc_calls = dict(ch["vc"]._perm_calls)
+    assert vc_calls[100 + 5]["speak"] is False
+    assert vc_calls[100 + 5]["use_voice_activation"] is False
+
+
+async def test_apply_reconciles_vc_speak_for_dead_seats() -> None:
+    """`apply` is the recovery path. After Master restart, dead seats
+    must still be VC-muted via channel overrides."""
+    bot, _, ch, game = _setup_world()
+    pm = PermissionManager(bot=bot)
+    seats = _nine_seats()
+    alive_flags = [True, True, True, False, True, True, True, True, True]
+    players = _players(ROLES, alive=alive_flags)
+
+    await pm.apply(game, seats, players)
+
+    vc_calls = dict(ch["vc"]._perm_calls)
+    # Dead seat 4 → muted
+    assert vc_calls[100 + 4]["speak"] is False
+    # Alive seats during DAY_DISCUSSION → speak permitted
+    assert vc_calls[100 + 1]["speak"] is True
+
+
+async def test_apply_mutes_alive_humans_outside_discussion() -> None:
+    """Humans must only speak during DAY_DISCUSSION. Vote / runoff /
+    night phases keep everyone muted so chatter doesn't bleed across
+    phase boundaries."""
+    for muted_phase in (
+        Phase.DAY_VOTE,
+        Phase.DAY_RUNOFF,
+        Phase.DAY_RUNOFF_SPEECH,
+        Phase.NIGHT,
+    ):
+        bot, _, ch, game = _setup_world()
+        game.phase = muted_phase
+        pm = PermissionManager(bot=bot)
+        seats = _nine_seats()
+        players = _players(ROLES)  # all alive
+
+        await pm.apply(game, seats, players)
+
+        vc_calls = dict(ch["vc"]._perm_calls)
+        # Every alive human seat is muted in non-discussion phases.
+        for seat_no in range(1, 10):
+            assert vc_calls[100 + seat_no]["speak"] is False, (
+                f"phase={muted_phase} seat={seat_no} should be muted"
+            )
+            assert vc_calls[100 + seat_no]["use_voice_activation"] is False
+
+
+async def test_on_game_end_clears_vc_overrides() -> None:
+    """VC is a persistent channel; per-member overrides must be cleared
+    on game end so the next game starts from a clean baseline."""
+    bot, _, ch, game = _setup_world()
+    pm = PermissionManager(bot=bot)
+    seats = _nine_seats()
+
+    # Pre-seed an override on the VC for seat 1 to make sure clear runs.
+    ch["vc"]._overwrites[101] = discord.PermissionOverwrite(speak=False)
+
+    await pm.on_game_end(game, seats)
+
+    # `_clear_perms` calls set_permissions with overwrite=None.
+    cleared = [
+        uid for uid, kw in ch["vc"]._perm_calls if kw.get("overwrite") is None
+    ]
+    assert 101 in cleared
 
 
 async def test_kill_wolf_revokes_wolves_chat_access() -> None:
