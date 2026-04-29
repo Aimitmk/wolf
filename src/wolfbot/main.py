@@ -1029,11 +1029,18 @@ async def _run() -> None:
             await arbiter.handle_tts_finished(msg)
 
         async def _on_tts_failed(msg: Any, _ctx: Any) -> None:
+            # Resolve game_id BEFORE handle_tts_failed pops `_pending`,
+            # otherwise the post-pop lookup is always None and the next
+            # NPC never gets dispatched. Production hit: Jonas' second
+            # speech timed out on VOICEVOX, the gate cleared, but the
+            # arbiter stalled silently for the rest of the phase
+            # because game_id was looked up after the pop.
+            pending = arbiter._pending.get(msg.request_id)
+            game_id = pending.game_id if pending is not None else None
             await arbiter.handle_tts_failed(msg)
             # Gate cleared — try dispatching next NPC.
-            pending = arbiter._pending.get(msg.request_id)
-            if pending is not None:
-                await arbiter.try_dispatch_next(pending.game_id)
+            if game_id is not None:
+                await arbiter.try_dispatch_next(game_id)
 
         async def _on_playback_finished(msg: Any, _ctx: Any) -> None:
             # Resolve game_id before the pending entry is popped.

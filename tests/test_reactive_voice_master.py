@@ -1171,6 +1171,78 @@ async def test_try_dispatch_next_diverts_around_pair_volley(
     assert reason == "low_info_diversion"
 
 
+async def test_handle_tts_failed_pops_pending_before_returning(
+    repo: SqliteRepo,
+) -> None:
+    """`handle_tts_failed` releases the playback gate AND removes the
+    `_pending` row in the same call. The wiring in `main._on_tts_failed`
+    therefore has to read game_id BEFORE invoking the handler — production
+    bug had the lookup *after* the call, returning None, and the next
+    NPC was never dispatched (silent stall after a VOICEVOX timeout).
+
+    This test documents the contract so future refactors keep the
+    "capture game_id first" invariant.
+    """
+    from wolfbot.domain.ws_messages import TtsFailed
+    from wolfbot.master.speak_arbiter import _PendingRequest
+
+    discussion = DiscussionService(
+        store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    )
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=InMemoryNpcRegistry(),
+        discussion=discussion,
+        now_ms=lambda: 1_000,
+    )
+    g = Game(
+        id="rv-tts-fail",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    arb._pending["sr-x"] = _PendingRequest(
+        request_id="sr-x", npc_id="npc1", seat_no=2,
+        phase_id="rv-tts-fail::day1::DAY_DISCUSSION::1",
+        game_id=g.id,
+        expires_at_ms=10_000,
+    )
+    arb._active_playback.add("sr-x")
+    arb._playback_deadlines["sr-x"] = 5_000
+    # Open the playback row so handle_tts_failed has something to close.
+    await repo.open_npc_playback(
+        request_id="sr-x",
+        game_id=g.id,
+        phase_id="rv-tts-fail::day1::DAY_DISCUSSION::1",
+        npc_id="npc1",
+        speech_event_id="se-x",
+        authorized_at_ms=1_000,
+        playback_deadline_ms=5_000,
+    )
+
+    captured_game_id = arb._pending["sr-x"].game_id
+
+    msg = TtsFailed(
+        ts=2_000, trace_id="t-x", request_id="sr-x",
+        npc_id="npc1", failure_reason="voicevox_timeout",
+    )
+    await arb.handle_tts_failed(msg)
+
+    # Contract: post-call, _pending no longer has the entry. If the
+    # main.py wiring reads game_id AFTER calling handle_tts_failed, it
+    # gets None and the dispatch chain stalls.
+    assert "sr-x" not in arb._pending
+    assert "sr-x" not in arb._active_playback
+    assert captured_game_id == g.id  # what the wiring should have captured pre-call
+
+
 async def test_arbiter_cleanup_game_drops_only_target_game(repo: SqliteRepo) -> None:
     """`cleanup_game` is wired into `_on_reactive_game_end` so a long-lived
     Master process doesn't carry stale `_pending` / `_active_playback` /
