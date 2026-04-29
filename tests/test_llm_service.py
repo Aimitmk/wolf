@@ -1804,7 +1804,7 @@ async def test_ask_system_prompt_seer_includes_counter_co_strategy(
     counter-CO (when a fake seer appears), and black-pull CO guidance so the
     true seer doesn't stay silent and cede single-truth treatment to a fake."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
-    assert "まだ占い師 CO が出ていない" in system_prompt
+    assert "占い師 CO が一切出ていない" in system_prompt
     assert "対抗 CO" in system_prompt
     assert "時系列で公開" in system_prompt
     assert "黒を引いた場合" in system_prompt

@@ -460,6 +460,51 @@ def test_system_prompt_forbids_seat_numbers_in_text() -> None:
     assert "display_name" in sys.lower() or "display_name" in sys
 
 
+def test_build_user_prompt_renders_past_votes_with_names() -> None:
+    """Past-day votes must surface in the prompt with seat + display name
+    so NPCs can reference 「ジナ → セツ」 instead of fabricating their
+    own ballot."""
+    logic = LogicPacket(
+        ts=1, trace_id="t", packet_id="lp", phase_id="ph",
+        recipient_npc_id="npc_1",
+        public_state_summary="(d)", expires_at_ms=9999,
+        past_votes=(
+            (1, 0, ((1, 3), (2, 4), (3, 1), (4, 1))),
+        ),
+    )
+    request = SpeakRequest(
+        ts=1, trace_id="t", request_id="sr", npc_id="npc_1",
+        phase_id="ph", seat_no=2, logic_packet_id="lp",
+        suggested_intent="speak", max_chars=80, expires_at_ms=5000,
+        alive_seats=((1, "Alice"), (2, "ジナ"), (3, "ラキオ"), (4, "セツ")),
+        dead_seats=(),
+    )
+    out = _build_user(logic, request)
+    assert "## 公開された投票履歴" in out
+    assert "day1 投票" in out
+    assert "席1 Alice → 席3 ラキオ" in out
+    assert "席2 ジナ → 席4 セツ" in out
+
+
+def test_build_user_prompt_handles_past_vote_abstain() -> None:
+    """target=None must render as 棄権."""
+    logic = LogicPacket(
+        ts=1, trace_id="t", packet_id="lp", phase_id="ph",
+        recipient_npc_id="npc_1",
+        public_state_summary="(d)", expires_at_ms=9999,
+        past_votes=((1, 0, ((1, None), (2, 1))),),
+    )
+    request = SpeakRequest(
+        ts=1, trace_id="t", request_id="sr", npc_id="npc_1",
+        phase_id="ph", seat_no=2, logic_packet_id="lp",
+        suggested_intent="speak", max_chars=80, expires_at_ms=5000,
+        alive_seats=((1, "Alice"), (2, "ジナ")),
+        dead_seats=(),
+    )
+    out = _build_user(logic, request)
+    assert "席1 Alice → 棄権" in out
+
+
 def test_build_user_prompt_no_candidates_no_pressure() -> None:
     logic = LogicPacket(
         ts=1,

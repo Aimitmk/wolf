@@ -976,7 +976,7 @@ def test_seer_strategy_covers_proactive_and_counter_co() -> None:
     appeared, counter-CO against a fake seer with time-ordered history
     disclosure, and the black-pull CO procedure."""
     block = _build_strategy_block(Role.SEER)
-    assert "まだ占い師 CO が出ていない" in block
+    assert "占い師 CO が一切出ていない" in block
     assert "対抗 CO" in block
     assert "時系列で公開" in block
     assert "黒を引いた場合" in block

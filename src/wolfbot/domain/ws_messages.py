@@ -145,6 +145,21 @@ class LogicPacket(BaseEnvelope):
             "bots stay schema-compatible."
         ),
     )
+    past_votes: tuple[
+        tuple[int, int, tuple[tuple[int, int | None], ...]], ...
+    ] = Field(
+        default_factory=tuple,
+        description=(
+            "Public vote history for completed past days. Each entry is "
+            "``(day, round, ((voter_seat, target_seat | None), ...))`` so "
+            "the NPC prompt can render 「day1: 席1 → 席3, …」 without "
+            "asking each NPC to remember its own ballot. Without this, "
+            "models routinely fabricate a different vote target than the "
+            "one they actually cast (observed live: ジナ said her vote "
+            "was コメット when she actually voted セツ). Round 0 = main "
+            "vote, round 1 = runoff."
+        ),
+    )
 
 
 class SpeakRequest(BaseEnvelope):

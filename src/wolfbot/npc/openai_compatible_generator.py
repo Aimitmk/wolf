@@ -255,6 +255,36 @@ def _build_user(
                 lines.append(
                     f"  day{wc.day} 席{wc.speaker_seat} {wc.speaker_name}: {wc.text}"
                 )
+    if logic.past_votes:
+        # Public vote history. Each NPC saw the EXECUTION public log when
+        # it landed, but the per-phase fold doesn't carry that text into
+        # the next day's prompt. Surfacing it here lets NPCs reason about
+        # actual ballots ("ジナ → セツ") instead of fabricating their
+        # own vote target.
+        lines.append("")
+        lines.append("## 公開された投票履歴")
+        # Build a name lookup from alive + dead so dead voters still get
+        # a display name.
+        seat_name_lookup = {
+            seat_no: name
+            for seat_no, name in (
+                list(alive_seats) + list(dead_seats)
+            )
+        }
+
+        def _seat_label(seat: int | None) -> str:
+            if seat is None:
+                return "棄権"
+            name = seat_name_lookup.get(seat, "?")
+            return f"席{seat} {name}" if name and name != "?" else f"席{seat}"
+
+        for day, round_, pairs in logic.past_votes:
+            label = "決選投票" if round_ >= 1 else "投票"
+            lines.append(f"- day{day} {label}:")
+            for voter, target in pairs:
+                lines.append(
+                    f"    {_seat_label(voter)} → {_seat_label(target)}"
+                )
     if logic.recent_speeches:
         lines.append("")
         lines.append("## 直近の発言 (古い順)")

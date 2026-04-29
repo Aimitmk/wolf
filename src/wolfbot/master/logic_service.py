@@ -40,6 +40,9 @@ def build_logic_packet(
     pressure: dict[int, float] | None = None,
     additional_candidates: Iterable[LogicCandidate] = (),
     recent_speeches: Iterable[RecentSpeech] = (),
+    past_votes: Iterable[
+        tuple[int, int, tuple[tuple[int, int | None], ...]]
+    ] = (),
 ) -> LogicPacket:
     """Construct a `LogicPacket` for `recipient_npc_id`.
 
@@ -93,6 +96,7 @@ def build_logic_packet(
         pressure=pressure or {},
         expires_at_ms=expires_at_ms,
         recent_speeches=tuple(recent_speeches),
+        past_votes=tuple(past_votes),
     )
 
 

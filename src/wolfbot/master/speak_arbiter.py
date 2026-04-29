@@ -268,6 +268,7 @@ class SpeakArbiter:
         recent_speeches, alive_seats, dead_seats, role_name, role_strategy = (
             await self._collect_request_context(state, seat_no)
         )
+        past_votes = await self._load_past_votes(game_id, state.day)
 
         # Build LogicPacket (sent first so the NPC has context for the
         # subsequent speak_request).
@@ -277,6 +278,7 @@ class SpeakArbiter:
             expires_at_ms=now + self.config.request_ttl_ms,
             now_ms=now,
             recent_speeches=recent_speeches,
+            past_votes=past_votes,
         )
         try:
             await entry.send(packet.model_dump_json())
@@ -441,6 +443,39 @@ class SpeakArbiter:
                 role_strategy = None
 
         return recent, alive_seats, dead_seats, role_name, role_strategy
+
+    async def _load_past_votes(
+        self, game_id: str, current_day: int
+    ) -> tuple[tuple[int, int, tuple[tuple[int, int | None], ...]], ...]:
+        """Load completed-day vote ballots so the prompt builder can show
+        every NPC the public ledger of "who voted whom".
+
+        Without this, models routinely fabricate their own past vote
+        because the EXECUTION public log isn't surfaced anywhere in the
+        per-phase fold (state has co_claims and silent_seats but not
+        votes). Returns empty when no past day exists or on any DB
+        glitch — best-effort.
+        """
+        if current_day <= 1:
+            return ()
+        out: list[tuple[int, int, tuple[tuple[int, int | None], ...]]] = []
+        try:
+            for day in range(1, current_day):
+                for round_ in (0, 1):
+                    rows = await self.repo.load_votes(
+                        game_id, day=day, round_=round_,
+                    )
+                    if not rows:
+                        continue
+                    pairs = tuple(
+                        (v.voter_seat, v.target_seat)
+                        for v in sorted(rows, key=lambda v: v.voter_seat)
+                    )
+                    out.append((day, round_, pairs))
+        except Exception:
+            log.exception("past_votes_load_failed game=%s", game_id)
+            return ()
+        return tuple(out)
 
     # ------------------------------------------------------------- handle result
 
