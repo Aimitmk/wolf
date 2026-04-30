@@ -195,6 +195,159 @@
       "title": "ArbiterDecisionEntry",
       "type": "object"
     },
+    "ClaimHistoryEntry": {
+      "additionalProperties": false,
+      "description": "Per-seat fold of every seer/medium claim a single seat has\ndeclared, surfaced at the top level of the export so the viewer\ncan render a per-claimer history table without re-folding the\nspeech-event stream.",
+      "properties": {
+        "claimer_seat": {
+          "title": "Claimer Seat",
+          "type": "integer"
+        },
+        "seer_claims": {
+          "items": {
+            "$ref": "#/$defs/ClaimedSeerHistoryEntry"
+          },
+          "title": "Seer Claims",
+          "type": "array"
+        },
+        "medium_claims": {
+          "items": {
+            "$ref": "#/$defs/ClaimedMediumHistoryEntry"
+          },
+          "title": "Medium Claims",
+          "type": "array"
+        }
+      },
+      "required": [
+        "claimer_seat",
+        "seer_claims",
+        "medium_claims"
+      ],
+      "title": "ClaimHistoryEntry",
+      "type": "object"
+    },
+    "ClaimedMediumExport": {
+      "additionalProperties": false,
+      "description": "Structured medium-CO result attached to a single SpeechEvent.\n\n``is_wolf=null`` encodes the explicit \"no execution yesterday →\nno result today\" case so the viewer can render it as a void\nrather than fabricating a target color.",
+      "properties": {
+        "target_seat": {
+          "title": "Target Seat",
+          "type": "integer"
+        },
+        "is_wolf": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Is Wolf"
+        }
+      },
+      "required": [
+        "target_seat",
+        "is_wolf"
+      ],
+      "title": "ClaimedMediumExport",
+      "type": "object"
+    },
+    "ClaimedMediumHistoryEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "day": {
+          "title": "Day",
+          "type": "integer"
+        },
+        "target_seat": {
+          "title": "Target Seat",
+          "type": "integer"
+        },
+        "target_name": {
+          "title": "Target Name",
+          "type": "string"
+        },
+        "is_wolf": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Is Wolf"
+        },
+        "declared_at_event_id": {
+          "title": "Declared At Event Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "day",
+        "target_seat",
+        "target_name",
+        "is_wolf",
+        "declared_at_event_id"
+      ],
+      "title": "ClaimedMediumHistoryEntry",
+      "type": "object"
+    },
+    "ClaimedSeerExport": {
+      "additionalProperties": false,
+      "description": "Structured seer-CO result attached to a single SpeechEvent.\n\nReal seers and fake-CO wolves share the same shape; the viewer\nrenders the per-seat history on top of these and the configured\nseat roles, so a wolf seat showing 4 seer claims while the day\ncounter is at 2 is visibly suspicious.",
+      "properties": {
+        "target_seat": {
+          "title": "Target Seat",
+          "type": "integer"
+        },
+        "is_wolf": {
+          "title": "Is Wolf",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "target_seat",
+        "is_wolf"
+      ],
+      "title": "ClaimedSeerExport",
+      "type": "object"
+    },
+    "ClaimedSeerHistoryEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "day": {
+          "title": "Day",
+          "type": "integer"
+        },
+        "target_seat": {
+          "title": "Target Seat",
+          "type": "integer"
+        },
+        "target_name": {
+          "title": "Target Name",
+          "type": "string"
+        },
+        "is_wolf": {
+          "title": "Is Wolf",
+          "type": "boolean"
+        },
+        "declared_at_event_id": {
+          "title": "Declared At Event Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "day",
+        "target_seat",
+        "target_name",
+        "is_wolf",
+        "declared_at_event_id"
+      ],
+      "title": "ClaimedSeerHistoryEntry",
+      "type": "object"
+    },
     "GameMeta": {
       "additionalProperties": false,
       "properties": {
@@ -578,6 +731,28 @@
           ],
           "title": "Addressed Seat No"
         },
+        "claimed_seer_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaimedSeerExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "claimed_medium_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClaimedMediumExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "created_at_ms": {
           "title": "Created At Ms",
           "type": "integer"
@@ -878,6 +1053,14 @@
         "$ref": "#/$defs/ArbiterDecisionEntry"
       },
       "title": "Arbiter Decisions",
+      "type": "array"
+    },
+    "claim_history": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ClaimHistoryEntry"
+      },
+      "title": "Claim History",
       "type": "array"
     }
   },

@@ -52,6 +52,7 @@ from wolfbot.domain.ws_messages import (
     TtsFinished,
 )
 from wolfbot.llm.prompt_builder import build_strategy_block
+from wolfbot.master.claim_history import ClaimHistory, collect_claim_history
 from wolfbot.master.logic_service import build_logic_packet
 from wolfbot.master.npc_registry import NpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
@@ -326,6 +327,9 @@ class SpeakArbiter:
         seat_names_lookup: dict[int, str] = {
             seat: name for seat, name in (list(alive_seats) + list(dead_seats))
         }
+        claim_history = await self._load_claim_history(
+            game_id, seat_names_lookup
+        )
 
         # Build LogicPacket (sent first so the NPC has context for the
         # subsequent speak_request).
@@ -337,6 +341,7 @@ class SpeakArbiter:
             recent_speeches=recent_speeches,
             past_votes=past_votes,
             seat_names=seat_names_lookup,
+            claim_history=claim_history,
         )
         try:
             await entry.send(packet.model_dump_json())
@@ -501,6 +506,28 @@ class SpeakArbiter:
                 role_strategy = None
 
         return recent, alive_seats, dead_seats, role_name, role_strategy
+
+    async def _load_claim_history(
+        self,
+        game_id: str,
+        seat_names: dict[int, str],
+    ) -> ClaimHistory | None:
+        """Aggregate every persisted seer/medium claim into a per-seat history.
+
+        Reads ``speech_events`` directly via the discussion-service store
+        so the rebuild matches the canonical SpeechEvent ordering. The
+        helper is best-effort: a load failure logs and returns ``None``
+        so the per-prompt block silently degrades to the legacy "no
+        history" rendering rather than failing the whole dispatch.
+        """
+        try:
+            events = await self.discussion.load_for_game(game_id)
+        except Exception:
+            log.exception(
+                "claim_history_load_failed game=%s", game_id,
+            )
+            return None
+        return collect_claim_history(events, seat_names=seat_names)
 
     async def _load_past_votes(
         self, game_id: str, current_day: int
@@ -690,6 +717,17 @@ class SpeakArbiter:
             addressed_candidates = filtered
         addressed_seat_nos: tuple[int, ...] = tuple(addressed_candidates)
         addressed_seat_no = addressed_seat_nos[0] if addressed_seat_nos else None
+        # Self-claim guard: if the NPC's structured claim names its own
+        # seat we drop it before persisting. The wire model already
+        # rejects self-target via `_build_claimed_*` on the NPC side, but
+        # an older NPC binary or a malformed payload could still slip
+        # through — defending here keeps the claim-history fold clean.
+        seer_claim = result.claimed_seer_result
+        if seer_claim is not None and seer_claim.target_seat == pending.seat_no:
+            seer_claim = None
+        medium_claim = result.claimed_medium_result
+        if medium_claim is not None and medium_claim.target_seat == pending.seat_no:
+            medium_claim = None
         speech_event = SpeechEvent(
             event_id=new_event_id(),
             game_id=pending.game_id,
@@ -703,6 +741,18 @@ class SpeakArbiter:
             co_declaration=result.co_declaration,
             addressed_seat_no=addressed_seat_no,
             addressed_seat_nos=addressed_seat_nos,
+            claimed_seer_target_seat=(
+                seer_claim.target_seat if seer_claim is not None else None
+            ),
+            claimed_seer_is_wolf=(
+                seer_claim.is_wolf if seer_claim is not None else None
+            ),
+            claimed_medium_target_seat=(
+                medium_claim.target_seat if medium_claim is not None else None
+            ),
+            claimed_medium_is_wolf=(
+                medium_claim.is_wolf if medium_claim is not None else None
+            ),
             created_at_ms=now,
         )
         await self.discussion.record(speech_event)
@@ -884,8 +934,19 @@ class SpeakArbiter:
         # exhausts and normal rotation resumes.
         callout_pool = await self._compute_callout_pool(game_id, state)
         asked = self._callout_pool_asked.get(game_id, set())
-        if not state.pending_role_callouts and asked:
-            # Callout was consumed (matching CO arrived). Reset asked.
+        # Reset the asked tracker when there's no active priority signal
+        # AND no remaining unasked pool members. Without the second leg
+        # of the conjunction, the reset would fire mid-pool whenever
+        # ``pending_role_callouts`` cleared (= a matching CO arrived) and
+        # erase the asked-record while ``pending_co_response`` was still
+        # rotating wolf-side seats — the just-asked seat would get
+        # re-picked on the very next dispatch.
+        unasked_remaining = bool(callout_pool - asked)
+        no_active_signal = (
+            not state.pending_role_callouts
+            and not state.pending_co_response
+        )
+        if no_active_signal and asked and not unasked_remaining:
             self._callout_pool_asked.pop(game_id, None)
             asked = set()
         effective_pool = callout_pool - asked
@@ -1193,24 +1254,31 @@ class SpeakArbiter:
         self, game_id: str, state: PublicDiscussionState
     ) -> frozenset[int]:
         """Return seats that should be prioritized when a role callout is
-        pending and unanswered.
+        pending and unanswered, OR when a first-CO of an info role just
+        landed and the counter-CO opportunity window is still open.
 
-        Triggered by ``state.pending_role_callouts``. Three flavors:
+        Two trigger sources, combined into one pool:
 
-          - ``"seer"`` / ``"medium"`` / ``"knight"`` — specific role call
-            (e.g. 「占い師は?」). Pool = real role-holder (alive, uncpd)
-            + every wolf-side seat (人狼/狂人, alive, no info CO yet).
-          - ``"info_request"`` — generic info-seeking (「誰か怪しい人?」
-            「みんな意見を聞かせて」「気になる人を挙げて」). Pool = ALL
-            real info-role holders (seer + medium + knight, alive, uncpd)
-            + every wolf-side seat (alive, no info CO yet).
+          - ``state.pending_role_callouts`` — public callouts ("占い師は?")
+          - ``state.pending_co_response`` — first-CO trigger that opens
+            a counter-CO window where every wolf-side seat (and the real
+            role-holder when the CO'er was wolf-side) gets one guaranteed
+            chance to respond before normal priority resumes.
+
+        Pool composition for any active role:
+
+          - ``"seer"`` / ``"medium"`` / ``"knight"`` — pool = real
+            role-holder (alive, uncpd) + every wolf-side seat (人狼/狂人,
+            alive, no info CO yet).
+          - ``"info_request"`` (callouts only — first-CO doesn't fire
+            this) — pool = ALL real info-role holders + wolf-side.
 
         The arbiter prioritizes pool members (random within pool). Each
-        member gets at most one chance per callout via the
-        ``_callout_pool_asked`` tracker; declines fall through to other
-        pool members until the pool is exhausted.
+        member gets at most one chance via the ``_callout_pool_asked``
+        tracker; declines fall through to other pool members until the
+        pool is exhausted, after which normal priority resumes.
         """
-        if not state.pending_role_callouts:
+        if not state.pending_role_callouts and not state.pending_co_response:
             return frozenset()
         callout_to_role = {
             "seer": Role.SEER,
@@ -1218,13 +1286,17 @@ class SpeakArbiter:
             "knight": Role.KNIGHT,
         }
         # Resolve the set of real roles that should be in the pool.
-        # `info_request` expands to every info role.
+        # `info_request` expands to every info role. Both pending sources
+        # contribute their role keys symmetrically.
         target_roles: set[Role] = set()
         has_info_request = "info_request" in state.pending_role_callouts
         if has_info_request:
             target_roles |= {Role.SEER, Role.MEDIUM, Role.KNIGHT}
         for callout_key, role in callout_to_role.items():
-            if callout_key in state.pending_role_callouts:
+            if (
+                callout_key in state.pending_role_callouts
+                or callout_key in state.pending_co_response
+            ):
                 target_roles.add(role)
         if not target_roles:
             return frozenset()

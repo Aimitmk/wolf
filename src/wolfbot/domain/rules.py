@@ -144,6 +144,7 @@ def resolve_wolf_attack(
     alive_wolf_seats: Sequence[int],
     force_skip: bool,
     human_wolf_seats: Sequence[int] = (),
+    rng: Random | None = None,
 ) -> AttackResult:
     """Determine the night's attack target per spec.
 
@@ -154,8 +155,19 @@ def resolve_wolf_attack(
     - The `missing` tuple is always reported (even with force_skip) so logs can name
       who didn't submit.
     - When 2 wolves disagree, both submitted, and exactly one of them is a human
-      seat (per `human_wolf_seats`), the human's target wins (no split). All other
-      split shapes (both human, both LLM) keep the existing split=True behaviour.
+      seat (per `human_wolf_seats`), the human's target wins (no split).
+    - When 2 wolves disagree, both submitted, both are LLMs, and ``rng`` is
+      provided, randomly pick one of the two concrete picks as the resolved
+      attack target. This unblocks games that previously parked in
+      ``WAITING_HOST_DECISION`` whenever the wolf-chat coordination LLM
+      failed to make the two NPCs converge (observed in game
+      ``98e5a083b5ff`` day 2: SQ→コメット, ユリコ→セツ → host paused
+      indefinitely with no human able to break the tie).
+    - When ``rng`` is None and no human-wolf priority applies, the legacy
+      ``split=True`` shape is returned so unit tests pinning the old
+      behaviour keep passing.
+    - If both wolves' picks are ``None`` (= both abstained), the result
+      stays "no attack" rather than synthesising a target.
     """
     alive = list(alive_wolf_seats)
     if not alive:
@@ -174,6 +186,13 @@ def resolve_wolf_attack(
         return AttackResult(target_seat=picks.get(wolf), missing=missing)
 
     targets = [picks.get(w) for w in alive]
+    if targets[0] is None and targets[1] is None:
+        # Both wolves explicitly abstained — that's a unanimous "no
+        # attack" rather than a split. The legacy code reported
+        # split=True here because the equality check bailed out on
+        # ``None``; we promote it to a clean no-attack result so the
+        # caller doesn't pause the night chasing a phantom split.
+        return AttackResult(target_seat=None, missing=missing)
     if targets[0] is not None and targets[0] == targets[1]:
         return AttackResult(target_seat=targets[0], missing=missing)
     # Targets differ. Check human-wolf priority: only when exactly 2 alive wolves,
@@ -185,6 +204,15 @@ def resolve_wolf_attack(
             human_target = picks.get(human_seat)
             if human_target is not None:
                 return AttackResult(target_seat=human_target, missing=missing)
+    # All-LLM split (or unfilled human-wolf seats with both LLM picks
+    # diverging). With an RNG seeded by the caller we resolve the split
+    # by randomly picking one of the two concrete picks; without one we
+    # fall back to the legacy split=True for callers (mostly tests) that
+    # haven't started threading an RNG.
+    concrete_targets = [t for t in targets if t is not None]
+    if rng is not None and concrete_targets:
+        chosen = rng.choice(concrete_targets)
+        return AttackResult(target_seat=chosen, missing=missing)
     return AttackResult(split=True, missing=missing)
 
 

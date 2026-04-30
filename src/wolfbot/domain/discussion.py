@@ -124,6 +124,47 @@ class SpeechEvent(BaseModel):
             "are the canonical CoDeclaration enum strings."
         ),
     )
+    claimed_seer_target_seat: int | None = Field(
+        default=None,
+        ge=1,
+        le=9,
+        description=(
+            "Target seat the speaker claimed to have divined in this "
+            "utterance — *real* (true seer) or *fake* (wolf/madman). Set "
+            "iff the speech announces a NEW divination outcome; null "
+            "otherwise (general remarks, mere references to prior "
+            "results). Pairs with ``claimed_seer_is_wolf``. "
+            "Authoritative source for the per-seat claim history that "
+            "Master folds back into every subsequent prompt."
+        ),
+    )
+    claimed_seer_is_wolf: bool | None = Field(
+        default=None,
+        description=(
+            "Black/white verdict the speaker attached to "
+            "``claimed_seer_target_seat``. None when no seer claim was "
+            "made this utterance."
+        ),
+    )
+    claimed_medium_target_seat: int | None = Field(
+        default=None,
+        ge=1,
+        le=9,
+        description=(
+            "Target seat (= yesterday's executed seat) the speaker "
+            "claimed a medium result for. Mirror of the seer fields for "
+            "medium-CO."
+        ),
+    )
+    claimed_medium_is_wolf: bool | None = Field(
+        default=None,
+        description=(
+            "Black/white verdict for the medium claim. None when "
+            "``claimed_medium_target_seat`` is None *or* when the "
+            "speaker explicitly declared 'no execution yesterday → no "
+            "result'."
+        ),
+    )
     created_at_ms: int
 
     def is_baseline(self) -> bool:
@@ -220,6 +261,17 @@ class PublicDiscussionState(BaseModel):
     # take it as a CO trigger and wolf-side NPCs can decide whether to
     # fake CO.
     pending_role_callouts: frozenset[str] = frozenset()
+    # Roles whose *first ever* CO just landed in this game. Triggers the
+    # arbiter's counter-CO opportunity pool: the next dispatches go to
+    # the real role-holder (when uncpd) plus every wolf-side seat that
+    # hasn't claimed any info role yet, in random order, one chance
+    # each. Each member's reply (CO or skip) consumes their slot via
+    # the arbiter's `_callout_pool_asked` tracker. The pool exhausts
+    # when every member has been asked, after which normal priority
+    # resumes — without this window, the village-side first-CO often
+    # got "free real" treatment because no wolf had a guaranteed turn
+    # to contest it before the discussion drifted onto other topics.
+    pending_co_response: frozenset[str] = frozenset()
     # Per-seat utterance count within this phase (non-baseline events
     # only). The arbiter prefers seats with the lowest count so a
     # talkative NPC doesn't monopolize the phase — the binary

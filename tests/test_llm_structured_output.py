@@ -67,6 +67,8 @@ def test_response_schema_has_required_fields() -> None:
         "reason_summary",
         "confidence",
         "co_declaration",
+        "claimed_seer_result",
+        "claimed_medium_result",
     }
     assert schema["additionalProperties"] is False
 

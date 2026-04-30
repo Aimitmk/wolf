@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from wolfbot.domain.enums import CO_CLAIM_VALUES, CoDeclaration
-from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest, SpeakResult
+from wolfbot.domain.ws_messages import (
+    ClaimedMediumResult,
+    ClaimedSeerResult,
+    LogicPacket,
+    SpeakRequest,
+    SpeakResult,
+)
 from wolfbot.npc.game_state import NpcGameState
 
 log = logging.getLogger(__name__)
@@ -30,6 +36,16 @@ class NpcGeneratedSpeech:
     co_declaration: str | None = None
     addressed_seat_no: int | None = None
     addressed_seat_nos: tuple[int, ...] = ()
+    # Structured divination/medium claim attached to this utterance.
+    # Populated when the LLM declares a NEW seer/medium result (real or
+    # fake) so Master can build a per-seat claim history that anchors
+    # future fake seers to their prior lies. None means the speech does
+    # not announce a new result (general talk, references to prior
+    # claims, non-seer speech).
+    claimed_seer_target_seat: int | None = None
+    claimed_seer_is_wolf: bool | None = None
+    claimed_medium_target_seat: int | None = None
+    claimed_medium_is_wolf: bool | None = None
 
 
 @runtime_checkable
@@ -144,6 +160,10 @@ class NpcSpeechService:
             merged.append(int(speech.addressed_seat_no))
         addressed_seat_nos: tuple[int, ...] = tuple(merged)
         addressed_seat_no = addressed_seat_nos[0] if addressed_seat_nos else None
+
+        claimed_seer = _build_claimed_seer(speech, speaker_seat=request.seat_no)
+        claimed_medium = _build_claimed_medium(speech, speaker_seat=request.seat_no)
+
         return SpeakResult(
             ts=now_ms,
             trace_id=request.trace_id,
@@ -156,9 +176,58 @@ class NpcSpeechService:
             intent=speech.intent,
             estimated_duration_ms=speech.estimated_duration_ms,
             co_declaration=co_declaration,
+            claimed_seer_result=claimed_seer,
+            claimed_medium_result=claimed_medium,
             addressed_seat_no=addressed_seat_no,
             addressed_seat_nos=addressed_seat_nos,
         )
+
+
+def _build_claimed_seer(
+    speech: NpcGeneratedSpeech, *, speaker_seat: int
+) -> ClaimedSeerResult | None:
+    """Validate the speech's seer claim and project it onto the wire model.
+
+    Drops the claim defensively when:
+      * target_seat is missing or out of range,
+      * is_wolf is missing (a verdict is required for a seer claim),
+      * the claim targets the speaker themselves (a real seer never
+        divines their own seat in this ruleset).
+
+    The drop is silent — we still send the speech, just without the
+    structured claim. Master logs the omission via the absence of a
+    matching record in the claim-history fold.
+    """
+    seat = speech.claimed_seer_target_seat
+    verdict = speech.claimed_seer_is_wolf
+    if seat is None or verdict is None:
+        return None
+    if not 1 <= seat <= 9:
+        return None
+    if seat == speaker_seat:
+        return None
+    return ClaimedSeerResult(target_seat=seat, is_wolf=verdict)
+
+
+def _build_claimed_medium(
+    speech: NpcGeneratedSpeech, *, speaker_seat: int
+) -> ClaimedMediumResult | None:
+    """Validate the speech's medium claim and project it onto the wire model.
+
+    Mirrors ``_build_claimed_seer`` but allows ``is_wolf=None`` to encode
+    "no execution yesterday → no result today". Self-target is still
+    rejected — the only way a medium claims their own seat is via a
+    coordinated lynching scenario that doesn't apply mid-discussion.
+    """
+    seat = speech.claimed_medium_target_seat
+    verdict = speech.claimed_medium_is_wolf
+    if seat is None:
+        return None
+    if not 1 <= seat <= 9:
+        return None
+    if seat == speaker_seat:
+        return None
+    return ClaimedMediumResult(target_seat=seat, is_wolf=verdict)
 
 
 __all__ = [

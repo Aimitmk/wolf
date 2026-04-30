@@ -25,6 +25,10 @@ from collections.abc import Iterable
 
 from wolfbot.domain.discussion import PublicDiscussionState
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, RecentSpeech
+from wolfbot.master.claim_history import (
+    ClaimHistory,
+    expected_seer_claim_count_for_day,
+)
 
 
 def _new_packet_id() -> str:
@@ -44,6 +48,7 @@ def build_logic_packet(
         tuple[int, int, tuple[tuple[int, int | None], ...]]
     ] = (),
     seat_names: dict[int, str] | None = None,
+    claim_history: ClaimHistory | None = None,
 ) -> LogicPacket:
     """Construct a `LogicPacket` for `recipient_npc_id`.
 
@@ -92,6 +97,56 @@ def build_logic_packet(
         # CO trigger; wolf-side NPCs should consider whether to fake CO.
         callouts_repr = ", ".join(sorted(state.pending_role_callouts))
         summary += f" pending_role_callouts=[{callouts_repr}]"
+    if state.pending_co_response:
+        # First-CO counter-CO window: a role just got its first claim
+        # and every uncommitted wolf-side seat (plus the real role-holder
+        # when the CO'er was wolf-side) is being rotated through the
+        # priority pool. NPCs in the pool see this as "you're being asked
+        # now; either counter-CO or skip — the window expires once
+        # everyone has been asked".
+        co_response_repr = ", ".join(sorted(state.pending_co_response))
+        summary += f" pending_co_response=[{co_response_repr}]"
+    if claim_history is not None and claim_history.by_seat:
+        # Public per-claimer divination/medium history. Every NPC sees
+        # the same record — real roles use it to keep their own past
+        # results consistent in speech, fake-CO wolves see their own
+        # prior lies and either commit to them or get caught when they
+        # contradict themselves. Compact rendering keeps the prompt
+        # token budget bounded even on day 4+.
+        summary += "\n\n## 公開された占い/霊媒CO結果 (公式記録)\n"
+        # Expected count rule: a real seer at day N has claimed N + 1
+        # results (NIGHT_0 random white + one per night). The line
+        # below surfaces it once so the LLM has a numeric anchor.
+        expected = expected_seer_claim_count_for_day(state.day)
+        summary += (
+            f"(占いCO: 通算 {expected} 件まで整合。これより少ない/多い結果は破綻)\n"
+        )
+        for seat_no in sorted(claim_history.by_seat.keys()):
+            history = claim_history.by_seat[seat_no]
+            who = _name(seat_no)
+            if history.seer_claims:
+                seer_summary = ", ".join(
+                    f"day{c.day}: {c.target_name}{'黒' if c.is_wolf else '白'}"
+                    for c in history.seer_claims
+                )
+                summary += (
+                    f"- {who} (占いCO 通算 {len(history.seer_claims)} 件): "
+                    f"{seer_summary}\n"
+                )
+            if history.medium_claims:
+                medium_summary = ", ".join(
+                    f"day{c.day}: "
+                    + (
+                        f"{c.target_name}"
+                        + ("黒" if c.is_wolf is True else "白" if c.is_wolf is False else "結果なし")
+                    )
+                    for c in history.medium_claims
+                )
+                summary += (
+                    f"- {who} (霊媒CO 通算 {len(history.medium_claims)} 件): "
+                    f"{medium_summary}\n"
+                )
+        summary = summary.rstrip()
     # Prefer the multi-addressee set; fall back to the legacy singular
     # field for state objects that haven't been migrated (e.g. test
     # fixtures that only set `last_addressed_seat`).

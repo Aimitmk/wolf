@@ -171,6 +171,10 @@ DDL: list[str] = [
         addressed_seat_no INTEGER,
         addressed_seat_nos_json TEXT,
         role_callout TEXT,
+        claimed_seer_target_seat INTEGER,
+        claimed_seer_is_wolf INTEGER,
+        claimed_medium_target_seat INTEGER,
+        claimed_medium_is_wolf INTEGER,
         created_at_ms INTEGER NOT NULL
     )
     """,
@@ -311,6 +315,26 @@ async def migrate(db_path: str | Path) -> None:
         if "role_callout" not in cols:
             await db.execute(
                 "ALTER TABLE speech_events ADD COLUMN role_callout TEXT"
+            )
+        if "claimed_seer_target_seat" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events "
+                "ADD COLUMN claimed_seer_target_seat INTEGER"
+            )
+        if "claimed_seer_is_wolf" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events "
+                "ADD COLUMN claimed_seer_is_wolf INTEGER"
+            )
+        if "claimed_medium_target_seat" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events "
+                "ADD COLUMN claimed_medium_target_seat INTEGER"
+            )
+        if "claimed_medium_is_wolf" not in cols:
+            await db.execute(
+                "ALTER TABLE speech_events "
+                "ADD COLUMN claimed_medium_is_wolf INTEGER"
             )
         async with db.execute("PRAGMA table_info(npc_speak_requests)") as cur:
             cols = {row[1] async for row in cur}

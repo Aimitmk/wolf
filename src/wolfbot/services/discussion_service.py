@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -99,8 +100,14 @@ class SqliteSpeechEventStore:
                 event_id, game_id, phase_id, day, phase, source, speaker_kind,
                 speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                 alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                addressed_seat_nos_json, role_callout, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                addressed_seat_nos_json, role_callout,
+                claimed_seer_target_seat, claimed_seer_is_wolf,
+                claimed_medium_target_seat, claimed_medium_is_wolf,
+                created_at_ms
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?
+            )
             """,
             (
                 event.event_id,
@@ -121,6 +128,10 @@ class SqliteSpeechEventStore:
                 event.addressed_seat_no,
                 nos_json,
                 event.role_callout,
+                event.claimed_seer_target_seat,
+                _bool_to_int(event.claimed_seer_is_wolf),
+                event.claimed_medium_target_seat,
+                _bool_to_int(event.claimed_medium_is_wolf),
                 event.created_at_ms,
             ),
         )
@@ -132,7 +143,10 @@ class SqliteSpeechEventStore:
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                    alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                   addressed_seat_nos_json, role_callout, created_at_ms
+                   addressed_seat_nos_json, role_callout,
+                   claimed_seer_target_seat, claimed_seer_is_wolf,
+                   claimed_medium_target_seat, claimed_medium_is_wolf,
+                   created_at_ms
               FROM speech_events
              WHERE game_id=? AND phase_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -148,7 +162,10 @@ class SqliteSpeechEventStore:
             SELECT event_id, game_id, phase_id, day, phase, source, speaker_kind,
                    speaker_seat, text, stt_confidence, audio_start_ms, audio_end_ms,
                    alive_seat_nos_json, summary, co_declaration, addressed_seat_no,
-                   addressed_seat_nos_json, role_callout, created_at_ms
+                   addressed_seat_nos_json, role_callout,
+                   claimed_seer_target_seat, claimed_seer_is_wolf,
+                   claimed_medium_target_seat, claimed_medium_is_wolf,
+                   created_at_ms
               FROM speech_events
              WHERE game_id=?
              ORDER BY created_at_ms ASC, event_id ASC
@@ -157,6 +174,22 @@ class SqliteSpeechEventStore:
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_event(row) for row in rows]
+
+
+def _bool_to_int(value: bool | None) -> int | None:
+    """SQLite has no native boolean — keep the 0/1/NULL convention used
+    elsewhere in the schema (peaceful_morning, force_skip_pending, etc.)
+    so the column reads cleanly with `WHERE claimed_seer_is_wolf = 1`.
+    """
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
+def _int_to_bool(value: int | None) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
 
 
 def _row_to_event(row: Any) -> SpeechEvent:
@@ -193,7 +226,11 @@ def _row_to_event(row: Any) -> SpeechEvent:
         addressed_seat_no=row[15],
         addressed_seat_nos=addressed_nos,
         role_callout=row[17],
-        created_at_ms=row[18],
+        claimed_seer_target_seat=row[18],
+        claimed_seer_is_wolf=_int_to_bool(row[19]),
+        claimed_medium_target_seat=row[20],
+        claimed_medium_is_wolf=_int_to_bool(row[21]),
+        created_at_ms=row[22],
     )
 
 
@@ -313,6 +350,10 @@ def make_npc_generated_event(
     addressed_seat_no: int | None = None,
     addressed_seat_nos: tuple[int, ...] | None = None,
     role_callout: str | None = None,
+    claimed_seer_target_seat: int | None = None,
+    claimed_seer_is_wolf: bool | None = None,
+    claimed_medium_target_seat: int | None = None,
+    claimed_medium_is_wolf: bool | None = None,
     created_at_ms: int | None = None,
 ) -> SpeechEvent:
     seat_no, seat_nos = _normalize_addressed(addressed_seat_no, addressed_seat_nos)
@@ -330,6 +371,10 @@ def make_npc_generated_event(
         addressed_seat_no=seat_no,
         addressed_seat_nos=seat_nos,
         role_callout=role_callout,
+        claimed_seer_target_seat=claimed_seer_target_seat,
+        claimed_seer_is_wolf=claimed_seer_is_wolf,
+        claimed_medium_target_seat=claimed_medium_target_seat,
+        claimed_medium_is_wolf=claimed_medium_is_wolf,
         created_at_ms=created_at_ms if created_at_ms is not None else now_ms(),
     )
 
@@ -562,12 +607,19 @@ def apply_speech_event(
 
     co_claims = list(state.co_claims)
     seen_co = {(c.seat, c.role_claim) for c in co_claims}
+    # Roles already CO'd by *some* seat before this event. Lets us
+    # detect first-CO-of-role transitions for the counter-CO pool
+    # trigger below without re-walking the full claim list.
+    existing_role_keys = {role for (_, role) in seen_co}
     is_new_co = False  # tracks whether THIS event added a fresh CO
+    fired_first_co_role: str | None = None
     if speaker is not None:
         role_key = _resolve_co_role(event)
         if role_key is not None:
             key = (speaker, role_key)
             if key not in seen_co:
+                if role_key not in existing_role_keys:
+                    fired_first_co_role = role_key
                 seen_co.add(key)
                 co_claims.append(
                     CoClaim(
@@ -658,6 +710,19 @@ def apply_speech_event(
         # CO's any info role, the request is considered partially answered
         # and the priority pool steps down.
         pending_role_callouts.discard("info_request")
+
+    # First-CO counter-response window. Adds the role to
+    # ``pending_co_response`` exactly once per role per phase fold.
+    # The arbiter's pool dispatch consumes members one-by-one via
+    # ``_callout_pool_asked``; once everyone in the pool has been
+    # asked, the empty effective-pool naturally falls through to
+    # normal priority. The flag itself stays set for the remainder of
+    # the phase — a 2nd CO of the same role does NOT clear it because
+    # the per-user request explicitly asks for the pool to keep
+    # rotating until every member has spoken or skipped.
+    pending_co_response = set(state.pending_co_response)
+    if fired_first_co_role is not None:
+        pending_co_response.add(fired_first_co_role)
     return PublicDiscussionState(
         game_id=state.game_id,
         phase_id=state.phase_id,
@@ -676,6 +741,7 @@ def apply_speech_event(
         last_speaker_seat=last_speaker_seat,
         recent_speech_summary=tuple(summary),
         pending_role_callouts=frozenset(pending_role_callouts),
+        pending_co_response=frozenset(pending_co_response),
         speech_counts=speech_counts,
     )
 
@@ -743,6 +809,7 @@ def rebuild_public_state_from_events(
     # right after the rebuild via extract_co_claims_from_events.
     seen_co: set[tuple[int, str]] = set(prior_co_keys)
     pending_role_callouts: set[str] = set()
+    pending_co_response: set[str] = set()
     speech_counts: dict[int, int] = {}
     last_addressed_seats: frozenset[int] = frozenset()
     last_addressed_speaker_seat: int | None = None
@@ -800,6 +867,13 @@ def rebuild_public_state_from_events(
             # See integrate_speech_event: info_request is consumed by any
             # info-role CO, regardless of which specific role was asked.
             pending_role_callouts.discard("info_request")
+            # First-CO of role triggers the counter-CO opportunity pool.
+            # Mirror of ``apply_speech_event`` — fired once per role per
+            # phase fold (subsequent COs of the same role keep the
+            # window open until the arbiter exhausts the asked tracker).
+            existing_role_keys = {role for (_, role) in seen_co}
+            if role_key not in existing_role_keys:
+                pending_co_response.add(role_key)
         if (event.speaker_seat, role_key) in seen_co:
             continue
         seen_co.add((event.speaker_seat, role_key))
@@ -823,6 +897,7 @@ def rebuild_public_state_from_events(
     state.last_speaker_seat = last_speaker_seat
     state.recent_speech_summary = tuple(summary[-6:])
     state.pending_role_callouts = frozenset(pending_role_callouts)
+    state.pending_co_response = frozenset(pending_co_response)
     state.speech_counts = speech_counts
     return state
 
@@ -840,15 +915,160 @@ Gemini's structured `co_claim`). Substring matching is only used for legacy
 events and human text where natural-language CO has not been pre-tagged.
 """
 
+# Role keyword + canonical CO token per role. Used by
+# :func:`_text_contains_self_declaration` to verify the structured
+# ``co_declaration`` field matches an actual self-naming in ``text``.
+_ROLE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "seer": ("占い師",),
+    "medium": ("霊媒師",),
+    "knight": ("騎士",),
+}
+_ROLE_CO_TOKENS: dict[str, str] = {
+    "seer": "占いCO",
+    "medium": "霊媒CO",
+    "knight": "騎士CO",
+}
+# Japanese first-person pronouns used by NPCs / human players. Order
+# matters: longer pronouns (``この身``, ``わたくし``) first so the loop
+# strips them before partial overlaps catch shorter forms.
+_FIRST_PERSON_PRONOUNS: tuple[str, ...] = (
+    "わたくし",
+    "アタシ",
+    "わたし",
+    "オレ",
+    "この身",
+    "拙者",
+    "アタイ",
+    "ボク",
+    "私",
+    "僕",
+    "俺",
+    "我",
+    "わて",
+)
+# Phrases that, when they appear immediately before a role keyword, mean
+# the role is being mentioned topically (= about someone else / about
+# the concept) rather than self-declared. Stripping them out of the
+# text before looking for the self-decl pattern prevents the
+# "対抗占い師は出ないのか?" false positive that incorrectly tagged
+# game ``98e5a083b5ff`` ラキオ as a seer-CO before he actually CO'd.
+_TOPICAL_PREFIXES: tuple[str, ...] = (
+    "対抗の", "対抗", "別の", "他の", "もう一人の", "もうひとりの",
+    "誰か", "他に",
+)
+# Verb endings that, when they directly follow a role keyword (or the
+# canonical ``XCO`` token), turn a bare keyword into a self-declaration
+# even without an explicit first-person pronoun. Covers the persona
+# voice patterns the existing personas use ("〜だよ" / "〜なのです" /
+# "〜なんだ" / "〜やってます" / "〜になります").
+_DECL_VERB_PATTERN = (
+    r"(?:です|ですわ|なんだ|だよ|だぜ|なの|なる|なります|"
+    r"になります|やってる|やってます|として(?:出る|出ます|名乗る|名乗ります)|"
+    r"に出ます|に出る|だ|ね|よ|わ)"
+)
+
+
+def _text_contains_self_declaration(text: str, role: str) -> bool:
+    """Heuristic: does ``text`` contain a first-person CO declaration of ``role``?
+
+    Used as a sanity check on the structured ``co_declaration`` field.
+    The NPC LLM occasionally leaks its strategic intent into the
+    structured field before the natural-language text actually contains
+    the declaration (game ``98e5a083b5ff`` day 1: ラキオ the madman
+    posted a question to Stella with ``co_declaration='seer'`` set
+    even though the text was just "対抗占い師は出ないのか?"). When the
+    text/structured pair disagree, this helper returns ``False`` so
+    :func:`_resolve_co_role` falls back to the legacy substring scan
+    rather than blindly trusting the leaked flag.
+
+    Recognised patterns (any one suffices):
+
+    * **First-person pronoun within ~10 characters of the role keyword.**
+      Topical / counter-CO-request prefixes ("対抗", "別の", "他の", ...)
+      are stripped first so "対抗占い師" can't be mistaken for self-decl.
+    * **Role keyword (or canonical ``XCO`` token) immediately followed
+      by a declarative verb ending** ("占い師です" / "霊媒CO する" /
+      "騎士やってます" / ...). The verb whitelist is curated to match
+      the personas' speech profiles without bleeding into question /
+      negation forms ("出ないのか" / "ではない" / "誰なんだろう").
+    """
+    keywords = _ROLE_KEYWORDS.get(role)
+    co_token = _ROLE_CO_TOKENS.get(role)
+    if not keywords or co_token is None:
+        return False
+
+    # Strip topical / counter-CO-request prefixes so "対抗占い師" doesn't
+    # produce a false positive in either pattern below.
+    cleaned = text
+    for prefix in _TOPICAL_PREFIXES:
+        for kw in keywords:
+            cleaned = cleaned.replace(prefix + kw, "")
+        cleaned = cleaned.replace(prefix + co_token, "")
+
+    pronoun_alt = "|".join(re.escape(p) for p in _FIRST_PERSON_PRONOUNS)
+    for kw in keywords:
+        # Pattern A: first-person pronoun, optional particle/comma, then
+        # the role keyword within ~10 chars (skipping whitespace and
+        # punctuation that don't end a sentence — `。` / newlines do).
+        pat_a = re.compile(
+            rf"(?:{pronoun_alt})"
+            rf"(?:[、,はがこそも自身]{{0,3}})?"
+            rf"[^。\n]{{0,10}}"
+            rf"{re.escape(kw)}"
+        )
+        if pat_a.search(cleaned):
+            return True
+        # Pattern B: keyword + declarative verb suffix (no first-person
+        # required — the verb form itself signals self-naming).
+        pat_b = re.compile(
+            rf"{re.escape(kw)}[、,]?{_DECL_VERB_PATTERN}"
+        )
+        if pat_b.search(cleaned):
+            return True
+
+    # Pattern C: canonical ``XCO`` token followed by a declarative verb
+    # or used as a bare self-marker. ``占いCOがいない`` / ``占いCOについて``
+    # are topical and rejected by the trailing-verb requirement.
+    pat_c = re.compile(
+        rf"{re.escape(co_token)}(?:します|する|です|なんだ|だよ|だ|に出ます|に出る)"
+    )
+    if pat_c.search(cleaned):
+        return True
+    # Pattern D: first-person pronoun followed by ``XCO`` within ~10 chars,
+    # covering "私こそ占いCO" / "僕、霊媒CO" etc.
+    pat_d = re.compile(
+        rf"(?:{pronoun_alt})"
+        rf"(?:[、,はがこそも自身]{{0,3}})?"
+        rf"[^。\n]{{0,10}}"
+        rf"{re.escape(co_token)}"
+    )
+    return bool(pat_d.search(cleaned))
+
 
 def _resolve_co_role(event: SpeechEvent) -> str | None:
     """Pick the CO role for an event, preferring the structured field.
 
     Returns one of ``"seer" / "medium" / "knight"`` or ``None`` for "no CO".
+
+    The structured ``co_declaration`` field is treated as authoritative
+    *only when ``text`` carries a matching self-declaration*. Without
+    the text guard, the NPC LLM could (and did, in game
+    ``98e5a083b5ff``) leak its strategic intent into the structured
+    field while the text was still a question / topical mention, which
+    falsely flipped the speaker's seat into the public CO ledger one
+    turn early. When the structured field disagrees with the text, we
+    drop the flag and fall through to the legacy substring scan so
+    only the explicit canonical ``占いCO``/``霊媒CO``/``騎士CO`` token
+    in ``text`` survives.
     """
     declared = event.co_declaration
     if declared is not None and declared in _VALID_CO_ROLES:
-        return declared
+        if _text_contains_self_declaration(event.text, declared):
+            return declared
+        log.info(
+            "co_declaration_text_mismatch dropped event=%s declared=%s text=%r",
+            event.event_id, declared, event.text[:120],
+        )
     for role_key, marker in _CO_MARKERS:
         if marker in event.text:
             return role_key

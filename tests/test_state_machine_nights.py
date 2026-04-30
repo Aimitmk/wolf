@@ -381,6 +381,40 @@ def test_wolf_split_without_force_skip_pauses() -> None:
     assert t.requires_host_decision is True
 
 
+def test_wolf_split_with_rng_resolves_into_an_attack_kill() -> None:
+    """When an RNG is threaded through, an all-LLM split is resolved by
+    randomly picking one of the two wolves' targets — the night fully
+    resolves into the next ``DAY_DISCUSSION`` instead of parking in
+    ``WAITING_HOST_DECISION``. Fix for game ``98e5a083b5ff`` day 2."""
+    from random import Random
+
+    game = _game(day=1)
+    players = _players()
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 8),  # split
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 3),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+        rng=Random(42),
+    )
+    assert t.next_phase is Phase.DAY_DISCUSSION
+    assert t.requires_host_decision is False
+    # One of the two wolves' picks landed; the resolver picked one but
+    # the test stays seed-tolerant by checking the union.
+    assert set(t.newly_dead_seats).issubset({7, 8})
+    assert len(t.newly_dead_seats) == 1
+
+
 def test_wolf_split_records_unresolved_seats_not_missing() -> None:
     """Split wolves have submitted — they must be classified as `unresolved_seats`
     (so recovery and /wolf extend can distinguish them from truly missing players)."""

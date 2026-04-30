@@ -88,6 +88,33 @@ class PublicLogEntry(BaseModel):
     created_at_ms: int
 
 
+class ClaimedSeerExport(BaseModel):
+    """Structured seer-CO result attached to a single SpeechEvent.
+
+    Real seers and fake-CO wolves share the same shape; the viewer
+    renders the per-seat history on top of these and the configured
+    seat roles, so a wolf seat showing 4 seer claims while the day
+    counter is at 2 is visibly suspicious."""
+
+    model_config = _StrictConfig
+
+    target_seat: int
+    is_wolf: bool
+
+
+class ClaimedMediumExport(BaseModel):
+    """Structured medium-CO result attached to a single SpeechEvent.
+
+    ``is_wolf=null`` encodes the explicit "no execution yesterday →
+    no result today" case so the viewer can render it as a void
+    rather than fabricating a target color."""
+
+    model_config = _StrictConfig
+
+    target_seat: int
+    is_wolf: bool | None
+
+
 class SpeechEventExport(BaseModel):
     model_config = _StrictConfig
 
@@ -99,7 +126,42 @@ class SpeechEventExport(BaseModel):
     summary: str | None
     co_declaration: CoDeclaration | None
     addressed_seat_no: int | None
+    claimed_seer_result: ClaimedSeerExport | None = None
+    claimed_medium_result: ClaimedMediumExport | None = None
     created_at_ms: int
+
+
+class ClaimedSeerHistoryEntry(BaseModel):
+    model_config = _StrictConfig
+
+    day: int
+    target_seat: int
+    target_name: str
+    is_wolf: bool
+    declared_at_event_id: str
+
+
+class ClaimedMediumHistoryEntry(BaseModel):
+    model_config = _StrictConfig
+
+    day: int
+    target_seat: int
+    target_name: str
+    is_wolf: bool | None
+    declared_at_event_id: str
+
+
+class ClaimHistoryEntry(BaseModel):
+    """Per-seat fold of every seer/medium claim a single seat has
+    declared, surfaced at the top level of the export so the viewer
+    can render a per-claimer history table without re-folding the
+    speech-event stream."""
+
+    model_config = _StrictConfig
+
+    claimer_seat: int
+    seer_claims: list[ClaimedSeerHistoryEntry]
+    medium_claims: list[ClaimedMediumHistoryEntry]
 
 
 class VoteExport(BaseModel):
@@ -222,10 +284,20 @@ class GameExport(BaseModel):
     phases: list[PhaseSection]
     trace: list[TraceEntry]
     arbiter_decisions: list[ArbiterDecisionEntry] = []
+    # Game-wide divination/medium claim history, keyed implicitly by
+    # claimer seat (each entry carries ``claimer_seat``). Pre-folded by
+    # the exporter so the viewer renders a "claim ledger" panel without
+    # walking every phase's speech_events.
+    claim_history: list[ClaimHistoryEntry] = []
 
 
 __all__ = [
     "ArbiterDecisionEntry",
+    "ClaimHistoryEntry",
+    "ClaimedMediumExport",
+    "ClaimedMediumHistoryEntry",
+    "ClaimedSeerExport",
+    "ClaimedSeerHistoryEntry",
     "CoDeclaration",
     "DeathCause",
     "DiscussionMode",

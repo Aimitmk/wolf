@@ -229,6 +229,45 @@ class SpeakRequest(BaseEnvelope):
     )
 
 
+class ClaimedSeerResult(BaseModel):
+    """Structured seer-CO result the NPC declares within a single utterance.
+
+    Set on :class:`SpeakResult` when the NPC's `text` announces a new
+    divination outcome — *real* (true seer) or *fake* (wolf/madman
+    fake-seer-CO). Identical shape, different ground truth.
+
+    Master persists every claim on the originating SpeechEvent and rolls
+    them up into a per-seat "claim history" that gets injected back into
+    every subsequent NPC prompt. That round-trip is what stops a fake
+    seer from drifting between phases (Day1 「シゲミチ白」 → Day2 results
+    that silently drop シゲミチ and add a fabricated コメット白).
+
+    The `day` is implicit (= the speech's day field) and not carried here
+    so the NPC can't accidentally mis-stamp a claim. ``target_name`` is
+    likewise resolved Master-side from the seat lookup so the NPC never
+    has to invent it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_seat: int = Field(ge=1, le=9)
+    is_wolf: bool
+
+
+class ClaimedMediumResult(BaseModel):
+    """Structured medium-CO result the NPC declares within a single utterance.
+
+    ``is_wolf`` may be ``None`` to encode the explicit "no execution
+    yesterday → no result today" case so the NPC can claim the void
+    rather than fabricating a result it doesn't have.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_seat: int = Field(ge=1, le=9)
+    is_wolf: bool | None = None
+
+
 class SpeakResult(BaseEnvelope):
     type: Literal["speak_result"] = "speak_result"
     request_id: str
@@ -245,6 +284,25 @@ class SpeakResult(BaseEnvelope):
         description=(
             "Structured CO self-declaration tag set by the NPC's speech "
             "generator. Authoritative — Master persists it on SpeechEvent."
+        ),
+    )
+    claimed_seer_result: ClaimedSeerResult | None = Field(
+        default=None,
+        description=(
+            "Structured seer-CO result this utterance announces. Non-null "
+            "iff the NPC's text describes a NEW divination outcome (real "
+            "seer or fake-CO wolf/madman). Master persists it on the "
+            "SpeechEvent and folds it into the per-seat claim history "
+            "every subsequent prompt sees, anchoring fake seers to their "
+            "prior lies."
+        ),
+    )
+    claimed_medium_result: ClaimedMediumResult | None = Field(
+        default=None,
+        description=(
+            "Structured medium-CO result this utterance announces. "
+            "Identical handling to claimed_seer_result; ``is_wolf=null`` "
+            "encodes the 'no execution yesterday' void case."
         ),
     )
     addressed_seat_no: int | None = Field(
@@ -674,6 +732,8 @@ class HandshakeError(BaseEnvelope):
 
 __all__ = [
     "BaseEnvelope",
+    "ClaimedMediumResult",
+    "ClaimedSeerResult",
     "HandshakeError",
     "Heartbeat",
     "LogicCandidate",

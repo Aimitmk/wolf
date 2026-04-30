@@ -35,6 +35,11 @@ from pydantic import ValidationError
 
 from wolfbot.services.game_export_types import (
     ArbiterDecisionEntry,
+    ClaimedMediumExport,
+    ClaimedMediumHistoryEntry,
+    ClaimedSeerExport,
+    ClaimedSeerHistoryEntry,
+    ClaimHistoryEntry,
     DeathCause,
     DiscussionMode,
     GameExport,
@@ -168,6 +173,8 @@ async def _build_payload(
             db,
             "SELECT event_id, day, phase, source, speaker_seat, text, "
             "stt_confidence, summary, co_declaration, addressed_seat_no, "
+            "claimed_seer_target_seat, claimed_seer_is_wolf, "
+            "claimed_medium_target_seat, claimed_medium_is_wolf, "
             "created_at_ms "
             "FROM speech_events WHERE game_id = ? "
             "AND source != 'phase_baseline' "
@@ -204,6 +211,7 @@ async def _build_payload(
             (game_id,),
         )]
 
+    seat_lookup = {s["seat_no"]: s["display_name"] for s in seat_rows}
     return GameExport(
         game=_build_game_meta(game_row, public_log_rows),
         seats=[_build_seat(s) for s in seat_rows],
@@ -212,6 +220,7 @@ async def _build_payload(
         ),
         trace=_load_trace(trace_root, game_id),
         arbiter_decisions=[_build_arbiter_decision(r) for r in arbiter_rows],
+        claim_history=_build_claim_history(speech_event_rows, seat_lookup),
     )
 
 
@@ -377,6 +386,8 @@ def _build_phases(
                         summary=ev["summary"],
                         co_declaration=ev["co_declaration"],
                         addressed_seat_no=ev["addressed_seat_no"],
+                        claimed_seer_result=_build_claimed_seer(ev),
+                        claimed_medium_result=_build_claimed_medium(ev),
                         created_at_ms=ev["created_at_ms"],
                     )
                     for ev in speech_events
@@ -430,6 +441,96 @@ def _infer_victory(public_logs: list[dict[str, Any]]) -> Victory | None:
         if "人狼" in text or "狼陣営" in text:
             return "wolf"
     return None
+
+
+def _build_claimed_seer(ev: dict[str, Any]) -> ClaimedSeerExport | None:
+    """Lift the persisted seer-claim columns into the export model.
+
+    Requires both ``target_seat`` and ``is_wolf`` to be set. SQLite
+    stores the verdict as 0/1; the export coerces back to bool here.
+    """
+    target = ev.get("claimed_seer_target_seat")
+    verdict = ev.get("claimed_seer_is_wolf")
+    if target is None or verdict is None:
+        return None
+    return ClaimedSeerExport(target_seat=int(target), is_wolf=bool(verdict))
+
+
+def _build_claimed_medium(ev: dict[str, Any]) -> ClaimedMediumExport | None:
+    """Lift the persisted medium-claim columns into the export model.
+
+    Mirror of :func:`_build_claimed_seer` but ``is_wolf`` may be NULL
+    to encode "no execution yesterday → no result today" — preserved
+    as ``None`` so the viewer can render the void.
+    """
+    target = ev.get("claimed_medium_target_seat")
+    if target is None:
+        return None
+    raw_verdict = ev.get("claimed_medium_is_wolf")
+    verdict = bool(raw_verdict) if raw_verdict is not None else None
+    return ClaimedMediumExport(target_seat=int(target), is_wolf=verdict)
+
+
+def _build_claim_history(
+    speech_events: list[dict[str, Any]],
+    seat_lookup: dict[int, str],
+) -> list[ClaimHistoryEntry]:
+    """Fold the per-event claim columns into a per-claimer ledger.
+
+    Pure projection: every speech_events row already carries the
+    ``claimed_*`` columns straight from the DB; here we group them by
+    speaker_seat and sort each group chronologically. The result is
+    keyed implicitly by ``claimer_seat`` (each entry carries the seat
+    number) and sorted ascending so the viewer renders a stable list.
+    """
+    seer_by_seat: dict[int, list[ClaimedSeerHistoryEntry]] = {}
+    medium_by_seat: dict[int, list[ClaimedMediumHistoryEntry]] = {}
+
+    def _name(seat: int) -> str:
+        return seat_lookup.get(seat) or f"席{seat}"
+
+    for ev in speech_events:
+        speaker = ev.get("speaker_seat")
+        if speaker is None:
+            continue
+        speaker_seat = int(speaker)
+        seer_target = ev.get("claimed_seer_target_seat")
+        seer_verdict = ev.get("claimed_seer_is_wolf")
+        if seer_target is not None and seer_verdict is not None:
+            seer_by_seat.setdefault(speaker_seat, []).append(
+                ClaimedSeerHistoryEntry(
+                    day=int(ev["day"]),
+                    target_seat=int(seer_target),
+                    target_name=_name(int(seer_target)),
+                    is_wolf=bool(seer_verdict),
+                    declared_at_event_id=ev["event_id"],
+                )
+            )
+        medium_target = ev.get("claimed_medium_target_seat")
+        if medium_target is not None:
+            raw_verdict = ev.get("claimed_medium_is_wolf")
+            verdict = (
+                bool(raw_verdict) if raw_verdict is not None else None
+            )
+            medium_by_seat.setdefault(speaker_seat, []).append(
+                ClaimedMediumHistoryEntry(
+                    day=int(ev["day"]),
+                    target_seat=int(medium_target),
+                    target_name=_name(int(medium_target)),
+                    is_wolf=verdict,
+                    declared_at_event_id=ev["event_id"],
+                )
+            )
+
+    seats = sorted(set(seer_by_seat) | set(medium_by_seat))
+    return [
+        ClaimHistoryEntry(
+            claimer_seat=seat,
+            seer_claims=seer_by_seat.get(seat, []),
+            medium_claims=medium_by_seat.get(seat, []),
+        )
+        for seat in seats
+    ]
 
 
 def _epoch_to_ms(epoch_seconds: int | None) -> int:

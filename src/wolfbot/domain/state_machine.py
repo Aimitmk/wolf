@@ -602,6 +602,7 @@ def plan_night_resolve(
     previous_guard_seat: int | None,
     force_skip: bool,
     now_epoch: int,
+    rng: Random | None = None,
 ) -> Transition:
     """Night resolution in the spec's fixed 10-step order.
 
@@ -609,6 +610,12 @@ def plan_night_resolve(
     → 5. guard==attack? (no death) → 6. else attack target dies
     → 7. Morning announce → 8. Permission update (via newly_dead_seats)
     → 9. Victory check → 10. DAY_DISCUSSION day+1 (or GAME_OVER).
+
+    ``rng`` is forwarded to :func:`wolfbot.domain.rules.resolve_wolf_attack`
+    so an all-LLM split picks one wolf's target at random instead of
+    parking the game in ``WAITING_HOST_DECISION``. ``None`` keeps the
+    legacy split-pause behaviour for tests / callers that aren't yet
+    threading an RNG.
     """
     seats_by_no = {s.seat_no: s for s in seats}
     seer_seat = alive_seat_of_role(players, Role.SEER)
@@ -627,7 +634,11 @@ def plan_night_resolve(
     knight_action = next((a for a in actions if a.kind is SubmissionType.KNIGHT_GUARD), None)
 
     attack = resolve_wolf_attack(
-        wolf_actions, wolves, force_skip=force_skip, human_wolf_seats=human_wolf_seats
+        wolf_actions,
+        wolves,
+        force_skip=force_skip,
+        human_wolf_seats=human_wolf_seats,
+        rng=rng,
     )
 
     missing: set[int] = set()

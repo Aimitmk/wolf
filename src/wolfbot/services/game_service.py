@@ -418,6 +418,7 @@ class GameService:
                 prev_seat,
                 game.force_skip_pending,
                 now,
+                rng=self.rng,
             )
         return None
 

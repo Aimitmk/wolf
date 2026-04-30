@@ -62,6 +62,8 @@ _RESPONSE_SCHEMA: dict[str, object] = {
             "used_logic_ids",
             "co_declaration",
             "addressed_seat_nos",
+            "claimed_seer_result",
+            "claimed_medium_result",
         ],
         "properties": {
             "text": {"type": "string", "maxLength": 300},
@@ -88,6 +90,42 @@ _RESPONSE_SCHEMA: dict[str, object] = {
                     "(e.g. `[2, 3]` for 「セツとジナはどう?」). Master "
                     "prioritises every named seat in the next dispatch and "
                     "consumes them as each replies."
+                ),
+            },
+            "claimed_seer_result": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "required": ["target_seat", "is_wolf"],
+                "properties": {
+                    "target_seat": {
+                        "type": "integer", "minimum": 1, "maximum": 9,
+                    },
+                    "is_wolf": {"type": "boolean"},
+                },
+                "description": (
+                    "Structured seer divination result this utterance "
+                    "announces (real seer OR fake-CO wolf/madman). "
+                    "Non-null IFF `text` describes a NEW divination "
+                    "outcome; null otherwise. Master persists every "
+                    "claim and folds them into a per-seat claim "
+                    "history every subsequent prompt sees, so a wolf "
+                    "fake-CO cannot drift between phases."
+                ),
+            },
+            "claimed_medium_result": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "required": ["target_seat", "is_wolf"],
+                "properties": {
+                    "target_seat": {
+                        "type": "integer", "minimum": 1, "maximum": 9,
+                    },
+                    "is_wolf": {"type": ["boolean", "null"]},
+                },
+                "description": (
+                    "Structured medium result this utterance announces. "
+                    "Mirrors claimed_seer_result. ``is_wolf=null`` "
+                    "encodes 'no execution yesterday → no result today'."
                 ),
             },
         },
@@ -162,6 +200,18 @@ def _build_system(
         "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
         "CO しないなら `co_declaration=null`。"
         "「占いCO」のような語そのものは `text` に書かない。\n"
+        "- **占い/霊媒結果は構造化フィールドにも必ず反映する。**"
+        "発話 `text` で占い結果を述べる場合 (本物でも騙りでも同じ): "
+        "`claimed_seer_result` に `{\"target_seat\": 対象席, \"is_wolf\": true/false}` を設定し、"
+        "述べた席・結果と完全一致させる。霊媒も同様に `claimed_medium_result` を使う"
+        "(処刑なし/結果なしを明言する場合は `is_wolf=null` を設定し、`target_seat` は処刑対象の席)。"
+        "新しい結果を発表しない発話 (前回までの結果に言及するだけ・一般議論・他人への質問) では "
+        "両フィールドとも `null` にする。"
+        "プロンプト中の `## 公開された占い/霊媒CO結果` ブロックが過去の発表履歴 (公式記録) であり、"
+        "そこに矛盾する/重複する/数が合わない結果を出すと **破綻判定** され狼/騙り側は即吊られる。"
+        "占いCO した seat は day N の朝までに通算 N 個の結果を持つ "
+        "(NIGHT_0 の day0 ランダム白 + 毎晩1個追加; day1 朝なら通算 1 個、day2 朝なら 2 個…)。"
+        "1 回の発話で複数 seat を占ったと言う「すべて白」「全員白」は破綻なので絶対に出さない。\n"
         "- 特定の席に向けて話す場合は `addressed_seat_nos` にその席番号の配列を入れる。"
         "1人だけなら `[3]`、複数人に同時に問いかけるなら `[2, 3]` (例「セツとジナはどう?」)。"
         "誰宛でもない一般的な発言や全体への呼びかけは空配列 `[]`。"
@@ -417,11 +467,13 @@ _DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
 - "used_logic_ids": string の配列 (空配列でもよい)
 - "co_declaration": "seer" | "medium" | "knight" | null
 - "addressed_seat_nos": integer の配列 (向ける席番号たち。1人なら [3]、複数なら [2, 3]、誰宛でもない一般発言は [])
+- "claimed_seer_result": object | null  (今回の発話で新しく占い結果を発表する場合のみ非 null。形式は {"target_seat": integer(1-9), "is_wolf": boolean}。本物でも偽でも同じ形式で出す。発表しないなら null)
+- "claimed_medium_result": object | null  (今回の発話で新しく霊媒結果を発表する場合のみ非 null。形式は {"target_seat": integer(1-9), "is_wolf": boolean | null}。is_wolf=null は「昨日処刑なし」)
 
 例:
-{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": []}
-{"text": "ジョナスさん、それは矛盾してるよ。", "intent": "accuse", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": [3]}
-{"text": "セツとジナ、ラキオの主張をどう見る?", "intent": "question", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": [2, 3]}
+{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": [], "claimed_seer_result": null, "claimed_medium_result": null}
+{"text": "実は私、占い師なんだ。昨夜セツを占ったら人狼じゃなかったよ。", "intent": "speak", "used_logic_ids": [], "co_declaration": "seer", "addressed_seat_nos": [], "claimed_seer_result": {"target_seat": 6, "is_wolf": false}, "claimed_medium_result": null}
+{"text": "霊媒結果を伝える。昨日処刑されたジョナスは人狼だった。", "intent": "speak", "used_logic_ids": [], "co_declaration": "medium", "addressed_seat_nos": [], "claimed_seer_result": null, "claimed_medium_result": {"target_seat": 2, "is_wolf": true}}
 """
 
 
@@ -750,6 +802,13 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
             addressed_seat_nos.append(raw_addr)
     elif addressed_seat_nos:
         addressed_seat_no = addressed_seat_nos[0]
+
+    seer_seat, seer_is_wolf = _parse_claim_fields(
+        data.get("claimed_seer_result"), allow_null_verdict=False,
+    )
+    medium_seat, medium_is_wolf = _parse_claim_fields(
+        data.get("claimed_medium_result"), allow_null_verdict=True,
+    )
     # Rough estimate: ~150ms per character for TTS
     estimated_ms = max(500, len(text) * 150)
 
@@ -761,7 +820,40 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         co_declaration=co_declaration,
         addressed_seat_no=addressed_seat_no,
         addressed_seat_nos=tuple(addressed_seat_nos),
+        claimed_seer_target_seat=seer_seat,
+        claimed_seer_is_wolf=seer_is_wolf,
+        claimed_medium_target_seat=medium_seat,
+        claimed_medium_is_wolf=medium_is_wolf,
     )
+
+
+def _parse_claim_fields(
+    raw: object, *, allow_null_verdict: bool
+) -> tuple[int | None, bool | None]:
+    """Coerce a structured claim dict into ``(target_seat, is_wolf)``.
+
+    Returns ``(None, None)`` for any malformed input — the speech is
+    still delivered without the structured claim attached, since
+    rejecting valid speech because of a missing claim object would hurt
+    liveness more than it helps integrity.
+
+    ``allow_null_verdict=True`` is the medium path (``is_wolf=null``
+    encodes "no execution yesterday → no result today"). The seer path
+    requires a concrete boolean.
+    """
+    if not isinstance(raw, dict):
+        return (None, None)
+    target = raw.get("target_seat")
+    if not isinstance(target, int) or isinstance(target, bool):
+        return (None, None)
+    if not 1 <= target <= 9:
+        return (None, None)
+    verdict_raw = raw.get("is_wolf")
+    if isinstance(verdict_raw, bool):
+        return (target, verdict_raw)
+    if verdict_raw is None and allow_null_verdict:
+        return (target, None)
+    return (None, None)
 
 
 __all__ = [
@@ -771,4 +863,5 @@ __all__ = [
     "_build_speech_from_json",
     "_build_system",
     "_build_user",
+    "_parse_claim_fields",
 ]

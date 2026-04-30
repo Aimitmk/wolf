@@ -477,6 +477,194 @@ async def test_role_callout_pool_prioritizes_real_role_and_wolf_side(
     assert reason == "role_callout_pool"
 
 
+async def test_first_seer_co_fires_counter_co_pool(
+    repo: SqliteRepo,
+) -> None:
+    """When the real seer is the first to CO with no prior callout,
+    the next dispatch must still come from the pool — pool = uncpd
+    wolf-side (the real seer is excluded because they just CO'd).
+
+    This is the user's 2026-05-01 spec: a single-CO situation should
+    open a guaranteed counter-CO opportunity window so a fake CO from
+    a wolf has a chance to surface, instead of the village-side
+    accidentally treating an unchallenged CO as gospel.
+    """
+    g = Game(
+        id="rv-first-co",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+        Seat(seat_no=2, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+        Seat(seat_no=3, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=4, display_name="☄️コメット", discord_user_id=None,
+             is_llm=True, persona_key="comet"),
+        Seat(seat_no=5, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+        Seat(seat_no=6, display_name="👽シゲミチ", discord_user_id=None,
+             is_llm=True, persona_key="shigemichi"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in (
+        (1, Role.WEREWOLF), (2, Role.VILLAGER), (3, Role.MADMAN),
+        (4, Role.VILLAGER), (5, Role.SEER), (6, Role.VILLAGER),
+    ):
+        await repo.set_player_role(g.id, sn, role)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3, 4, 5, 6], created_at_ms=1,
+        )
+    )
+    # Real seer (seat 5) declares first. No prior callout — the
+    # window is opened purely by the new ``pending_co_response``
+    # mechanism.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=5,
+            text="実は私、占い師なのです。昨夜、ジョナスを占いました。",
+            co_declaration="seer",
+            created_at_ms=10,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[int, list[str]] = {n: [] for n in (1, 2, 3, 4, 5, 6)}
+    persona_by_seat = {
+        1: "jonas", 2: "gina", 3: "raqio",
+        4: "comet", 5: "setsu", 6: "shigemichi",
+    }
+    for seat_no, persona in persona_by_seat.items():
+        registry.register(
+            npc_id=f"npc_{persona}", discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[seat_no]),
+            now_ms=2000, persona_key=persona,
+        )
+        registry.assign(
+            f"npc_{persona}", seat=seat_no,
+            game_id=g.id, phase_id=phase_id,
+        )
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 3000,
+    )
+
+    await arb.try_dispatch_next(g.id)
+
+    # Pool: real seer (5) is now CO'd → excluded. Uncpd wolf-side =
+    # ジョナス (1) + ラキオ (3). Villagers 2/4/6 must stay out.
+    pool_seats = {1, 3}
+    non_pool_seats = {2, 4, 5, 6}
+    picked = next(
+        (s for s, b in bufs.items() if any('"speak_request"' in m for m in b)),
+        None,
+    )
+    assert picked is not None, "must dispatch someone"
+    assert picked in pool_seats, (
+        f"picked seat {picked} must be in counter-CO pool {pool_seats} "
+        f"(uncpd wolf-side after the real seer's first CO). "
+        f"Non-pool seats {non_pool_seats} (villagers + the CO'er) "
+        f"should NOT be picked."
+    )
+    _, reason = await _fetch_selection_reason(repo, g.id)
+    assert reason == "role_callout_pool"
+
+
+async def test_first_co_pool_skips_text_mismatch_co(
+    repo: SqliteRepo,
+) -> None:
+    """A SpeechEvent with structured ``co_declaration='seer'`` whose
+    text is a counter-CO request rather than a self-declaration must
+    NOT open the counter-CO pool — the text-vs-structured guard drops
+    the leaked structured flag, so ``pending_co_response`` stays
+    empty and dispatch falls through to normal priority.
+
+    Reproduces game ``98e5a083b5ff`` day 1 ラキオの誤検知.
+    """
+    g = Game(
+        id="rv-first-co-mismatch",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.MADMAN)
+    await repo.set_player_role(g.id, 2, Role.SEER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2], created_at_ms=1,
+        )
+    )
+    # Leaked structured flag: text is a counter-CO request, not a
+    # declaration. The guard must drop the flag → no CO recorded →
+    # pool stays inactive.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1,
+            text="ステラ、対抗占い師は出ないのか？早く名乗りなさい。",
+            co_declaration="seer",
+            created_at_ms=10,
+        )
+    )
+
+    # Rebuild via the canonical fold path (= what restart recovery /
+    # arbiter prompt build use). ``pending_co_response`` should be
+    # empty, signalling the guard worked.
+    from wolfbot.services.discussion_service import (
+        rebuild_public_state_from_events,
+    )
+    events = await store.load_phase(g.id, phase_id)
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert state.pending_co_response == frozenset()
+    assert state.co_claims == ()
+
+
 async def test_info_request_callout_expands_pool_to_all_info_roles(
     repo: SqliteRepo,
 ) -> None:
@@ -1617,9 +1805,14 @@ async def test_try_dispatch_next_prefers_lower_speech_count(
     # gate stays quiet — the only differentiator left is the per-seat
     # speech_count. Without that axis seat 1 wins by lowest seat tie-
     # break; with it seat 3 beats both 4-counts.
+    #
+    # No CO is emitted in this fixture because a first-CO would fire
+    # the counter-CO opportunity pool and override low-count rotation
+    # — that pool path is exercised separately. Here we want to pin the
+    # bare ``low_count_rotation`` reason without crossing pool lines.
     payload = [
         (10, 1, "ラキオ1巡目"),              # 1:1
-        (20, 2, "セツの占いCO"),            # 2:1 (CO → has_info=True)
+        (20, 2, "セツの所感"),               # 2:1
         (30, 1, "ラキオ反論1"),             # 1:2
         (40, 2, "セツ反応1"),               # 2:2
         (50, 1, "ラキオ反論2"),             # 1:3
@@ -1634,8 +1827,6 @@ async def test_try_dispatch_next_prefers_lower_speech_count(
             phase=Phase.DAY_DISCUSSION,
             speaker_seat=seat, text=text, created_at_ms=ts,
         )
-        if "占いCO" in text:
-            kwargs["co_declaration"] = "seer"
         await store.insert(make_npc_generated_event(**kwargs))  # type: ignore[arg-type]
 
     registry = InMemoryNpcRegistry()
@@ -1714,13 +1905,26 @@ async def test_try_dispatch_next_lru_when_speech_counts_tied(
     # seat 2 occupies the just-spoke slot at the end so LRU pushes us
     # back to seat 1. Both seats have count=2 so the count axis is
     # neutral.
+    #
+    # Seat 1's first event carries a knight CO with valid self-decl
+    # text — chosen because (a) the post-2026-05-01 ``co_declaration``
+    # consistency guard accepts it (text + structured field agree),
+    # (b) the game has no real knight role, so the resulting first-CO
+    # counter-CO pool is empty (no real role-holder, no other
+    # uncommitted wolf-side seat), keeping LRU as the operative axis.
+    # This pads the recent-speech-summary with one ``has_info=True``
+    # entry, which silences the pair-volley demotion gate that would
+    # otherwise demote both seats and reroute through the
+    # ``all_demoted_fallback`` path.
+    co_setup = {(10, 1): ("実は私、騎士なんだ。", "knight")}
     for ts, seat in ((10, 1), (20, 2), (30, 1), (40, 2)):
+        text, co = co_setup.get((ts, seat), (f"seat {seat} ts={ts}", None))
         await store.insert(
             make_npc_generated_event(
                 game_id=g.id, phase_id=phase_id, day=1,
                 phase=Phase.DAY_DISCUSSION,
-                speaker_seat=seat, text=f"seat {seat} ts={ts}",
-                co_declaration="seer" if (ts, seat) == (10, 1) else None,
+                speaker_seat=seat, text=text,
+                co_declaration=co,
                 created_at_ms=ts,
             )
         )

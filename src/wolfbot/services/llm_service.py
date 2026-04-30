@@ -31,7 +31,7 @@ import re
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -121,6 +121,20 @@ _SEAT_TOKEN_RE = re.compile(r"^\s*席(\d+)\b")
 
 
 # ---------------------------------------------------------------- LLMAction
+class _ClaimedSeerAction(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_seat: int = Field(ge=1, le=9)
+    is_wolf: bool
+
+
+class _ClaimedMediumAction(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_seat: int = Field(ge=1, le=9)
+    is_wolf: bool | None = None
+
+
 class LLMAction(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -130,6 +144,13 @@ class LLMAction(BaseModel):
     reason_summary: str = ""
     confidence: float = 0.5
     co_declaration: CoDeclaration | None = None
+    # Structured seer/medium claim for the rounds-mode discussion path.
+    # Mirrors the reactive_voice NPC speech schema so the per-seat
+    # claim history is built from a single source-of-truth shape across
+    # both modes. Optional / null when the utterance does not announce
+    # a new divination outcome.
+    claimed_seer_result: _ClaimedSeerAction | None = None
+    claimed_medium_result: _ClaimedMediumAction | None = None
 
 
 RESPONSE_SCHEMA: dict[str, object] = {
@@ -145,6 +166,8 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "reason_summary",
             "confidence",
             "co_declaration",
+            "claimed_seer_result",
+            "claimed_medium_result",
         ],
         "properties": {
             "intent": {
@@ -158,6 +181,28 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "co_declaration": {
                 "type": ["string", "null"],
                 "enum": [*CO_CLAIM_VALUES, None],
+            },
+            "claimed_seer_result": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "required": ["target_seat", "is_wolf"],
+                "properties": {
+                    "target_seat": {
+                        "type": "integer", "minimum": 1, "maximum": 9,
+                    },
+                    "is_wolf": {"type": "boolean"},
+                },
+            },
+            "claimed_medium_result": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "required": ["target_seat", "is_wolf"],
+                "properties": {
+                    "target_seat": {
+                        "type": "integer", "minimum": 1, "maximum": 9,
+                    },
+                    "is_wolf": {"type": ["boolean", "null"]},
+                },
             },
         },
     },
@@ -180,15 +225,32 @@ _DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
 - "target_name": string または null
 - "reason_summary": string (最大 200 文字)
 - "confidence": number (0 から 1)
+- "co_declaration": "seer" | "medium" | "knight" | null
+- "claimed_seer_result": object | null  (今回新しく占い結果を発表する場合のみ非 null。形式 {"target_seat": integer(1-9), "is_wolf": boolean}。本物でも騙りでも同じ形式)
+- "claimed_medium_result": object | null  (霊媒も同様。形式 {"target_seat": integer(1-9), "is_wolf": boolean | null}。is_wolf=null は「昨日処刑なし」)
 
 例:
-{"intent": "speak", "public_message": "私は占い師です。", "target_name": null, "reason_summary": "CO 表明", "confidence": 0.7}
+{"intent": "speak", "public_message": "私は占い師です。昨夜セツを占ったら人狼じゃなかった。", "target_name": null, "reason_summary": "CO + 結果発表", "confidence": 0.7, "co_declaration": "seer", "claimed_seer_result": {"target_seat": 6, "is_wolf": false}, "claimed_medium_result": null}
 """
 
 
 def _deepseek_json_contract(system_prompt: str) -> str:
     """Append DeepSeek's JSON-mode contract to a system prompt."""
     return system_prompt + _DEEPSEEK_JSON_CONTRACT_SUFFIX
+
+
+def _claim_to_fields(
+    claim: _ClaimedSeerAction | _ClaimedMediumAction | None,
+) -> tuple[int | None, bool | None]:
+    """Project the structured claim model onto the persistence pair.
+
+    Returns ``(target_seat, is_wolf)`` so the caller can pass each field
+    into ``_emit_npc_speech_event`` without having to teach that helper
+    about the wire model. ``(None, None)`` for missing claims.
+    """
+    if claim is None:
+        return (None, None)
+    return (claim.target_seat, claim.is_wolf)
 
 
 # ---------------------------------------------------------- low-level deciders
@@ -1484,8 +1546,17 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
+        seer_seat, seer_verdict = _claim_to_fields(action.claimed_seer_result)
+        medium_seat, medium_verdict = _claim_to_fields(action.claimed_medium_result)
         await self._emit_npc_speech_event(
-            fresh, player.seat_no, message, co_declaration=action.co_declaration
+            fresh,
+            player.seat_no,
+            message,
+            co_declaration=action.co_declaration,
+            claimed_seer_target_seat=seer_seat,
+            claimed_seer_is_wolf=seer_verdict,
+            claimed_medium_target_seat=medium_seat,
+            claimed_medium_is_wolf=medium_verdict,
         )
 
     # --------------------------------------------------- runoff candidate speech
@@ -1636,8 +1707,17 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
+        seer_seat, seer_verdict = _claim_to_fields(action.claimed_seer_result)
+        medium_seat, medium_verdict = _claim_to_fields(action.claimed_medium_result)
         await self._emit_npc_speech_event(
-            fresh, player.seat_no, message, co_declaration=action.co_declaration
+            fresh,
+            player.seat_no,
+            message,
+            co_declaration=action.co_declaration,
+            claimed_seer_target_seat=seer_seat,
+            claimed_seer_is_wolf=seer_verdict,
+            claimed_medium_target_seat=medium_seat,
+            claimed_medium_is_wolf=medium_verdict,
         )
 
     async def _emit_npc_speech_event(
@@ -1647,6 +1727,10 @@ class LLMAdapter:
         text: str,
         *,
         co_declaration: str | None = None,
+        claimed_seer_target_seat: int | None = None,
+        claimed_seer_is_wolf: bool | None = None,
+        claimed_medium_target_seat: int | None = None,
+        claimed_medium_is_wolf: bool | None = None,
     ) -> None:
         """Persist a SpeechEvent(source=npc_generated) for an LLM utterance.
 
@@ -1658,6 +1742,17 @@ class LLMAdapter:
         """
         if self.discussion_service is None:
             return
+        # Self-claim guard: an LLM that fakes a CO targeting its own
+        # seat is a logical contradiction (real seers never divine
+        # themselves in this ruleset). Drop the structured claim before
+        # persisting so the per-seat claim-history fold stays clean,
+        # while still keeping the speech itself.
+        if claimed_seer_target_seat == speaker_seat:
+            claimed_seer_target_seat = None
+            claimed_seer_is_wolf = None
+        if claimed_medium_target_seat == speaker_seat:
+            claimed_medium_target_seat = None
+            claimed_medium_is_wolf = None
         try:
             from wolfbot.domain.discussion import make_phase_id
             from wolfbot.services.discussion_service import (
@@ -1673,6 +1768,10 @@ class LLMAdapter:
                 speaker_seat=speaker_seat,
                 text=text,
                 co_declaration=co_declaration,
+                claimed_seer_target_seat=claimed_seer_target_seat,
+                claimed_seer_is_wolf=claimed_seer_is_wolf,
+                claimed_medium_target_seat=claimed_medium_target_seat,
+                claimed_medium_is_wolf=claimed_medium_is_wolf,
             )
             # Persist-only avoids re-posting the message to Discord (the
             # rounds-mode path already posted it via MessagePoster) and

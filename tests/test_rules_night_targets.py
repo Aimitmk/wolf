@@ -223,6 +223,107 @@ def test_resolve_wolf_attack_human_missing_does_not_invoke_priority() -> None:
     assert r.split is False
 
 
+# ---------------------------------- random split resolution (rng=Random())
+def test_resolve_wolf_attack_rng_resolves_all_llm_split() -> None:
+    """Two LLM wolves split; with an RNG provided Master picks one of the
+    two targets at random instead of returning ``split=True``. This is the
+    fix for game ``98e5a083b5ff`` day 2 (SQ→コメット, ユリコ→セツ →
+    indefinite WAITING_HOST_DECISION pause)."""
+    from random import Random
+
+    actions = [_attack(1, 5), _attack(2, 6)]
+    r = resolve_wolf_attack(
+        actions,
+        alive_wolf_seats=[1, 2],
+        force_skip=False,
+        rng=Random(42),
+    )
+    assert r.target_seat in (5, 6)
+    assert r.split is False
+
+
+def test_resolve_wolf_attack_rng_picks_each_target_under_repeated_seeds() -> None:
+    """Sanity-check the random pick actually exercises both branches over
+    many seeds — guards against a copy-paste regression that always
+    returned the first wolf's pick."""
+    from random import Random
+
+    actions = [_attack(1, 5), _attack(2, 6)]
+    chosen: set[int | None] = set()
+    for seed in range(50):
+        r = resolve_wolf_attack(
+            actions,
+            alive_wolf_seats=[1, 2],
+            force_skip=False,
+            rng=Random(seed),
+        )
+        chosen.add(r.target_seat)
+    assert chosen == {5, 6}
+
+
+def test_resolve_wolf_attack_rng_does_not_override_human_priority() -> None:
+    """Human-wolf priority (1H + 1L disagreement) wins before the random
+    fallback runs — otherwise a 50/50 coin flip would silently override
+    the human player's deliberate choice."""
+    from random import Random
+
+    actions = [_attack(1, 5), _attack(2, 6)]
+    r = resolve_wolf_attack(
+        actions,
+        alive_wolf_seats=[1, 2],
+        force_skip=False,
+        human_wolf_seats=[1],
+        rng=Random(0),
+    )
+    assert r.target_seat == 5  # human's pick, not RNG'd
+    assert r.split is False
+
+
+def test_resolve_wolf_attack_rng_handles_partial_none_pick() -> None:
+    """One wolf abstained (target=None), the other named a target. With
+    RNG, the concrete target is chosen rather than mixing None into the
+    random pool (which would produce a 50% no-attack — equivalent to the
+    old split semantics)."""
+    from random import Random
+
+    actions = [_attack(1, None), _attack(2, 5)]
+    r = resolve_wolf_attack(
+        actions,
+        alive_wolf_seats=[1, 2],
+        force_skip=False,
+        rng=Random(0),
+    )
+    assert r.target_seat == 5
+    assert r.split is False
+
+
+def test_resolve_wolf_attack_rng_no_concrete_target_keeps_no_attack() -> None:
+    """Both wolves abstained (None, None). The RNG has nothing concrete
+    to pick from — the result stays "no attack" rather than the function
+    fabricating a target."""
+    from random import Random
+
+    actions = [_attack(1, None), _attack(2, None)]
+    r = resolve_wolf_attack(
+        actions,
+        alive_wolf_seats=[1, 2],
+        force_skip=False,
+        rng=Random(0),
+    )
+    assert r.target_seat is None
+    assert r.split is False  # not a "split" either — both genuinely abstained
+
+
+def test_resolve_wolf_attack_no_rng_keeps_legacy_split_for_back_compat() -> None:
+    """When no RNG is threaded, the legacy ``split=True`` shape is
+    preserved so unit tests / external callers that haven't migrated
+    keep observing the historical behaviour."""
+    actions = [_attack(1, 5), _attack(2, 6)]
+    r = resolve_wolf_attack(actions, alive_wolf_seats=[1, 2], force_skip=False)
+    assert r.split is True
+    assert r.target_seat is None
+
+
 def test_random_white_raises_when_pool_empty() -> None:
     # All non-seer non-wolves are dead (contrived case)
     players = _players()

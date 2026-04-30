@@ -38,6 +38,16 @@ export interface PublicLog {
   created_at_ms: number;
 }
 
+export interface ClaimedSeerResult {
+  target_seat: number;
+  is_wolf: boolean;
+}
+
+export interface ClaimedMediumResult {
+  target_seat: number;
+  is_wolf: boolean | null;
+}
+
 export interface SpeechEvent {
   event_id: string;
   source: SpeechSource;
@@ -47,7 +57,37 @@ export interface SpeechEvent {
   summary: string | null;
   co_declaration: CoDeclaration;
   addressed_seat_no: number | null;
+  /**
+   * Structured seer-CO result attached to this utterance. Non-null when
+   * the speaker announced a NEW divination outcome (real seer or wolf
+   * fake-CO). The viewer renders the per-seat history (see
+   * `GameSample.claim_history`) on top of these.
+   */
+  claimed_seer_result?: ClaimedSeerResult | null;
+  claimed_medium_result?: ClaimedMediumResult | null;
   created_at_ms: number;
+}
+
+export interface ClaimedSeerHistoryEntry {
+  day: number;
+  target_seat: number;
+  target_name: string;
+  is_wolf: boolean;
+  declared_at_event_id: string;
+}
+
+export interface ClaimedMediumHistoryEntry {
+  day: number;
+  target_seat: number;
+  target_name: string;
+  is_wolf: boolean | null;
+  declared_at_event_id: string;
+}
+
+export interface ClaimHistoryEntry {
+  claimer_seat: number;
+  seer_claims: ClaimedSeerHistoryEntry[];
+  medium_claims: ClaimedMediumHistoryEntry[];
 }
 
 export interface Vote {
@@ -154,4 +194,11 @@ export interface GameSample {
   phases: PhaseSection[];
   trace: TraceEntry[];
   arbiter_decisions?: ArbiterDecision[];
+  /**
+   * Per-claimer ledger of every structured seer/medium claim, pre-folded
+   * by the exporter so the viewer renders the "claim integrity" panel
+   * without walking each phase's `speech_events`. Older exports (pre-
+   * 2026-05-01) lack the field; the viewer treats absence as `[]`.
+   */
+  claim_history?: ClaimHistoryEntry[];
 }
