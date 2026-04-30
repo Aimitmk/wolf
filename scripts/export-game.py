@@ -40,7 +40,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output",
         default="viewer/games",
-        help="Output directory. The file is written as {output}/{game_id}.json.",
+        help=(
+            "Output directory. The file is written as "
+            "{output}/YYYY-MM-DD_HH-MM-SS.json (derived from game's created_at)."
+        ),
     )
     return p.parse_args()
 

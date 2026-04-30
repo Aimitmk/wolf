@@ -32,7 +32,11 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from wolfbot.domain.enums import CO_CLAIM_VALUES, format_co_claim_options
+from wolfbot.domain.enums import (
+    CO_CLAIM_VALUES,
+    ROLE_CALLOUT_VALUES,
+    format_co_claim_options,
+)
 
 log = logging.getLogger(__name__)
 
@@ -120,11 +124,14 @@ class GeminiTextAnalyzer:
         "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。"
         "発言内で他プレイヤーに言及するだけ(例: 『セツの判定が気になる』)は呼びかけではないので null。"
         "明確な宛先のある呼びかけ(例: 『セツさん、どう思う』)のみ設定。\n"
-        "- role_callout: 特定の役職に名乗り出を求める呼びかけがあれば "
-        "\"seer\"/\"medium\"/\"knight\" のいずれか、なければ null。"
-        "例: 「占い師の方は名乗り出てください」「霊媒師いますか?」「騎士は誰?」 → 該当役職。"
-        "ただし役職名を単に話題にしただけ (例: 「占い師の判定が気になる」) は null。"
-        "明確な「出てきて/名乗って/CO して/いますか」のような請求が含まれる場合のみ設定する。"
+        "- role_callout: 役職への名乗り出を求める呼びかけ、または一般的な情報請求があれば "
+        "\"seer\"/\"medium\"/\"knight\"/\"info_request\" のいずれか、なければ null。"
+        "特定役職を名指しした呼びかけ (例「占い師の方は名乗り出てください」「霊媒師いますか?」「騎士は誰?」) → 該当役職。"
+        "役職を限定しない一般的な情報請求 (例「誰か怪しい人いる?」「みんな意見を聞かせて」「気になる人を挙げて」"
+        "「誰か役職持ち出てきて」「みんなどう思う?」「初日だけど何か情報ない?」) → \"info_request\"。"
+        "ただし役職名を単に話題にしただけ (例「占い師の判定が気になる」「シゲミチが霊媒主張した」) は null。"
+        "個人への質問 (例「セツさん、どう思う?」) は addressed_name 側で扱い、role_callout は null。"
+        "全員/全体への問いかけで意見・情報・怪しい相手を求めているときに \"info_request\" を立てる。"
     )
 
     def __init__(
@@ -259,7 +266,9 @@ class GeminiTextAnalyzer:
             stripped = addressed_raw.strip()
             addressed_name = stripped or None
         callout_raw = parsed.get("role_callout")
-        role_callout = callout_raw if callout_raw in CO_CLAIM_VALUES else None
+        role_callout = (
+            callout_raw if callout_raw in ROLE_CALLOUT_VALUES else None
+        )
         return TextAnalysis(
             addressed_name=addressed_name,
             co_declaration=co_declaration,
@@ -440,7 +449,9 @@ class OpenAICompatibleTextAnalyzer:
             stripped = addressed_raw.strip()
             addressed_name = stripped or None
         callout_raw = parsed.get("role_callout")
-        role_callout = callout_raw if callout_raw in CO_CLAIM_VALUES else None
+        role_callout = (
+            callout_raw if callout_raw in ROLE_CALLOUT_VALUES else None
+        )
         return TextAnalysis(
             addressed_name=addressed_name,
             co_declaration=co_declaration,

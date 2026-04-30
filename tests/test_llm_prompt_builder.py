@@ -199,6 +199,104 @@ def test_game_rules_block_co_recognition_no_wolf_coordination_leak() -> None:
     assert "襲撃先を揃える" not in block
 
 
+def test_game_rules_block_forbids_third_judgment_color() -> None:
+    """Seer/medium results are strictly binary (黒/白). Fake mediums in past
+    games hallucinated a `灰色` (gray) result; the listener side (e.g. real
+    knight) then took the gray claim as possibly valid. The shared block must
+    explicitly forbid third-color claims AND tell listeners to treat such a
+    claim as immediate CO破綻."""
+    block = _build_game_rules_block()
+    assert "2 値のみ" in block
+    assert "灰" in block
+    assert "第 3 の色" in block
+    assert "破綻として確定扱い" in block
+
+
+def test_game_rules_block_forbids_self_judgment_retraction() -> None:
+    """LLM seers/mediums must not retract or flip their own past judgment
+    color/target. Past games saw a fake medium claim `白` on day 2 and `灰色`
+    on day 3 for the same target without any correction wording."""
+    block = _build_game_rules_block()
+    assert "後日撤回" in block
+    assert "色変更" in block
+    assert "対象差し替え" in block
+    assert "訂正" in block
+
+
+def test_game_rules_block_handles_listener_side_color_flip() -> None:
+    """Listener side: a same-target color flip across days is a strong fake
+    signal but NOT auto-break, since human players typo / mis-speak. Without
+    an explicit correction wording, combine with other fake signals."""
+    block = _build_game_rules_block()
+    assert "言い間違い" in block
+    assert "即座に偽 CO 確定とはしない" in block
+    assert "強い偽要素" in block
+
+
+def test_game_rules_block_requires_concrete_citation_for_relational_terms() -> None:
+    """Relational vocabulary (重複・ライン・出来レース・囲い・身内切り・対立・連携)
+    requires a concrete citation of which speech/judgment/vote is being compared.
+    Past games saw a wolf yell `重複しすぎ` against two seer results that had
+    zero target overlap — bare relational labels must be rejected."""
+    block = _build_game_rules_block()
+    assert "重複" in block
+    assert "出来レース" in block
+    assert "1 件以上具体的に引用" in block
+    assert "推理上の根拠として扱わず" in block
+
+
+def test_game_rules_block_excludes_dead_seats_from_today_vote_target() -> None:
+    """Game 76358c4623f0 day 3 had all 5 NPCs proposing 'ステラを吊ろう' even
+    though ステラ was already attacked dead. Past-credibility analysis of a
+    dead seat is fine; today's vote target must be alive seats only. The
+    rule must explicitly forbid concluding a speech with '死者を吊ろう'."""
+    block = _build_game_rules_block()
+    assert "死亡した席" in block
+    assert "信用評価対象" in block
+    assert "今日の処刑対象 (vote target) としては議題に含めない" in block
+    assert "破綻発言" in block
+
+
+def test_game_rules_block_reframes_outlier_vote_as_possible_real_seer_read() -> None:
+    """Same game day 3: all village LLMs treated ステラ's day-1 'コメット票'
+    (异端 vote) as wolfish, but ステラ was the real seer who later confirmed
+    コメット as black. The rule must instruct LLMs to first check whether
+    an outlier vote is explained as a real seer's early black-read before
+    labeling it suspicious."""
+    block = _build_game_rules_block()
+    assert "異端票" in block
+    assert "真占い視点で動いていた場合に整合するか" in block
+    assert "黒読み先制" in block
+
+
+def test_game_rules_block_prioritizes_unannounced_results_over_addressed_reply() -> None:
+    """Same game day 3: シゲミチ (real medium) was dispatched as `addressed`
+    while holding an unannounced コメット黒. The NPC LLM set
+    co_declaration='medium' but the text body answered the addressed
+    question instead of leading with the CO. The rule must tell LLMs to
+    lead with CO + result and answer the addressed question afterward."""
+    block = _build_game_rules_block()
+    assert "未公開の能力結果" in block
+    assert "発言の番が回ってきたとき" in block
+    assert "発話の冒頭で必ず CO + 結果公表" in block
+    assert "addressed 文脈に飲まれて CO + 結果を欠落させる" in block
+
+
+def test_game_rules_block_requires_per_target_naming_for_seer_medium_results() -> None:
+    """Game af3d1e5d3fa1 day 1 had ユリコ (狂人) fake-seer CO with 「すべて白」 —
+    a vague plural claim with no target names. day 1 has only ONE NIGHT_0
+    random white target, so 'all white' is structurally impossible. The
+    rule must forbid plural-without-target claims (`すべて白` / `全員白` /
+    `全部白`) and require target-by-target naming on every announcement."""
+    block = _build_game_rules_block()
+    assert "対象席名 + 判定色 (黒/白) を必ず一対一で添える" in block
+    assert "すべて白" in block
+    assert "全員白" in block
+    assert "破綻発言" in block
+    # day-1 single-target reinforcement.
+    assert "day 1 の占い結果は必ず対象 1 名 + 白判定の 1 件のみ" in block
+
+
 def test_game_rules_block_explains_medium_white_means_not_wolf_only() -> None:
     """Medium white = `not a real werewolf`, not a role-claim confirmation.
     Every LLM seat must see this so that no role overreads a white result."""
@@ -905,19 +1003,26 @@ def test_madman_fake_strategy_has_no_wolf_coordination_vocabulary() -> None:
 
 
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
-def test_fake_strategy_describes_conditional_seer_fake(role: Role) -> None:
-    """Day-1 seer fake is offered as a *conditional* option, not an
-    unconditional default — the wording must contain gating words
-    (無条件 / 潜伏) that signal the LLM to decide based on board state."""
+def test_fake_strategy_presents_three_way_day1_choice(role: Role) -> None:
+    """Day-1 strategy must present **先制CO / 対抗CO / 潜伏** as three first-class
+    candidates, NOT funnel the LLM into one option via a single conditional
+    trigger. Empirical evidence (recent games) showed wolves never preempt and
+    almost always go silent — the 3-way framing forces real-time comparison
+    instead of mechanical defaults."""
     block = _build_strategy_block(role)
-    assert "無条件" in block
-    assert "潜伏" in block
-    if role is Role.WEREWOLF:
-        assert "相方が危険位置" in block
-    else:
-        # Madman variant: no wolf-coordination vocab (bare 相方 / 襲撃先を揃える),
-        # but references CO creep. 相方候補 (inference) is allowed.
-        assert "複数の占い師 CO" in block
+    # All three options must appear as named tactics.
+    assert "先制CO" in block, f"{role.name}: 先制CO option missing"
+    assert "対抗CO" in block, f"{role.name}: 対抗CO option missing"
+    assert "潜伏" in block, f"{role.name}: 潜伏 option missing"
+    # Equal-weight framing: explicit 3-way comparison language.
+    assert "3 択" in block
+    assert "等しく強い" in block
+    # Anti-pattern guard: mechanical single-condition decisions called out.
+    assert "機械的" in block
+    # Counter the "潜伏 = safe" misconception observed empirically.
+    assert "潜伏は安全策ではない" in block
+    if role is Role.MADMAN:
+        # Madman variant must still avoid wolf-coordination vocabulary.
         assert not re.search(r"相方(?!候補)", block)
         assert "襲撃先を揃える" not in block
 
@@ -972,11 +1077,15 @@ def test_madman_day_2_plus_black_still_carries_misfire_awareness() -> None:
 
 
 def test_seer_strategy_covers_proactive_and_counter_co() -> None:
-    """Seer must have explicit guidance on early CO when no seer CO has
-    appeared, counter-CO against a fake seer with time-ordered history
-    disclosure, and the black-pull CO procedure."""
+    """Seer must have explicit guidance on day-1 CO when their own speaking
+    turn arrives, counter-CO against a fake seer with time-ordered history
+    disclosure, and the black-pull CO procedure. The on-turn framing
+    replaces the earlier 'mid-discussion no-seer-CO trigger' because the
+    NPC cannot self-trigger speech — the rule must fire whenever the
+    arbiter happens to dispatch them."""
     block = _build_strategy_block(Role.SEER)
-    assert "占い師 CO が一切出ていない" in block
+    assert "発言の番" in block
+    assert "次の自分のターンに先送りしない" in block
     assert "対抗 CO" in block
     assert "時系列で公開" in block
     assert "黒を引いた場合" in block
@@ -994,12 +1103,51 @@ def test_seer_strategy_includes_three_seer_co_elimination_for_targeting() -> Non
     assert "霊媒結果・襲撃死・CO 破綻など説明可能な根拠に限る" in block
 
 
-def test_medium_strategy_covers_post_execution_publication_and_counter_co() -> None:
-    """Medium must publish results the day after an execution and must run
-    counter-CO against a fake medium with time-ordered history framing while
-    acknowledging self-roller vulnerability."""
+def test_medium_strategy_validates_seer_co_with_matching_judgment() -> None:
+    """Medium must use own black result to validate a seer-CO whose past
+    judgment matches. Game 76358c4623f0 had シゲミチ (medium) holding コメット
+    黒 while ステラ-CO had previously claimed コメット黒 — the seer-CO was
+    therefore real, but シゲミチ joined the flow that called ステラ偽."""
     block = _build_strategy_block(Role.MEDIUM)
-    assert "処刑が発生した翌日" in block
+    assert "占い師 CO の判定が一致した場合" in block
+    assert "真寄りに置く" in block
+    assert "流れに乗って" in block
+    assert "村陣営が真情報を失う" in block
+
+
+def test_seer_strategy_prioritizes_co_over_addressed_reply() -> None:
+    """Real seer dispatched as `addressed` must lead with CO + result, not
+    answer the question first. Same root-cause as シゲミチ in game
+    76358c4623f0 day 3 (co_declaration field set, body never named the CO)."""
+    block = _build_strategy_block(Role.SEER)
+    assert "他席から呼びかけられている (addressed) 状態でも" in block
+    assert "未公開の能力結果" in block
+    assert "発話の冒頭で行い" in block
+    assert "addressed への返答はその後に短く添える" in block
+
+
+def test_medium_strategy_prioritizes_co_over_addressed_reply() -> None:
+    """Same as seer rule — medium dispatched while addressed must lead with
+    CO + medium-result and reply to the question afterward. Direct cause
+    of the シゲミチ day-3 failure in game 76358c4623f0."""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "他席から呼びかけられている (addressed) 状態でも" in block
+    assert "未公開の霊媒結果" in block
+    assert "発話の冒頭で行い" in block
+    assert "addressed への返答はその後に短く添える" in block
+
+
+def test_medium_strategy_covers_post_execution_publication_and_counter_co() -> None:
+    """Medium must publish results the day after an execution (when their
+    speaking turn arrives) and must run counter-CO against a fake medium
+    with time-ordered history framing while acknowledging self-roller
+    vulnerability. The on-turn framing replaces the earlier 'day after
+    execution' anchor because the NPC cannot self-trigger speech — the
+    rule must fire whenever the arbiter happens to dispatch them."""
+    block = _build_strategy_block(Role.MEDIUM)
+    assert "前日に処刑があった" in block
+    assert "発言の番" in block
+    assert "次の自分のターンに先送りしない" in block
     assert "対抗霊媒" in block
     assert "ローラー" in block
     assert "巻き込まれる可能性" in block

@@ -214,6 +214,13 @@ class SpeakArbiter:
         # arrives (or vad_finalization_timeout_ms elapses).
         # segment_id → deadline_ms
         self._pending_stt_segments: dict[str, int] = {}
+        # Per-game tracker of seats already dispatched from the current
+        # role-callout priority pool. Reset when `pending_role_callouts`
+        # becomes empty for that game (= the callout was consumed by a
+        # matching CO). Without this set the picker would loop on the
+        # same pool member when others decline; with it, each pool
+        # member gets at most one chance per callout.
+        self._callout_pool_asked: dict[str, set[int]] = {}
 
     # ------------------------------------------------------------- gates
 
@@ -584,38 +591,43 @@ class SpeakArbiter:
         if pending is None:
             await _record_rejection("unknown_request")
             return (False, "unknown_request")
+
+        async def _reject_and_advance(reason: str) -> tuple[bool, str | None]:
+            """Common rejection cleanup: record + mark runoff (no-op outside
+            runoff) + pop _pending + re-dispatch.
+
+            Without the pop + re-dispatch, an `expired_request` rejection
+            in DAY_DISCUSSION leaves the phase silently stalled — game
+            eab1f9514a10 day 4: SQ finished, ユリコ was dispatched, took
+            10s to respond (TTL=8s), got `expired_request` rejected, and
+            the day went 2.5 minutes without a single follow-up dispatch
+            because no one was triggering try_dispatch_next.
+            """
+            await _record_rejection(reason)
+            await self._mark_runoff_done_if_phase(
+                game_id=pending.game_id,
+                phase_id=result.phase_id,
+                seat_no=pending.seat_no,
+            )
+            self._pending.pop(result.request_id, None)
+            try:
+                await self.try_dispatch_next(pending.game_id)
+            except Exception:
+                log.exception(
+                    "speak_result_rejection_redispatch_failed game=%s reason=%s",
+                    pending.game_id,
+                    reason,
+                )
+            return (False, reason)
+
         if result.phase_id != current_phase_id:
-            await _record_rejection("stale_phase")
-            await self._mark_runoff_done_if_phase(
-                game_id=pending.game_id,
-                phase_id=result.phase_id,
-                seat_no=pending.seat_no,
-            )
-            return (False, "stale_phase")
+            return await _reject_and_advance("stale_phase")
         if now > pending.expires_at_ms:
-            await _record_rejection("expired_request")
-            await self._mark_runoff_done_if_phase(
-                game_id=pending.game_id,
-                phase_id=result.phase_id,
-                seat_no=pending.seat_no,
-            )
-            return (False, "expired_request")
+            return await _reject_and_advance("expired_request")
         if result.status != "accepted" or not result.text:
-            await _record_rejection("speaker_declined")
-            await self._mark_runoff_done_if_phase(
-                game_id=pending.game_id,
-                phase_id=result.phase_id,
-                seat_no=pending.seat_no,
-            )
-            return (False, "speaker_declined")
+            return await _reject_and_advance("speaker_declined")
         if len(result.text) > self.config.max_chars_reactive:
-            await _record_rejection("utterance_too_long")
-            await self._mark_runoff_done_if_phase(
-                game_id=pending.game_id,
-                phase_id=result.phase_id,
-                seat_no=pending.seat_no,
-            )
-            return (False, "utterance_too_long")
+            return await _reject_and_advance("utterance_too_long")
 
         # Accepted. Persist result + SpeechEvent + open playback row.
         await self.repo.insert_npc_speak_result(
@@ -862,15 +874,35 @@ class SpeakArbiter:
         demoted = _compute_demoted_seats(state.recent_speech_summary)
         online = self.registry.all_online()
 
-        def _pick_key(e: object) -> tuple[int, int, int, int, float]:
+        # Role-callout priority pool: when someone publicly asks for a
+        # seer/medium CO and that role hasn't been claimed yet, prioritize
+        # the real role-holder + every wolf-side seat that hasn't CO'd as
+        # any info role. Picks are random within the pool so the village
+        # can't meta-read "first NPC to speak after a callout = real".
+        # Each pool member gets at most one chance per callout (tracked
+        # via `_callout_pool_asked`); if everyone declines the pool
+        # exhausts and normal rotation resumes.
+        callout_pool = await self._compute_callout_pool(game_id, state)
+        asked = self._callout_pool_asked.get(game_id, set())
+        if not state.pending_role_callouts and asked:
+            # Callout was consumed (matching CO arrived). Reset asked.
+            self._callout_pool_asked.pop(game_id, None)
+            asked = set()
+        effective_pool = callout_pool - asked
+
+        def _pick_key(e: object) -> tuple[int, int, int, int, int, float]:
             seat = getattr(e, "assigned_seat", None) or 99
+            is_in_pool = 0 if seat in effective_pool else 1
             is_demoted = 1 if seat in demoted else 0
             is_addressed = 0 if seat in addressed_set else 1
             count = state.speech_counts.get(seat, 0)
             is_just_spoke = 1 if (
                 last_speaker is not None and seat == last_speaker
             ) else 0
-            return (is_demoted, is_addressed, count, is_just_spoke, self._rng.random())
+            return (
+                is_in_pool, is_demoted, is_addressed, count,
+                is_just_spoke, self._rng.random(),
+            )
 
         online_npc_seats = sorted(
             e.assigned_seat
@@ -910,7 +942,12 @@ class SpeakArbiter:
                 continue
             seat = entry.assigned_seat
             picked_count = state.speech_counts.get(seat, 0)
-            if seat in demoted:
+            if seat in effective_pool:
+                # Role-callout pool member won — record so future picks
+                # in this same callout window pick a different member.
+                self._callout_pool_asked.setdefault(game_id, set()).add(seat)
+                reason = "role_callout_pool"
+            elif seat in demoted:
                 # Reached this branch only when EVERY non-demoted
                 # candidate was filtered out (offline / dead / not in
                 # this game). Falling back is preferable to silence.
@@ -1107,7 +1144,19 @@ class SpeakArbiter:
             except asyncio.CancelledError:
                 return
             if request_id not in self._pending:
-                return  # SpeakResult already resolved this slot.
+                return  # SpeakResult already resolved AND playback finished.
+            # SpeakResult acceptance moves the request into _active_playback
+            # but does NOT pop _pending (handle_playback_finished does that
+            # when playback ends). If playback runs longer than ttl_s
+            # (typical NPC TTS is 10-15s vs the 8s TTL), the watchdog wakes
+            # while _pending still has the entry — but the NPC HAS responded.
+            # Without this check the watchdog spuriously pops _pending,
+            # which then makes `_on_playback_finished` lose the game_id
+            # lookup → try_dispatch_next is never called → runoff stalls
+            # (game d57c5d83ed4a day 2: ジョナス 11.6s playback shadowed
+            # the 8s watchdog and シゲミチ was never dispatched).
+            if request_id in self._active_playback:
+                return  # Accepted; playback handler will re-dispatch on finish.
             log.info(
                 "runoff_request_watchdog_fired game=%s seat=%d request=%s",
                 game_id,
@@ -1139,6 +1188,90 @@ class SpeakArbiter:
             if entry.assigned_seat == seat_no and entry.game_id == game_id:
                 return entry
         return None
+
+    async def _compute_callout_pool(
+        self, game_id: str, state: PublicDiscussionState
+    ) -> frozenset[int]:
+        """Return seats that should be prioritized when a role callout is
+        pending and unanswered.
+
+        Triggered by ``state.pending_role_callouts``. Three flavors:
+
+          - ``"seer"`` / ``"medium"`` / ``"knight"`` — specific role call
+            (e.g. 「占い師は?」). Pool = real role-holder (alive, uncpd)
+            + every wolf-side seat (人狼/狂人, alive, no info CO yet).
+          - ``"info_request"`` — generic info-seeking (「誰か怪しい人?」
+            「みんな意見を聞かせて」「気になる人を挙げて」). Pool = ALL
+            real info-role holders (seer + medium + knight, alive, uncpd)
+            + every wolf-side seat (alive, no info CO yet).
+
+        The arbiter prioritizes pool members (random within pool). Each
+        member gets at most one chance per callout via the
+        ``_callout_pool_asked`` tracker; declines fall through to other
+        pool members until the pool is exhausted.
+        """
+        if not state.pending_role_callouts:
+            return frozenset()
+        callout_to_role = {
+            "seer": Role.SEER,
+            "medium": Role.MEDIUM,
+            "knight": Role.KNIGHT,
+        }
+        # Resolve the set of real roles that should be in the pool.
+        # `info_request` expands to every info role.
+        target_roles: set[Role] = set()
+        has_info_request = "info_request" in state.pending_role_callouts
+        if has_info_request:
+            target_roles |= {Role.SEER, Role.MEDIUM, Role.KNIGHT}
+        for callout_key, role in callout_to_role.items():
+            if callout_key in state.pending_role_callouts:
+                target_roles.add(role)
+        if not target_roles:
+            return frozenset()
+        try:
+            players = await self.repo.load_players(game_id)
+            seats = await self.repo.load_seats(game_id)
+        except Exception:
+            log.exception("callout_pool_load_failed game=%s", game_id)
+            return frozenset()
+        seats_by_no: dict[int, Seat] = {s.seat_no: s for s in seats}
+        co_keys: set[tuple[int, str]] = {
+            (c.seat, c.role_claim) for c in state.co_claims
+        }
+        pool: set[int] = set()
+        for player in players:
+            if not player.alive:
+                continue
+            if player.seat_no not in state.alive_seat_nos:
+                continue
+            seat = seats_by_no.get(player.seat_no)
+            if seat is None or not seat.is_llm:
+                continue
+            # Real role-holder for any target role, not yet CO'd as that
+            # role. (For info_request, all three info roles are targets.)
+            if player.role in target_roles:
+                role_callout_key = next(
+                    (
+                        k for k, r in callout_to_role.items()
+                        if r is player.role
+                    ),
+                    None,
+                )
+                if (
+                    role_callout_key is not None
+                    and (player.seat_no, role_callout_key) not in co_keys
+                ):
+                    pool.add(player.seat_no)
+            # Wolf-side seats not yet CO'd as any info role can fake any
+            # of the requested roles, so prioritize them too.
+            if player.role in (Role.WEREWOLF, Role.MADMAN):
+                already_co_info = any(
+                    (player.seat_no, role) in co_keys
+                    for role in ("seer", "medium", "knight")
+                )
+                if not already_co_info:
+                    pool.add(player.seat_no)
+        return frozenset(pool)
 
     def _maybe_wake_runoff(self, game_id: str) -> None:
         if self._runoff_wake is None:
@@ -1206,6 +1339,7 @@ class SpeakArbiter:
             self._active_playback.discard(rid)
             self._playback_deadlines.pop(rid, None)
             swept += 1
+        self._callout_pool_asked.pop(game_id, None)
         if swept:
             log.info(
                 "speak_arbiter_cleanup_game game=%s swept=%d", game_id, swept,
@@ -1269,14 +1403,35 @@ class SpeakArbiter:
 
         phase_id = make_phase_id(game_id, day, phase)
         events: Sequence[SpeechEvent] = await self.discussion.load_phase(game_id, phase_id)
-        state = rebuild_public_state_from_events(events)
-        if state is None:
-            return None
+        # Pull game-wide CO history so the per-phase rebuild's volley-demotion
+        # signal (`is_new_co`) treats day-N re-assertions of a day-(N-1) CO
+        # as not-new. Without this seed, ジョナス re-CO'ing seer on day 2
+        # makes every utterance look like fresh info, suppressing the
+        # `_PAIR_VOLLEY_WINDOW` demotion gate (game a701a7531dca day 2).
+        # Restricted to events outside the current phase so a seat's
+        # FIRST in-phase CO still counts as new info (test_try_dispatch_next
+        # _lru_when_speech_counts_tied depends on this).
         try:
             all_events = await self.discussion.load_for_game(game_id)
         except Exception:
             log.exception("co_claim_history_load_failed game=%s", game_id)
             all_events = ()
+        prior_phase_events = tuple(
+            e for e in all_events if e.phase_id != phase_id
+        )
+        prior_co_claims = (
+            extract_co_claims_from_events(prior_phase_events)
+            if prior_phase_events
+            else ()
+        )
+        prior_co_keys = frozenset(
+            (c.seat, c.role_claim) for c in prior_co_claims
+        )
+        state = rebuild_public_state_from_events(events, prior_co_keys=prior_co_keys)
+        if state is None:
+            return None
+        # state.co_claims should reflect game-wide CO history (used by NPC
+        # prompts on day 2+ to remember day-1 declarations).
         if all_events:
             state.co_claims = extract_co_claims_from_events(all_events)
         return state

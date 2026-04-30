@@ -625,12 +625,13 @@ async def _run() -> None:
         """Export the finished/aborted game to viewer-compatible JSON.
 
         Joins SQLite + ``logs/llm_calls/{game_id}/*.jsonl`` into one file
-        under ``viewer/games/{game_id}.json``. The viewer auto-discovers
-        the most-recent file in that directory, so a finished game can
-        be reviewed by simply running ``cd viewer && pnpm dev`` — no
-        separate export step or env var. Errors here MUST NOT prevent
-        end-of-game cleanup; ``GameService._run_finalize_hook`` already
-        wraps this in try/except.
+        under ``viewer/games/YYYY-MM-DD_HH-MM-SS.json`` (timestamp prefix
+        from the game's created_at, sortable by play time). The viewer
+        auto-discovers the most-recent file in that directory, so a
+        finished game can be reviewed by simply running
+        ``cd viewer && pnpm dev`` — no separate export step or env var.
+        Errors here MUST NOT prevent end-of-game cleanup;
+        ``GameService._run_finalize_hook`` already wraps this in try/except.
         """
         from wolfbot.services.game_export import export_game
 

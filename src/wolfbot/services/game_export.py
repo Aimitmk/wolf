@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -78,7 +79,23 @@ async def export_game(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     payload = await _build_payload(game_id, db_path, trace_root)
-    out_path = out_dir / f"{game_id}.json"
+    # Filename is timestamp-prefixed (sortable / human-readable) instead
+    # of the random game_id. Local-time format YYYY-MM-DD_HH-MM-SS comes
+    # from the game's created_at — the viewer auto-discovers files by
+    # mtime, so the prefix only matters for human listing. If a same-
+    # second collision happens, append _<n> to keep the older file.
+    ts = datetime.fromtimestamp(payload.game.created_at_ms / 1000)
+    base_name = ts.strftime("%Y-%m-%d_%H-%M-%S")
+    out_path = out_dir / f"{base_name}.json"
+    suffix = 1
+    while out_path.exists() and out_path.stat().st_size > 0:
+        # Different game wrote the same-second filename earlier — disambiguate.
+        existing = out_path.read_text(encoding="utf-8")
+        if f'"id": "{game_id}"' in existing:
+            # Same game re-export — overwrite.
+            break
+        out_path = out_dir / f"{base_name}_{suffix}.json"
+        suffix += 1
     out_path.write_text(
         payload.model_dump_json(indent=2),
         encoding="utf-8",

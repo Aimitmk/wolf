@@ -1800,11 +1800,16 @@ async def test_ask_system_prompt_knight_includes_protection_success_co_strategy(
 async def test_ask_system_prompt_seer_includes_counter_co_strategy(
     repo: SqliteRepo,
 ) -> None:
-    """A true seer LLM must receive proactive-CO (when no seer CO has appeared),
-    counter-CO (when a fake seer appears), and black-pull CO guidance so the
-    true seer doesn't stay silent and cede single-truth treatment to a fake."""
+    """A true seer LLM must receive on-turn CO guidance (when their day-1
+    speaking turn arrives), counter-CO (when a fake seer appears), and
+    black-pull CO guidance so the true seer doesn't stay silent and cede
+    single-truth treatment to a fake. The on-turn framing replaces the
+    'mid-discussion no-seer-CO' trigger because the NPC cannot self-
+    trigger speech — the rule must fire whenever the arbiter dispatches
+    them."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
-    assert "占い師 CO が一切出ていない" in system_prompt
+    assert "発言の番" in system_prompt
+    assert "次の自分のターンに先送りしない" in system_prompt
     assert "対抗 CO" in system_prompt
     assert "時系列で公開" in system_prompt
     assert "黒を引いた場合" in system_prompt
@@ -1813,11 +1818,15 @@ async def test_ask_system_prompt_seer_includes_counter_co_strategy(
 async def test_ask_system_prompt_medium_includes_counter_co_strategy(
     repo: SqliteRepo,
 ) -> None:
-    """A true medium LLM must receive the post-execution result-publication
-    duty and the counter-CO pathway, with explicit self-roller vulnerability
-    framing so the medium doesn't stay silent against a fake medium."""
+    """A true medium LLM must receive on-turn result-publication guidance
+    (when their post-execution speaking turn arrives) and the counter-CO
+    pathway, with explicit self-roller vulnerability framing so the medium
+    doesn't stay silent against a fake medium. The on-turn framing replaces
+    the 'day after execution' anchor for the same reason as seer."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
-    assert "処刑が発生した翌日" in system_prompt
+    assert "前日に処刑があった" in system_prompt
+    assert "発言の番" in system_prompt
+    assert "次の自分のターンに先送りしない" in system_prompt
     assert "対抗霊媒" in system_prompt
     assert "ローラー" in system_prompt
 
@@ -1885,7 +1894,8 @@ async def test_ask_system_prompt_knight_guard_task_includes_checklist(
 
 async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRepo) -> None:
     """The werewolf LLM's system prompt must carry the fake-CO playbook:
-    day-1 seer fake is offered as a *conditional* option (not unconditional),
+    day-1 戦術 is presented as a 3-way choice (先制CO / 対抗CO / 潜伏) without
+    a single mechanical trigger that funnels the LLM into one option,
     day-2+ medium/knight fake, the over-fake warning, and medium-roller /
     knight-legal-guard-history caveats."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
@@ -1895,10 +1905,14 @@ async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRe
     assert "騎士騙り" in system_prompt
     assert "6 人以上" in system_prompt
     assert "騙りすぎ" in system_prompt
-    # Conditional framing — day-1 seer fake is no longer unconditional.
-    assert "無条件" in system_prompt
+    # 3-way framing — 先制CO / 対抗CO / 潜伏 each presented as a first-class option.
+    assert "先制CO" in system_prompt
+    assert "対抗CO" in system_prompt
     assert "潜伏" in system_prompt
-    assert "相方が危険位置" in system_prompt
+    assert "3 択" in system_prompt
+    assert "等しく強い" in system_prompt
+    assert "機械的" in system_prompt
+    assert "潜伏は安全策ではない" in system_prompt
     # Day-1 first-result-white anchor + day-1 black prohibition + day-2+ deferral.
     assert "NIGHT_0 ランダム白" in system_prompt
     assert "必ず白を主張" in system_prompt
@@ -1911,8 +1925,8 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     repo: SqliteRepo,
 ) -> None:
     """The madman LLM's system prompt must carry the fake-CO playbook
-    (day-1 seer fake, day-2+ medium/knight fake, over-fake warning) as a
-    *conditional* option with misfire caveats — and no wolf-coordination
+    (day-1 3-way choice 先制CO / 対抗CO / 潜伏, day-2+ medium/knight fake,
+    over-fake warning) with misfire caveats — and no wolf-coordination
     vocabulary (`相方` / `襲撃先を揃える`)."""
     system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
     assert "day 1" in system_prompt
@@ -1927,9 +1941,14 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "襲撃先を揃える" not in system_prompt
     # Existing prohibition phrase must also still be present.
     assert "人狼位置を知っている前提で話してはならない" in system_prompt
-    # Conditional framing + misfire / white-out caveats.
-    assert "無条件ではなく" in system_prompt
-    assert "複数の占い師 CO" in system_prompt
+    # 3-way framing + anti-mechanical-default + misfire / white-out caveats.
+    assert "先制CO" in system_prompt
+    assert "対抗CO" in system_prompt
+    assert "潜伏" in system_prompt
+    assert "3 択" in system_prompt
+    assert "等しく強い" in system_prompt
+    assert "機械的" in system_prompt
+    assert "潜伏は安全策ではない" in system_prompt
     assert "誤爆リスク" in system_prompt
     assert "白先が本物の狼とは限らない" in system_prompt
     # Day-1 first-result-white anchor + day-1 black prohibition + day-2+ deferral.

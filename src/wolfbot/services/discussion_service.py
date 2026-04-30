@@ -654,6 +654,10 @@ def apply_speech_event(
         for role_key in tuple(pending_role_callouts):
             if event.co_declaration == role_key or _resolve_co_role(event) == role_key:
                 pending_role_callouts.discard(role_key)
+        # ``info_request`` is a generic info-seeking callout; once anyone
+        # CO's any info role, the request is considered partially answered
+        # and the priority pool steps down.
+        pending_role_callouts.discard("info_request")
     return PublicDiscussionState(
         game_id=state.game_id,
         phase_id=state.phase_id,
@@ -678,6 +682,8 @@ def apply_speech_event(
 
 def rebuild_public_state_from_events(
     events: Sequence[SpeechEvent],
+    *,
+    prior_co_keys: frozenset[tuple[int, str]] = frozenset(),
 ) -> PublicDiscussionState | None:
     """Pure fold over a single phase's `SpeechEvent` rows.
 
@@ -690,6 +696,16 @@ def rebuild_public_state_from_events(
       * `silent_seats` = `alive_seat_nos` minus seats with ≥1 non-sentinel event.
       * `recent_speech_event_ids` keeps the last 10 non-sentinel ids in arrival order.
       * `stances` / `pressure` / `open_topics` remain empty in MVP — design defers.
+
+    ``prior_co_keys`` seeds the internal ``seen_co`` set with `(seat, role)`
+    tuples extracted from earlier-phase events. Without this, a seat that
+    CO'd on day 1 and re-asserts the same CO on day 2 would flag
+    ``is_new_co=True`` in the day-2 phase rebuild (because the per-phase
+    fold starts ``seen_co`` empty). That defeats the volley-demotion gate
+    in ``speak_arbiter._compute_demoted_seats``: the ジョナス↔ユリコ
+    ping-pong observed in game ``a701a7531dca`` day 2 escaped demotion
+    because every ジョナス re-CO looked like fresh info to the per-phase
+    fold even though the day-1 seer CO had been on record.
     """
     if not events:
         return None
@@ -720,7 +736,12 @@ def rebuild_public_state_from_events(
     co_claims: list[CoClaim] = []
     recent_ids: list[str] = []
     summary: list[tuple[int, bool]] = []
-    seen_co: set[tuple[int, str]] = set()
+    # Seed seen_co with prior-phase CO history so a re-asserted CO doesn't
+    # flag is_new_co=True. co_claims itself stays scoped to current-phase
+    # declarations so the per-phase fold's outward shape is unchanged —
+    # the arbiter overrides state.co_claims with the game-wide history
+    # right after the rebuild via extract_co_claims_from_events.
+    seen_co: set[tuple[int, str]] = set(prior_co_keys)
     pending_role_callouts: set[str] = set()
     speech_counts: dict[int, int] = {}
     last_addressed_seats: frozenset[int] = frozenset()
@@ -776,6 +797,9 @@ def rebuild_public_state_from_events(
             continue
         if is_new_co:
             pending_role_callouts.discard(role_key)
+            # See integrate_speech_event: info_request is consumed by any
+            # info-role CO, regardless of which specific role was asked.
+            pending_role_callouts.discard("info_request")
         if (event.speaker_seat, role_key) in seen_co:
             continue
         seen_co.add((event.speaker_seat, role_key))

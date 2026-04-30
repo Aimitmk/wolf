@@ -30,7 +30,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from wolfbot.domain.enums import CO_CLAIM_VALUES
+from wolfbot.domain.enums import CO_CLAIM_VALUES, ROLE_CALLOUT_VALUES
 from wolfbot.domain.ws_messages import (
     Heartbeat,
     SpeechEventPayload,
@@ -502,7 +502,7 @@ class VoiceIngestService:
         )
         role_callout = (
             result.role_callout
-            if result.role_callout in CO_CLAIM_VALUES
+            if result.role_callout in ROLE_CALLOUT_VALUES
             else None
         )
         if dump_enabled:

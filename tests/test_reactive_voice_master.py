@@ -369,6 +369,611 @@ async def test_speak_result_over_length_rejected(repo: SqliteRepo) -> None:
     assert rejection.failure_reason == "utterance_too_long"
 
 
+async def test_role_callout_pool_prioritizes_real_role_and_wolf_side(
+    repo: SqliteRepo,
+) -> None:
+    """When `pending_role_callouts` has 'seer' and no seer has CO'd yet,
+    the next dispatch must come from the **callout pool**: real seer +
+    every wolf-side seat (人狼/狂人) that hasn't CO'd as any info role.
+    Pure villagers must NOT be picked while the pool has eligible
+    candidates — this is the user's day-1 priority spec.
+    """
+    g = Game(
+        id="rv-callout-pool",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    # Seats: 1=ジョナス WEREWOLF, 2=ジナ VILLAGER, 3=ラキオ MADMAN,
+    # 4=コメット VILLAGER, 5=セツ SEER (real), 6=シゲミチ VILLAGER (caller).
+    seats = [
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+        Seat(seat_no=2, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+        Seat(seat_no=3, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=4, display_name="☄️コメット", discord_user_id=None,
+             is_llm=True, persona_key="comet"),
+        Seat(seat_no=5, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+        Seat(seat_no=6, display_name="👽シゲミチ", discord_user_id=None,
+             is_llm=True, persona_key="shigemichi"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in (
+        (1, Role.WEREWOLF), (2, Role.VILLAGER), (3, Role.MADMAN),
+        (4, Role.VILLAGER), (5, Role.SEER), (6, Role.VILLAGER),
+    ):
+        await repo.set_player_role(g.id, sn, role)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3, 4, 5, 6], created_at_ms=1,
+        )
+    )
+    # シゲミチ asks "誰か占い師?" — the analyzer would tag this as
+    # role_callout="seer". Insert a synthetic NPC speech event with the
+    # callout to simulate that.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=6, text="誰か占い師、名乗ってくれ！",
+            role_callout="seer",
+            created_at_ms=10,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[int, list[str]] = {n: [] for n in (1, 2, 3, 4, 5, 6)}
+    persona_by_seat = {
+        1: "jonas", 2: "gina", 3: "raqio",
+        4: "comet", 5: "setsu", 6: "shigemichi",
+    }
+    for seat_no, persona in persona_by_seat.items():
+        registry.register(
+            npc_id=f"npc_{persona}", discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[seat_no]),
+            now_ms=2000, persona_key=persona,
+        )
+        registry.assign(f"npc_{persona}", seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 3000,
+    )
+
+    # Dispatch — must go to one of the pool members:
+    # real seer (5) + wolves+madman (1, 3). Pure villagers (2, 4, 6) must
+    # NOT be picked.
+    await arb.try_dispatch_next(g.id)
+    pool_seats = {1, 3, 5}
+    non_pool_seats = {2, 4, 6}
+    picked = next((s for s, b in bufs.items() if any('"speak_request"' in m for m in b)), None)
+    assert picked is not None, "must dispatch someone"
+    assert picked in pool_seats, (
+        f"picked seat {picked} must be in callout pool {pool_seats} "
+        f"(real seer + wolves + madman, all uncpd). "
+        f"villagers {non_pool_seats} should NOT be picked while pool is non-empty."
+    )
+
+    _, reason = await _fetch_selection_reason(repo, g.id)
+    assert reason == "role_callout_pool"
+
+
+async def test_info_request_callout_expands_pool_to_all_info_roles(
+    repo: SqliteRepo,
+) -> None:
+    """A generic info-seeking speech (「誰か怪しい人?」「みんな意見聞かせて」)
+    is tagged role_callout='info_request' by the analyzer. The arbiter
+    must treat this like a callout for ALL info roles simultaneously:
+    pool = real seer + real medium + real knight + every uncpd wolf-side.
+    Pure villagers stay out of the pool."""
+    g = Game(
+        id="rv-info-request",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),  # WEREWOLF
+        Seat(seat_no=2, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),  # MEDIUM
+        Seat(seat_no=3, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),  # VILLAGER (caller)
+        Seat(seat_no=4, display_name="☄️コメット", discord_user_id=None,
+             is_llm=True, persona_key="comet"),  # VILLAGER
+        Seat(seat_no=5, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),  # MADMAN
+        Seat(seat_no=6, display_name="👽シゲミチ", discord_user_id=None,
+             is_llm=True, persona_key="shigemichi"),  # SEER
+        Seat(seat_no=7, display_name="🍎SQ", discord_user_id=None,
+             is_llm=True, persona_key="sq"),  # KNIGHT
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in (
+        (1, Role.WEREWOLF), (2, Role.MEDIUM), (3, Role.VILLAGER),
+        (4, Role.VILLAGER), (5, Role.MADMAN), (6, Role.SEER),
+        (7, Role.KNIGHT),
+    ):
+        await repo.set_player_role(g.id, sn, role)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3, 4, 5, 6, 7], created_at_ms=1,
+        )
+    )
+    # Caller (ラキオ, villager): 「誰か怪しい人挙げて」 → role_callout='info_request'
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=3, text="誰か怪しい人挙げてくれ！",
+            role_callout="info_request",
+            created_at_ms=10,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[int, list[str]] = {n: [] for n in range(1, 8)}
+    persona_by_seat = {
+        1: "jonas", 2: "gina", 3: "raqio", 4: "comet",
+        5: "setsu", 6: "shigemichi", 7: "sq",
+    }
+    for seat_no, persona in persona_by_seat.items():
+        registry.register(
+            npc_id=f"npc_{persona}", discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[seat_no]),
+            now_ms=2000, persona_key=persona,
+        )
+        registry.assign(f"npc_{persona}", seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 3000,
+    )
+    await arb.try_dispatch_next(g.id)
+
+    # Pool: seats 1 (wolf), 2 (medium), 5 (madman), 6 (seer), 7 (knight).
+    # Pure villagers 3, 4 must NOT be picked.
+    pool_seats = {1, 2, 5, 6, 7}
+    villager_seats = {3, 4}
+    picked = next(
+        (s for s, b in bufs.items() if any('"speak_request"' in m for m in b)),
+        None,
+    )
+    assert picked is not None, "must dispatch from the info_request pool"
+    assert picked in pool_seats, (
+        f"info_request pool must include real info roles + wolf-side. "
+        f"picked={picked} pool_seats={pool_seats}, villagers {villager_seats} "
+        f"should never be picked while pool is non-empty."
+    )
+    _, reason = await _fetch_selection_reason(repo, g.id)
+    assert reason == "role_callout_pool"
+
+
+async def test_info_request_consumed_when_any_info_role_cod(
+    repo: SqliteRepo,
+) -> None:
+    """info_request is a generic callout; once anyone CO's any info role
+    (seer/medium/knight), the priority pool steps down and normal
+    rotation resumes (villagers can be picked again)."""
+    g = Game(
+        id="rv-info-request-consume",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),  # SEER (will CO)
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),  # VILLAGER
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.SEER)
+    await repo.set_player_role(g.id, 2, Role.VILLAGER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2], created_at_ms=1,
+        )
+    )
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=2, text="誰か怪しい人挙げて",
+            role_callout="info_request",
+            created_at_ms=10,
+        )
+    )
+    # Real seer answers — co_declaration='seer'.
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="私が占い師だ",
+            co_declaration="seer",
+            created_at_ms=20,
+        )
+    )
+
+    # Now rebuild state — info_request must have been consumed by the
+    # seer CO. pending_role_callouts should NOT contain "info_request".
+    from wolfbot.services.discussion_service import (
+        rebuild_public_state_from_events,
+    )
+    events = await store.load_phase(g.id, phase_id)
+    state = rebuild_public_state_from_events(events)
+    assert state is not None
+    assert "info_request" not in state.pending_role_callouts, (
+        "any info-role CO must consume the info_request callout"
+    )
+
+
+async def test_role_callout_pool_excludes_seats_that_already_cod(
+    repo: SqliteRepo,
+) -> None:
+    """A wolf who already fake-CO'd as seer must be excluded from the pool
+    (no double-counting). The pool only contains uncpd info-role candidates.
+    """
+    g = Game(
+        id="rv-callout-pool-exclude",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),  # WEREWOLF — fake-CO'd already
+        Seat(seat_no=2, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),  # MADMAN — still in pool
+        Seat(seat_no=3, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),  # SEER (real) — still in pool
+        Seat(seat_no=4, display_name="☄️コメット", discord_user_id=None,
+             is_llm=True, persona_key="comet"),  # VILLAGER — never in pool
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in (
+        (1, Role.WEREWOLF), (2, Role.MADMAN), (3, Role.SEER), (4, Role.VILLAGER),
+    ):
+        await repo.set_player_role(g.id, sn, role)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3, 4], created_at_ms=1,
+        )
+    )
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    # Wolf already fake-CO'd as seer (consumes the original callout).
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="私が占い師だ",
+            co_declaration="seer",
+            created_at_ms=10,
+        )
+    )
+    # Then someone else asks "他に占い師は?" — re-fires the seer callout.
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=4, text="他に占い師の方は？",
+            role_callout="seer",
+            created_at_ms=20,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[int, list[str]] = {n: [] for n in (1, 2, 3, 4)}
+    persona_by_seat = {1: "jonas", 2: "gina", 3: "setsu", 4: "comet"}
+    for seat_no, persona in persona_by_seat.items():
+        registry.register(
+            npc_id=f"npc_{persona}", discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[seat_no]),
+            now_ms=2000, persona_key=persona,
+        )
+        registry.assign(f"npc_{persona}", seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 3000,
+    )
+
+    await arb.try_dispatch_next(g.id)
+
+    # Pool should contain seat 2 (madman, no CO) and seat 3 (real seer).
+    # Seat 1 already CO'd → excluded. Seat 4 villager → never in pool.
+    picked = next((s for s, b in bufs.items() if any('"speak_request"' in m for m in b)), None)
+    assert picked is not None
+    assert picked in {2, 3}, (
+        f"picked seat {picked} must be madman (2) or real seer (3); "
+        f"wolf (1) is already CO'd, villager (4) never in pool."
+    )
+
+
+async def test_role_callout_pool_asked_tracker_avoids_repick(
+    repo: SqliteRepo,
+) -> None:
+    """If a pool member declines, the asked-tracker must prevent the picker
+    from looping on the same seat. Subsequent dispatches go to other pool
+    members until everyone has had one chance."""
+    g = Game(
+        id="rv-callout-asked",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 2, Role.SEER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2], created_at_ms=1,
+        )
+    )
+    from wolfbot.services.discussion_service import make_npc_generated_event
+    # External callout — fired by no-one in the test (we add a fake event
+    # with a non-pool speaker_seat, but to avoid violating the alive-set
+    # we attribute it to seat 1 with role_callout but no co_declaration).
+    # Actually simpler: use seat 2 itself but set co_declaration=None;
+    # then the callout fires without consuming itself.
+    # We need a third seat to act as the speaker — let's add one as
+    # already-dead and not part of the pool, but the model requires
+    # alive=True for speakers to be valid... use a knight-like spectator.
+    # Workaround: use seat 1 (wolf) as the question asker. Their event
+    # only flags role_callout=seer; the wolf itself stays in pool because
+    # they didn't co_declare.
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="占い師は誰だ？",
+            role_callout="seer",
+            created_at_ms=10,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[int, list[str]] = {1: [], 2: []}
+    persona_by_seat = {1: "jonas", 2: "setsu"}
+    for seat_no, persona in persona_by_seat.items():
+        registry.register(
+            npc_id=f"npc_{persona}", discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[seat_no]),
+            now_ms=2000, persona_key=persona,
+        )
+        registry.assign(f"npc_{persona}", seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 3000,
+    )
+
+    # First dispatch from pool — pick is random between 1 and 2.
+    await arb.try_dispatch_next(g.id)
+    first_picked = next((s for s, b in bufs.items() if any('"speak_request"' in m for m in b)), None)
+    assert first_picked in {1, 2}
+
+    # The picked seat is now in `_callout_pool_asked`. Second dispatch
+    # MUST go to the other pool member (asked tracker excludes the first).
+    bufs[1].clear()
+    bufs[2].clear()
+    # Need to clear _pending so dispatch can proceed (no playback yet).
+    arb._pending.clear()
+    await arb.try_dispatch_next(g.id)
+    second_picked = next((s for s, b in bufs.items() if any('"speak_request"' in m for m in b)), None)
+    assert second_picked is not None
+    assert second_picked != first_picked, (
+        f"asked tracker must steer to a different pool member: "
+        f"first={first_picked}, second={second_picked}"
+    )
+
+
+async def test_speak_result_rejection_clears_pending_and_redispatches(
+    repo: SqliteRepo,
+) -> None:
+    """Regression for game eab1f9514a10 day 4: SQ finished, ユリコ was
+    dispatched but took 10s to respond (TTL=8s) → `expired_request`
+    rejection. The old rejection path neither popped `_pending` nor called
+    `try_dispatch_next`, so the day stalled silently for 2.5 minutes.
+
+    After the fix, every valid-pending rejection (expired/stale/declined/
+    too-long) must:
+      1. Pop _pending so the slot is freed.
+      2. Call try_dispatch_next so another candidate gets a chance.
+    """
+    g = Game(
+        id="rv-reject-redispatch",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🦋ラキオ", discord_user_id=None,
+             is_llm=True, persona_key="raqio"),
+        Seat(seat_no=2, display_name="🌙セツ", discord_user_id=None,
+             is_llm=True, persona_key="setsu"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    await repo.set_player_role(g.id, 2, Role.SEER)
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2], created_at_ms=1,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "setsu": []}
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    # Step 1: dispatch seat 1 (ラキオ). Use a permissive heartbeat_timeout
+    # since the test artificially advances `now` past the request TTL — in
+    # production the NPC sends heartbeats continuously so stale clock vs
+    # heartbeat doesn't happen.
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+        config=SpeakArbiterConfig(heartbeat_timeout_ms=60_000),
+    )
+    state = await arb.rebuild_public_state(
+        game_id=g.id, day=1, phase=Phase.DAY_DISCUSSION,
+    )
+    assert state is not None
+    req, _ = await arb.dispatch_request(
+        state=state, candidate_npc_id="npc_raqio", seat_no=1, game_id=g.id
+    )
+    assert req is not None
+    assert req.request_id in arb._pending
+
+    # Step 2: simulate now > expires_at_ms by advancing the arbiter's clock
+    # past the request's TTL.
+    arb._now_ms = lambda: req.expires_at_ms + 100  # type: ignore[method-assign]
+
+    bufs["raqio"].clear()
+    bufs["setsu"].clear()
+
+    # Step 3: SpeakResult arrives late → expired_request rejection.
+    result = SpeakResult(
+        ts=req.expires_at_ms + 100,
+        trace_id="t",
+        request_id=req.request_id,
+        npc_id="npc_raqio",
+        phase_id=phase_id,
+        status="accepted",
+        text="late response",
+    )
+    ok, reason = await arb.handle_speak_result(
+        result, current_phase_id=phase_id, day=1, phase=Phase.DAY_DISCUSSION,
+    )
+    assert not ok and reason == "expired_request"
+
+    # Verify _pending was popped (slot freed).
+    assert req.request_id not in arb._pending, (
+        "_pending must be popped on rejection so the slot is freed"
+    )
+
+    # Verify try_dispatch_next was called → another seat got a SpeakRequest.
+    # Without the fix, both bufs would be empty and the day would stall.
+    # (The picker may choose either seat 1 or seat 2 depending on RNG —
+    # both have count=0 and no addressed bias.)
+    new_request_msgs = [
+        m for m in (*bufs["raqio"], *bufs["setsu"]) if '"speak_request"' in m
+    ]
+    assert new_request_msgs, (
+        "rejection must trigger try_dispatch_next; another candidate must be picked. "
+        f"raqio buf: {bufs['raqio']!r}, setsu buf: {bufs['setsu']!r}"
+    )
+
+
 async def test_speak_result_stale_phase_rejected(repo: SqliteRepo) -> None:
     game, _ = await _seed_game(repo)
     registry = InMemoryNpcRegistry()
@@ -1370,6 +1975,129 @@ async def test_try_dispatch_next_diverts_around_pair_volley(
     assert reason == "low_info_diversion"
 
 
+async def test_repeated_co_across_days_does_not_block_volley_demotion(
+    repo: SqliteRepo,
+) -> None:
+    """Game a701a7531dca day 2 escape hatch: a seat that CO'd on day 1
+    re-asserts the same CO on day 2; the per-phase rebuild must NOT treat
+    the day-2 re-assertion as fresh info, otherwise the ジョナス↔ユリコ
+    ping-pong escapes the `_PAIR_VOLLEY_WINDOW` demotion gate.
+
+    Setup:
+      day 1 phase: seat 1 CO seer (recorded in game-wide history).
+      day 2 phase: seat 1 re-asserts CO seer, then 1↔9 alternate 4 times.
+    Expected: third party (seat 3) wins the next dispatch — `is_new_co`
+    must be False for the day-2 re-CO so all 4 window entries are low-info.
+    """
+    g = Game(
+        id="rv-cross-day-co",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=2,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+        Seat(seat_no=3, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+        Seat(seat_no=9, display_name="👑ユリコ", discord_user_id=None,
+             is_llm=True, persona_key="yuriko"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in ((1, Role.SEER), (3, Role.VILLAGER), (9, Role.VILLAGER)):
+        await repo.set_player_role(g.id, sn, role)
+
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    # Day 1 phase: seat 1 declares seer once.
+    day1_phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=day1_phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 3, 9], created_at_ms=1,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=day1_phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1, text="私が占い師だ",
+            co_declaration="seer",
+            created_at_ms=10,
+        )
+    )
+
+    # Day 2 phase: seat 3 opens (so silent_seats is empty), then 1<->9
+    # alternate. Seat 1's day-2 utterance carries co_declaration="seer"
+    # again — must be treated as a re-assertion (no fresh info).
+    day2_phase_id = make_phase_id(g.id, 2, Phase.DAY_DISCUSSION)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=day2_phase_id, day=2,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 3, 9], created_at_ms=1000,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id, phase_id=day2_phase_id, day=2,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=3, text="day2 開始発言",
+            created_at_ms=1005,
+        )
+    )
+    for ts, seat in ((1010, 9), (1020, 1), (1030, 9), (1040, 1)):
+        await store.insert(
+            make_npc_generated_event(
+                game_id=g.id, phase_id=day2_phase_id, day=2,
+                phase=Phase.DAY_DISCUSSION,
+                speaker_seat=seat, text=f"seat {seat} day2",
+                co_declaration="seer" if seat == 1 else None,
+                created_at_ms=ts,
+            )
+        )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"jonas": [], "gina": [], "yuriko": []}
+    for npc_id, persona, seat_no in (
+        ("npc_jonas", "jonas", 1),
+        ("npc_gina", "gina", 3),
+        ("npc_yuriko", "yuriko", 9),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=2000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=day2_phase_id)
+
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 3000,
+    )
+    await arb.try_dispatch_next(g.id)
+
+    assert bufs["gina"], "third party seat 3 must break the volley"
+    assert not bufs["jonas"], "seat 1 must be demoted (cross-phase re-CO is not info)"
+    assert not bufs["yuriko"], "seat 9 must be demoted"
+
+    seat_repr, reason = await _fetch_selection_reason(repo, g.id)
+    assert seat_repr == "3"
+    assert reason == "low_info_diversion"
+
+
 async def test_handle_tts_failed_pops_pending_before_returning(
     repo: SqliteRepo,
 ) -> None:
@@ -1815,6 +2543,147 @@ async def test_runoff_dispatch_marks_done_on_offline_npc(
     assert progress_seat1[4] is True, "offline candidate must be marked done"
     assert intros == [2]
     assert buf2, "online tied candidate must receive the SpeakRequest"
+
+
+async def test_runoff_watchdog_does_not_pop_pending_after_speak_result_accepted(
+    repo: SqliteRepo,
+) -> None:
+    """Regression for game d57c5d83ed4a day 2: ジョナス returned a SpeakResult
+    in 5s but her TTS playback ran 11.6s — longer than the 8s watchdog TTL.
+    The watchdog spuriously popped _pending while playback was still active.
+    Then `_on_playback_finished` lost the game_id lookup (it depends on
+    _pending) and never called try_dispatch_next, so シゲミチ (the other
+    tied candidate) was never dispatched and the runoff stalled forever.
+
+    Fix: watchdog must early-exit when the request is in _active_playback
+    (= SpeakResult was accepted; playback handler will re-dispatch on finish).
+    """
+    import asyncio
+
+    from wolfbot.domain.models import Vote
+
+    g = Game(
+        id="rv-runoff-watchdog",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    for seat in (
+        Seat(seat_no=1, display_name="🎩ジョナス", discord_user_id=None,
+             is_llm=True, persona_key="jonas"),
+        Seat(seat_no=6, display_name="👽シゲミチ", discord_user_id=None,
+             is_llm=True, persona_key="shigemichi"),
+        Seat(seat_no=2, display_name="🟣ジナ", discord_user_id=None,
+             is_llm=True, persona_key="gina"),
+    ):
+        await repo.insert_seat(g.id, seat)
+    for sn, role in ((1, Role.WEREWOLF), (6, Role.VILLAGER), (2, Role.KNIGHT)):
+        await repo.set_player_role(g.id, sn, role)
+    # Tie between 1 and 6.
+    for voter, target in ((1, 6), (6, 1), (2, None)):
+        await repo.insert_vote(
+            Vote(game_id=g.id, day=1, round=0, voter_seat=voter,
+                 target_seat=target, submitted_at=1)
+        )
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_RUNOFF_SPEECH)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id, phase_id=phase_id, day=1,
+            phase=Phase.DAY_RUNOFF_SPEECH,
+            alive_seat_nos=[1, 2, 6], created_at_ms=1,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"jonas": [], "shigemichi": []}
+    for npc_id, persona, seat_no in (
+        ("npc_jonas", "jonas", 1),
+        ("npc_shigemichi", "shigemichi", 6),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(), version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000, persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    intros: list[int] = []
+
+    async def _intro(seat: Seat) -> None:
+        intros.append(seat.seat_no)
+
+    # Very short TTL so the watchdog fires within the test window without
+    # asyncio.sleep(8). 50ms is enough to let _watchdog wake up.
+    cfg = SpeakArbiterConfig(request_ttl_ms=50)
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 2000,
+        runoff_announce=_intro,
+        config=cfg,
+    )
+
+    # Step 1: dispatch first candidate (ジョナス).
+    await arb.try_dispatch_next(g.id)
+    assert intros == [1]
+    assert bufs["jonas"], "first tied candidate must receive SpeakRequest"
+
+    req_msg = next(m for m in bufs["jonas"] if '"speak_request"' in m)
+    import json as _json
+    request_id = _json.loads(req_msg)["request_id"]
+
+    # Step 2: NPC accepts SpeakResult (adds to _active_playback, leaves
+    # _pending populated until playback finishes).
+    result = SpeakResult(
+        ts=2050, trace_id="t", request_id=request_id,
+        npc_id="npc_jonas", phase_id=phase_id,
+        status="accepted", text="諸君……ラキオの占い師主張など、笑止千万！",
+    )
+    ok, _ = await arb.handle_speak_result(
+        result, current_phase_id=phase_id, day=1, phase=Phase.DAY_RUNOFF_SPEECH,
+    )
+    assert ok
+    assert request_id in arb._active_playback
+    assert request_id in arb._pending  # not popped yet — playback ongoing
+
+    # Step 3: wait long enough for the watchdog to wake (TTL=50ms +
+    # scheduling slack). The fix's early-exit guard must prevent the
+    # watchdog from popping _pending.
+    await asyncio.sleep(0.2)
+
+    assert request_id in arb._pending, (
+        "watchdog must NOT pop _pending while SpeakResult is still in playback. "
+        "If this fails, _on_playback_finished will lose game_id lookup and "
+        "the runoff will stall (see game d57c5d83ed4a day 2)."
+    )
+
+    # Step 4: simulate playback completion. _pending lookup must still work,
+    # so the next candidate gets dispatched.
+    bufs["jonas"].clear()
+    bufs["shigemichi"].clear()
+    intros.clear()
+    await arb.handle_playback_finished(
+        PlaybackFinished(
+            ts=2200, trace_id="t", request_id=request_id,
+            npc_id="npc_jonas",
+            started_at_ms=2050, finished_at_ms=2200,
+        )
+    )
+    # In production this is wrapped by main.py's _on_playback_finished
+    # which calls try_dispatch_next — simulate that here.
+    await arb.try_dispatch_next(g.id)
+    assert intros == [6], "second tied candidate must be dispatched after first finishes"
+    assert bufs["shigemichi"], "席6 シゲミチ must receive the second SpeakRequest"
 
 
 def test_logic_packet_builder_includes_co_claims_in_summary() -> None:

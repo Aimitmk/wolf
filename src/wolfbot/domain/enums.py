@@ -132,6 +132,20 @@ CO_CLAIM_VALUES: tuple[str, ...] = tuple(
 )
 
 
+# Role-callout values are a SUPERSET of CO_CLAIM_VALUES — specifically
+# they include the synthetic ``"info_request"`` token that the speech
+# analyzers emit when a speaker generically asks for opinions / role
+# holders without naming a specific role. Examples (from real game logs):
+#   - "誰か怪しい人いる?"
+#   - "みんな意見を聞かせて"
+#   - "気になる人を挙げて"
+#   - "誰か役職持ち、出てきて"
+# The arbiter's role-callout priority pool treats ``"info_request"`` as
+# "all info roles + all wolf-side" so the village can extract early
+# information from a generic prompt, not only role-specific prompts.
+ROLE_CALLOUT_VALUES: tuple[str, ...] = (*CO_CLAIM_VALUES, "info_request")
+
+
 # Type alias for the wire/storage form. Cannot be derived from
 # ``CO_CLAIM_VALUES`` because :class:`Literal` requires static values
 # resolvable by the type-checker — ``Literal[*tuple]`` is not legal

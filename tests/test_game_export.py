@@ -424,3 +424,71 @@ async def test_export_game_raises_for_unknown_game(
             trace_dir=tmp_path,
             output_dir=tmp_path / "out",
         )
+
+
+async def test_export_game_filename_uses_timestamp_prefix(
+    fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
+) -> None:
+    """Filename is derived from the game's created_at (local time), not the
+    random game_id, so the viewer dir lists games sortably by play time."""
+    repo, db_path = fixture_repo
+    await _seed_minimal_game(repo)
+
+    out = await export_game(
+        game_id=GAME_ID,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=tmp_path / "out",
+    )
+
+    # Filename must NOT be {game_id}.json.
+    assert out.name != f"{GAME_ID}.json"
+    # Filename must be derived from created_at_ms = 1_700_000_000_000 →
+    # 2023-11-15 in UTC. Local-time conversion may shift the date but the
+    # YYYY-MM-DD_HH-MM-SS shape is invariant.
+    import re
+    assert re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:_\d+)?\.json$", out.name), (
+        f"unexpected filename shape: {out.name}"
+    )
+
+
+async def test_export_game_filename_disambiguates_same_second_collision(
+    fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
+) -> None:
+    """If a different game already wrote a same-second file, append `_<n>`.
+    Re-exporting the same game (same id) must overwrite, not collide."""
+    repo, db_path = fixture_repo
+    await _seed_minimal_game(repo)
+    out_dir = tmp_path / "out"
+
+    first = await export_game(
+        game_id=GAME_ID,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=out_dir,
+    )
+    # Re-export same game — should overwrite, not produce a `_1` sibling.
+    second = await export_game(
+        game_id=GAME_ID,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=out_dir,
+    )
+    assert first == second
+    assert len(list(out_dir.glob("*.json"))) == 1
+
+    # Now drop a fake same-second file from a different "game id" and
+    # re-export — should disambiguate with `_1` suffix.
+    other = out_dir / first.name
+    other.write_text(
+        json.dumps({"game": {"id": "different-game-id"}}),
+        encoding="utf-8",
+    )
+    third = await export_game(
+        game_id=GAME_ID,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=out_dir,
+    )
+    assert third != first
+    assert third.name.endswith("_1.json")
