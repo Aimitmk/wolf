@@ -191,6 +191,30 @@ async def test_migrate_adds_runoff_speech_done_to_old_llm_speech_table() -> None
         assert "runoff_speech_done" in after
 
 
+async def test_migrate_adds_execution_speech_done_to_old_llm_speech_table() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "old.db"
+        await _build_old_db(db_path, [_OLD_GAMES_DDL, _OLD_LLM_SPEECH_DDL])
+        before = await _columns_of(db_path, "llm_speech_counts")
+        assert "execution_speech_done" not in before
+
+        await migrate(db_path)
+
+        after = await _columns_of(db_path, "llm_speech_counts")
+        assert "execution_speech_done" in after
+
+
+async def test_migrate_execution_speech_done_idempotent() -> None:
+    """Re-running migrate on an already-upgraded DB must not raise / re-add."""
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "old.db"
+        await _build_old_db(db_path, [_OLD_GAMES_DDL, _OLD_LLM_SPEECH_DDL])
+        await migrate(db_path)
+        await migrate(db_path)  # second run must be a no-op
+        after = await _columns_of(db_path, "llm_speech_counts")
+        assert "execution_speech_done" in after  # column present, no duplicate raised
+
+
 async def test_migrate_is_idempotent() -> None:
     """Running migrate() twice on an old DB must not raise and must not duplicate columns."""
     with tempfile.TemporaryDirectory() as td:

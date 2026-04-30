@@ -53,6 +53,7 @@ GEMINI_VERTEX_PROJECT=
 GEMINI_VERTEX_LOCATION=global
 GEMINI_MODEL=gemini-3-flash-preview
 GEMINI_THINKING_LEVEL=high
+GEMINI_TEMPERATURE=1.0
 DISCORD_GUILD_ID=123456789012345678
 MAIN_TEXT_CHANNEL_ID=123456789012345678
 MAIN_VOICE_CHANNEL_ID=123456789012345678
@@ -68,7 +69,7 @@ LOG_LEVEL=INFO
 - `DISCORD_GUILD_ID`: bot を動かす Discord サーバーの ID を入れます。
 - `MAIN_TEXT_CHANNEL_ID`: 議論用に使うメイン text チャンネルの ID を入れます。
 - `MAIN_VOICE_CHANNEL_ID`: プレイヤーが会話するメイン VC の ID を入れます。
-- `XAI_MODEL`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_THINKING`, `DEEPSEEK_REASONING_EFFORT`, `GEMINI_VERTEX_LOCATION`, `GEMINI_MODEL`, `GEMINI_THINKING_LEVEL`, `WOLFBOT_DB_PATH`, `LOG_LEVEL` は最初は既定値のままで構いません。
+- `XAI_MODEL`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_THINKING`, `DEEPSEEK_REASONING_EFFORT`, `GEMINI_VERTEX_LOCATION`, `GEMINI_MODEL`, `GEMINI_THINKING_LEVEL`, `GEMINI_TEMPERATURE`, `WOLFBOT_DB_PATH`, `LOG_LEVEL` は最初は既定値のままで構いません。
 
 `DISCORD_GUILD_ID`、`MAIN_TEXT_CHANNEL_ID`、`MAIN_VOICE_CHANNEL_ID` にはチャンネル名や `#channel` のようなメンション文字列ではなく、数値の ID を設定してください。どの guild やチャンネルを使うか未定なら、先に手順 3 を済ませてから `.env` を埋めてください。`LLM_PROVIDER=gemini` で `GEMINI_VERTEX_PROJECT` の値がまだ決まっていない場合は、先に手順 4 を済ませてから埋めてください。
 
@@ -203,6 +204,7 @@ uv run wolfbot
 | `GEMINI_VERTEX_LOCATION` | 既定値: `global` | Vertex AI Gemini API の location |
 | `GEMINI_MODEL` | 既定値: `gemini-3-flash-preview` | 使用する Gemini モデル名 |
 | `GEMINI_THINKING_LEVEL` | 既定値: `high` | Gemini 3 Flash thinking level (`minimal` / `low` / `medium` / `high`) |
+| `GEMINI_TEMPERATURE` | 既定値: `1.0` (範囲 `0.0`〜`2.0`) | Vertex AI Gemini sampling temperature。Gemini 3 では 1.0 推奨。低くしすぎると looping や品質低下の原因になり得ます |
 | `DISCORD_GUILD_ID` | 必須 | `/wolf` コマンドを同期する guild の ID |
 | `MAIN_TEXT_CHANNEL_ID` | 必須 | 議論用に使う既存のメイン text チャンネル ID |
 | `MAIN_VOICE_CHANNEL_ID` | 必須 | 参加者が会話する既存のメイン VC の ID |

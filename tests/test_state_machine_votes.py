@@ -5,11 +5,13 @@ from __future__ import annotations
 from wolfbot.domain.enums import DeathCause, Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, Player, Seat, Vote
 from wolfbot.domain.state_machine import (
+    EXECUTION_SPEECH_DEADLINE,
     NIGHT_DURATION,
     RUNOFF_DURATION,
     RUNOFF_SPEECH_DEADLINE,
     plan_day_runoff_resolve,
     plan_day_vote_resolve,
+    plan_execution_speech_to_execution,
 )
 
 
@@ -395,3 +397,120 @@ def test_tied_vote_without_llm_candidate_goes_directly_to_runoff() -> None:
     t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
     assert t.next_phase is Phase.DAY_RUNOFF
     assert t.new_deadline_epoch == 1000 + RUNOFF_DURATION
+
+
+# -------------------------------- DAY_EXECUTION_SPEECH branching
+def test_day_vote_executed_llm_goes_to_execution_speech() -> None:
+    """LLM unique plurality parks in DAY_EXECUTION_SPEECH; player_updates empty."""
+    game = _game(day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _llm_seats(llm_seat_nos={7})
+    votes = [_v(i, 7) for i in range(1, 6)] + [_v(i, None) for i in range(6, 10)]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
+    assert t.next_phase is Phase.DAY_EXECUTION_SPEECH
+    assert t.new_deadline_epoch == 1000 + EXECUTION_SPEECH_DEADLINE
+    # Don't pre-flip alive=False; the seat must remain alive throughout the
+    # last-words turn so private logs / vote ability stay coherent.
+    assert t.player_updates == ()
+    # Entry log carries the tally; formal EXECUTION log later runs with
+    # tally_suffix="" (verified by test_execution_log_has_no_tally_after_speech_path).
+    entry = next(log for log in t.public_logs if log.kind == "EXECUTION_PENDING")
+    assert "投票の結果、" in entry.text
+    assert "P7" in entry.text
+    assert "🗳 投票結果:" in entry.text
+
+
+def test_day_vote_executed_human_executes_immediately() -> None:
+    """Human unique plurality keeps the legacy direct-execution path."""
+    game = _game(day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _llm_seats(llm_seat_nos={6, 8, 9})  # seat 7 is human
+    votes = [_v(i, 7) for i in range(1, 6)] + [_v(i, None) for i in range(6, 10)]
+    t = plan_day_vote_resolve(game, players, seats, votes, force_skip=False, now_epoch=1000)
+    assert t.next_phase is Phase.NIGHT
+    assert any(log.kind == "EXECUTION" for log in t.public_logs)
+    assert t.newly_dead_seats == (7,)
+
+
+def test_day_runoff_executed_llm_goes_to_execution_speech() -> None:
+    """Runoff resolution with LLM executed routes through DAY_EXECUTION_SPEECH."""
+    game = _game(phase=Phase.DAY_RUNOFF, day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _llm_seats(llm_seat_nos={7})
+    tied = (7, 8)
+    # 4 vote 7, 3 vote 8, 2 abstain → seat 7 wins runoff
+    votes = (
+        [_v(i, 7, round_=1) for i in range(1, 5)]
+        + [_v(i, 8, round_=1) for i in range(5, 8)]
+        + [_v(i, None, round_=1) for i in range(8, 10)]
+    )
+    t = plan_day_runoff_resolve(game, players, seats, votes, tied, force_skip=False, now_epoch=2000)
+    assert t.next_phase is Phase.DAY_EXECUTION_SPEECH
+    assert t.new_deadline_epoch == 2000 + EXECUTION_SPEECH_DEADLINE
+    entry = next(log for log in t.public_logs if log.kind == "EXECUTION_PENDING")
+    assert "決選投票の結果、" in entry.text
+    assert t.player_updates == ()
+
+
+def test_execution_log_has_no_tally_after_speech_path() -> None:
+    """plan_execution_speech_to_execution emits EXECUTION without the vote tally —
+    the tally already rode on the EXECUTION_PENDING entry log."""
+    game = _game(phase=Phase.DAY_EXECUTION_SPEECH, day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _llm_seats(llm_seat_nos={7})
+    seats_by_no = {s.seat_no: s for s in seats}
+    t = plan_execution_speech_to_execution(
+        game, players, seats_by_no, executed_seat=7, now_epoch=3000, clear_force=True
+    )
+    exec_log = next(log for log in t.public_logs if log.kind == "EXECUTION")
+    assert "🗳" not in exec_log.text
+    assert "P7 が処刑されました。" in exec_log.text
+    assert t.newly_dead_seats == (7,)
+
+
+def test_plan_execution_speech_to_execution_advances_to_night() -> None:
+    """Routine speech-done → NIGHT path keeps the existing _apply_execution behavior."""
+    game = _game(phase=Phase.DAY_EXECUTION_SPEECH, day=1)
+    players = _players(STANDARD_ROLES)
+    seats = _llm_seats(llm_seat_nos={7})
+    seats_by_no = {s.seat_no: s for s in seats}
+    t = plan_execution_speech_to_execution(
+        game, players, seats_by_no, executed_seat=7, now_epoch=3000, clear_force=True
+    )
+    assert t.next_phase is Phase.NIGHT
+    assert t.new_deadline_epoch == 3000 + NIGHT_DURATION
+
+
+def test_plan_execution_speech_to_execution_emits_role_reveal_on_victory() -> None:
+    """When the executed LLM is the last wolf, the speech-done resolver triggers
+    GAME_OVER + ROLE_REVEAL via the shared `_apply_execution` path."""
+    # Players: only one wolf alive (seat 1); rest are villagers
+    roles = [Role.WEREWOLF] + [Role.VILLAGER] * 8
+    players = _players(roles)
+    # Both wolves dead except seat 1 (the wolf about to be executed)
+    # Need wolves outnumber check: with seat 1 dead, 0 wolves vs 8 villagers → village wins.
+    game = _game(phase=Phase.DAY_EXECUTION_SPEECH, day=2)
+    seats = _llm_seats(llm_seat_nos={1})
+    seats_by_no = {s.seat_no: s for s in seats}
+    t = plan_execution_speech_to_execution(
+        game, players, seats_by_no, executed_seat=1, now_epoch=3000, clear_force=True
+    )
+    assert t.next_phase is Phase.GAME_OVER
+    assert t.victory is not None
+    assert any(log.kind == "ROLE_REVEAL" for log in t.public_logs)
+
+
+def test_execution_speech_fallback_for_dead_seat_yields_no_execution() -> None:
+    """If recompute somehow returns a dead/missing seat, _apply_execution's
+    alive-guard collapses the transition to NO_EXECUTION → NIGHT."""
+    game = _game(phase=Phase.DAY_EXECUTION_SPEECH, day=1)
+    # seat 7 marked already dead
+    players = _players(STANDARD_ROLES, alive=[True] * 6 + [False] + [True] * 2)
+    seats = _llm_seats(llm_seat_nos={7})
+    seats_by_no = {s.seat_no: s for s in seats}
+    t = plan_execution_speech_to_execution(
+        game, players, seats_by_no, executed_seat=7, now_epoch=3000, clear_force=True
+    )
+    assert t.next_phase is Phase.NIGHT
+    assert any(log.kind == "NO_EXECUTION" for log in t.public_logs)
+    assert t.newly_dead_seats == ()

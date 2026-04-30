@@ -47,6 +47,7 @@ from wolfbot.llm.prompt_builder import (
     build_system_prompt,
     build_user_context,
     task_daytime_speech,
+    task_last_words,
     task_night_action,
     task_vote,
     task_wolf_chat,
@@ -61,8 +62,22 @@ if TYPE_CHECKING:  # avoid importing heavy modules unless needed
 
 # Sleep ranges between consecutive LLM speeches inside DAY_DISCUSSION rounds.
 # Sequential per round so each LLM reads the previous one's contribution.
-DISCUSSION_INTRA_ROUND_DELAY: tuple[float, float] = (3.0, 10.0)
-DISCUSSION_INTER_ROUND_DELAY: tuple[float, float] = (5.0, 15.0)
+DISCUSSION_INTRA_ROUND_DELAY: tuple[float, float] = (
+    1.0,
+    2.0,
+)  # 5-10がdefaultだったが、実行テスト目的で短くしている
+DISCUSSION_INTER_ROUND_DELAY: tuple[float, float] = (
+    1.0,
+    2.0,
+)  # 5-10がdefaultだったが、実行テスト目的で短くしている
+
+# Sleep range between consecutive LLM runoff candidate speeches.
+# Mirrors DISCUSSION_INTRA_ROUND_DELAY for the runoff phase, which is also a
+# sequential per-seat loop (each candidate reads previous candidates' logs).
+RUNOFF_INTER_SPEECH_DELAY: tuple[float, float] = (
+    1.0,
+    2.0,
+)  # 5-10がdefaultだったが、実行テスト目的で短くしている
 
 
 class MessagePoster(Protocol):
@@ -259,11 +274,13 @@ class GeminiLLMActionDecider:
         client: object,
         model: str,
         thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
+        temperature: float = 1.0,
         timeout: float = 30.0,
     ) -> None:
         self.client = client
         self.model = model
         self.thinking_level = thinking_level
+        self.temperature = temperature
         self.timeout = timeout
 
     @retry(
@@ -282,6 +299,7 @@ class GeminiLLMActionDecider:
                 system_instruction=system_prompt,
                 response_mime_type="application/json",
                 response_json_schema=RESPONSE_SCHEMA["schema"],
+                temperature=self.temperature,
                 thinking_config=types.ThinkingConfig(
                     # SDK normalizes the string into ThinkingLevel at runtime;
                     # the type annotation is enum-only, so silence the check.
@@ -934,6 +952,10 @@ class LLMAdapter:
                 )
             finally:
                 await self.repo.mark_llm_runoff_speech_done(game.id, game.day_number, llm.seat_no)
+            try:
+                await asyncio.sleep(self.rng.uniform(*RUNOFF_INTER_SPEECH_DELAY))
+            except asyncio.CancelledError:
+                return
         try:
             gs = self._gs_slot.get("gs")
             if gs is not None:
@@ -978,6 +1000,140 @@ class LLMAdapter:
             )
         except Exception:
             log.exception("post_public for LLM runoff speech failed seat=%s", player.seat_no)
+            return
+        posted_at = self._clock()
+        try:
+            await self.repo.insert_log_public(
+                LogEntry(
+                    game_id=fresh.id,
+                    day=fresh.day_number,
+                    phase=fresh.phase,
+                    kind="PLAYER_SPEECH",
+                    actor_seat=player.seat_no,
+                    visibility="PUBLIC",
+                    text=message,
+                    created_at=posted_at,
+                )
+            )
+        except Exception:
+            log.exception("PLAYER_SPEECH log insert failed for seat %s", player.seat_no)
+
+    # ----------------------------------------------------- execution speech
+    async def submit_llm_execution_speech(
+        self,
+        game: Game,
+        players: Sequence[Player],
+        seats: Sequence[Seat],
+        executed_seat: int,
+    ) -> None:
+        """Schedule a single background task for the condemned LLM's last words.
+
+        Unlike `submit_llm_runoff_candidate_speeches`, only one seat speaks here
+        (the seat about to be executed). The task marks `execution_speech_done=1`
+        in `finally` regardless of outcome (success / skip / empty / decider
+        exception) so the engine can advance to formal execution. Recovery
+        and grace re-dispatches see the flag via `load_llm_execution_speech_done`.
+        """
+        seats_by_no = {s.seat_no: s for s in seats}
+        seat = seats_by_no.get(executed_seat)
+        if seat is None or not seat.is_llm:
+            return
+        executed_player = next((p for p in players if p.seat_no == executed_seat and p.alive), None)
+        if executed_player is None:
+            return
+        task = asyncio.create_task(
+            self._run_execution_speech(game, executed_player, seat, seats),
+            name=f"llm-execution-speech-{game.id}-d{game.day_number}-s{executed_seat}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_execution_speech(
+        self,
+        game: Game,
+        executed_player: Player,
+        seat: Seat,
+        seats: Sequence[Seat],
+    ) -> None:
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.ended_at is not None
+            or fresh.phase is not Phase.DAY_EXECUTION_SPEECH
+            or fresh.day_number != game.day_number
+        ):
+            return
+        if seat.persona_key is None:
+            await self.repo.mark_llm_execution_speech_done(
+                game.id, game.day_number, executed_player.seat_no
+            )
+            self._wake_after_execution_speech(game.id)
+            return
+        if await self.repo.load_llm_execution_speech_done(
+            game.id, game.day_number, executed_player.seat_no
+        ):
+            return  # already done — recovery overlap
+        try:
+            await self._do_one_execution_speech(
+                game=fresh, player=executed_player, seat=seat, seats=seats
+            )
+        except Exception:
+            log.exception(
+                "execution speech failed game=%s seat=%s",
+                game.id,
+                executed_player.seat_no,
+            )
+        finally:
+            await self.repo.mark_llm_execution_speech_done(
+                game.id, game.day_number, executed_player.seat_no
+            )
+        self._wake_after_execution_speech(game.id)
+
+    def _wake_after_execution_speech(self, game_id: str) -> None:
+        try:
+            gs = self._gs_slot.get("gs")
+            if gs is not None:
+                gs.wake.wake(game_id)
+        except Exception:
+            log.exception("wake after execution speech failed for %s", game_id)
+
+    async def _do_one_execution_speech(
+        self,
+        *,
+        game: Game,
+        player: Player,
+        seat: Seat,
+        seats: Sequence[Seat],
+    ) -> None:
+        players = await self.repo.load_players(game.id)
+        action = await self._ask(
+            game,
+            player,
+            seat,
+            players,
+            seats,
+            task_text=task_last_words(game.day_number, role=player.role),
+        )
+        if action.intent != "speak":
+            return
+        message = action.public_message.strip()
+        if not message:
+            return
+        fresh = await self.repo.load_game(game.id)
+        if (
+            fresh is None
+            or fresh.phase is not Phase.DAY_EXECUTION_SPEECH
+            or fresh.day_number != game.day_number
+        ):
+            return
+        if self.message_poster is None:
+            return
+        try:
+            await self.message_poster.post_public(
+                fresh, f"**{seat.display_name}**: {message}", kind="LLM_SPEAK"
+            )
+        except Exception:
+            log.exception("post_public for LLM execution speech failed seat=%s", player.seat_no)
             return
         posted_at = self._clock()
         try:
@@ -1133,6 +1289,7 @@ def make_gemini_decider(
     location: str,
     model: str,
     thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
+    temperature: float = 1.0,
     timeout: float = 30.0,
 ) -> GeminiLLMActionDecider:
     """Build a Vertex AI Gemini-backed decider. Imports google-genai lazily.
@@ -1155,6 +1312,7 @@ def make_gemini_decider(
         client=client,
         model=model,
         thinking_level=thinking_level,
+        temperature=temperature,
         timeout=timeout,
     )
 
@@ -1189,6 +1347,7 @@ def make_llm_decider(settings: Settings, timeout: float = 30.0) -> LLMActionDeci
             location=settings.GEMINI_VERTEX_LOCATION,
             model=settings.GEMINI_MODEL,
             thinking_level=settings.GEMINI_THINKING_LEVEL,
+            temperature=settings.GEMINI_TEMPERATURE,
             timeout=timeout,
         )
     raise ValueError(f"unknown LLM_PROVIDER: {settings.LLM_PROVIDER!r}")

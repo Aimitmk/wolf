@@ -390,3 +390,42 @@ async def test_load_llm_speech_progress_default_when_missing(
     g = await _base_game(repo, seats)
     progress = await repo.load_llm_speech_progress(g.id, day=2, seat_no=9)
     assert progress == (0, False, None, 0, False)
+
+
+async def test_mark_and_load_llm_execution_speech_done(repo: SqliteRepo, seats: list[Seat]) -> None:
+    """Execution-speech progress mark/load round-trip; idempotent UPSERT."""
+    g = await _base_game(repo, seats)
+    assert await repo.load_llm_execution_speech_done(g.id, day=1, seat_no=7) is False
+    await repo.mark_llm_execution_speech_done(g.id, day=1, seat_no=7)
+    assert await repo.load_llm_execution_speech_done(g.id, day=1, seat_no=7) is True
+    # Idempotent: second call doesn't error and stays True.
+    await repo.mark_llm_execution_speech_done(g.id, day=1, seat_no=7)
+    assert await repo.load_llm_execution_speech_done(g.id, day=1, seat_no=7) is True
+
+
+async def test_load_llm_execution_speech_done_independence_across_keys(
+    repo: SqliteRepo, seats: list[Seat]
+) -> None:
+    """Different (game, day, seat) keys are independent."""
+    g = await _base_game(repo, seats)
+    await repo.mark_llm_execution_speech_done(g.id, day=1, seat_no=7)
+    # Same game / day, different seat
+    assert await repo.load_llm_execution_speech_done(g.id, day=1, seat_no=8) is False
+    # Same game / seat, different day
+    assert await repo.load_llm_execution_speech_done(g.id, day=2, seat_no=7) is False
+
+
+async def test_execution_speech_does_not_disturb_other_progress(
+    repo: SqliteRepo, seats: list[Seat]
+) -> None:
+    """Marking execution_speech_done leaves the existing 5-tuple shape untouched."""
+    g = await _base_game(repo, seats)
+    # Prime existing progress fields
+    await repo.increment_llm_discussion_round(g.id, day=1, seat_no=7)
+    await repo.mark_llm_runoff_speech_done(g.id, day=1, seat_no=7)
+    progress_before = await repo.load_llm_speech_progress(g.id, day=1, seat_no=7)
+    # Mark execution_speech_done — separate column / loader.
+    await repo.mark_llm_execution_speech_done(g.id, day=1, seat_no=7)
+    progress_after = await repo.load_llm_speech_progress(g.id, day=1, seat_no=7)
+    assert progress_after == progress_before
+    assert await repo.load_llm_execution_speech_done(g.id, day=1, seat_no=7) is True

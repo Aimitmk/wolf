@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     GEMINI_VERTEX_LOCATION: str = "global"
     GEMINI_MODEL: str = "gemini-3-flash-preview"
     GEMINI_THINKING_LEVEL: Literal["minimal", "low", "medium", "high"] = "high"
+    GEMINI_TEMPERATURE: float = Field(default=1.0, ge=0.0, le=2.0)
 
     @model_validator(mode="after")
     def _require_provider_key(self) -> Settings:
@@ -44,7 +45,5 @@ class Settings(BaseSettings):
         if self.LLM_PROVIDER == "deepseek" and self.DEEPSEEK_API_KEY is None:
             raise ValueError("LLM_PROVIDER=deepseek requires DEEPSEEK_API_KEY to be set")
         if self.LLM_PROVIDER == "gemini" and not self.GEMINI_VERTEX_PROJECT:
-            raise ValueError(
-                "LLM_PROVIDER=gemini requires GEMINI_VERTEX_PROJECT to be set"
-            )
+            raise ValueError("LLM_PROVIDER=gemini requires GEMINI_VERTEX_PROJECT to be set")
         return self

@@ -1152,17 +1152,11 @@ async def test_ask_system_prompt_contains_co_overflow_rule_for_any_role(
         system_prompt = await _capture_ask_system_prompt(repo, role)
         assert "対抗 CO 超過分" in system_prompt, f"{role.name} missed 対抗 CO 超過分"
         assert "CO 数 - 1" in system_prompt, f"{role.name} missed CO 数 - 1"
-        assert "超過分合計が 3 に達した場合" in system_prompt, (
-            f"{role.name} missed sum-3 trigger"
-        )
-        assert "村陣営の確白級" in system_prompt, (
-            f"{role.name} missed non-CO 確白級 consequence"
-        )
+        assert "超過分合計が 3 に達した場合" in system_prompt, f"{role.name} missed sum-3 trigger"
+        assert "村陣営の確白級" in system_prompt, f"{role.name} missed non-CO 確白級 consequence"
         assert "0〜2" in system_prompt, f"{role.name} missed sum 0〜2 caveat"
         assert "4 以上" in system_prompt, f"{role.name} missed sum 4+ contradiction"
-        assert "配役上の消去法" in system_prompt, (
-            f"{role.name} missed 配役上の消去法 framing"
-        )
+        assert "配役上の消去法" in system_prompt, f"{role.name} missed 配役上の消去法 framing"
 
 
 async def test_ask_system_prompt_contains_co_overflow_examples_for_any_role(
@@ -1182,6 +1176,36 @@ async def test_ask_system_prompt_contains_co_overflow_examples_for_any_role(
         assert "2-2-2" in system_prompt, f"{role.name} missed 2-2-2 example"
         assert "3-1-1" in system_prompt, f"{role.name} missed 3-1-1 example"
         assert "4-1-1" in system_prompt, f"{role.name} missed 4-1-1 example"
+
+
+async def test_ask_system_prompt_contains_rope_margin_rules_for_any_role(
+    repo: SqliteRepo,
+) -> None:
+    """残り縄・推定残り人狼数・吊り余裕 の共通勝ち筋ルールは、共通ルール経由で
+    全 role の system prompt に届く。9 人村は残り縄のうち推定残り人狼数ぶんを
+    投票で吊り切る必要があり、吊り余裕 = 残り縄 - 推定残り人狼数 が小さい
+    ほど非狼濃厚位置・確白級・狂人っぽい位置を吊らない、という方針を全席に
+    渡す。残り人狼数自体は秘匿情報として bot から渡されない原則も維持する。"""
+    for role in (
+        Role.VILLAGER,
+        Role.SEER,
+        Role.MEDIUM,
+        Role.KNIGHT,
+        Role.WEREWOLF,
+        Role.MADMAN,
+    ):
+        system_prompt = await _capture_ask_system_prompt(repo, role)
+        assert "吊り余裕" in system_prompt, f"{role.name} missed 吊り余裕"
+        assert "残り縄 - 推定残り人狼数" in system_prompt, f"{role.name} missed margin formula"
+        assert "推定残り人狼数" in system_prompt, f"{role.name} missed 推定残り人狼数"
+        assert "投票で吊り切る" in system_prompt, f"{role.name} missed 投票で吊り切る"
+        assert "吊り余裕が 0 以下" in system_prompt, f"{role.name} missed zero-margin rule"
+        assert "非狼濃厚位置" in system_prompt, f"{role.name} missed 非狼濃厚位置"
+        assert "敗着になり得る" in system_prompt, f"{role.name} missed 敗着"
+        # Estimation source is public info, not a bot-provided secret.
+        assert "秘匿情報として教える値ではなく" in system_prompt, (
+            f"{role.name} missed public-info estimation framing"
+        )
 
 
 async def test_ask_system_prompt_villager_strategy_includes_co_overflow_action(
@@ -1255,8 +1279,7 @@ async def test_ask_system_prompt_madman_co_overflow_addition_keeps_partner_isola
     assert "公開情報の各 CO 数と残り縄から判断する" in system_prompt
     # Wolf-coordination 語彙が漏れていないこと。
     assert not re.search(r"相方(?!候補)", system_prompt), (
-        "bare '相方' (actor mode) leaked into madman system prompt via "
-        "CO-overflow addition"
+        "bare '相方' (actor mode) leaked into madman system prompt via CO-overflow addition"
     )
     assert "襲撃先を揃える" not in system_prompt
     # 既存 prohibition 文言が残っていること。
@@ -1371,6 +1394,31 @@ async def test_ask_system_prompt_madman_excludes_wolf_positions_assumption(
     assert "人狼位置を知っている前提で話してはならない" in system_prompt
     assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
+
+
+async def test_ask_system_prompt_wolf_seat_includes_sacrifice_value(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: a werewolf LLM's system prompt must carry the new 1-for-1
+    trade-off (刺し違え) tactical principle and the impulsive-collapse
+    rejection via `_build_strategy_block(Role.WEREWOLF)`."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "1 人刺し違えるだけでも人狼陣営の仕事を果たしたことになる" in system_prompt
+    assert "無計画な破綻" in system_prompt
+
+
+async def test_ask_system_prompt_madman_includes_hanging_value(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: a madman LLM's system prompt must carry the hanging-as-job
+    principle and the impulsive-self-hanging rejection. The pre-existing
+    wolf-positions-unknown prohibition must remain co-present so the new
+    tactic stays inside the madman knowledge boundary."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "自分が吊られるだけでも人狼陣営の仕事を果たしたことになる" in system_prompt
+    assert "無意味な自吊り" in system_prompt
+    # Boundary preserved alongside the new content.
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt
 
 
 async def test_ask_system_prompt_wolf_seat_includes_attack_evaluation_axes(
@@ -1799,7 +1847,8 @@ async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRe
     assert "占い師騙り" in system_prompt
     assert "霊媒師騙り" in system_prompt
     assert "騎士騙り" in system_prompt
-    assert "6 人以上" in system_prompt
+    assert "5 人以上" in system_prompt
+    assert "占い師と霊媒師の CO" in system_prompt
     assert "騙りすぎ" in system_prompt
     # Conditional framing — day-1 seer fake is no longer unconditional.
     assert "無条件" in system_prompt
@@ -1825,7 +1874,8 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "占い師騙り" in system_prompt
     assert "霊媒師騙り" in system_prompt
     assert "騎士騙り" in system_prompt
-    assert "6 人以上" in system_prompt
+    assert "5 人以上" in system_prompt
+    assert "占い師と霊媒師の CO" in system_prompt
     assert "騙りすぎ" in system_prompt
     # Wolf-coordination vocabulary must not appear for the madman. Bare 相方
     # (actor mode, partner-known) absent; 相方候補 (public-log inference) allowed.
@@ -1844,6 +1894,140 @@ async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coor
     assert "初日に黒を出す主張" in system_prompt
     assert "黒出しは day 2 以降" in system_prompt
     assert "誤爆リスクは day 2 以降の黒出しでも常に残る" in system_prompt
+
+
+async def test_ask_system_prompt_wolf_seat_day1_round_conditional_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """The werewolf system prompt must carry the day-1 round-1 medium-fake
+    suppression and the day-1 round-2 conditional medium-fake (2-0 self-grey
+    natural CO, or 2-1 counter-medium when forced)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    # Day-1 round-1 suppression.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in system_prompt
+    # Round-2 conditional anchors.
+    assert "2 巡目" in system_prompt
+    assert "2-0" in system_prompt
+    assert "占い師 CO 2 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補" in system_prompt
+    assert "自然に出た霊媒 CO" in system_prompt
+    assert "対抗霊媒" in system_prompt
+    assert "出ざるを得ない" in system_prompt
+
+
+async def test_ask_system_prompt_madman_day1_round_conditional_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """The madman system prompt must carry the same day-1 round-1 medium-fake
+    suppression and day-1 round-2 conditional medium-fake (2-0 self-grey
+    natural CO, or 2-1 counter-medium) — plus the wolf-position-unawareness
+    caveat. Wolf-coordination vocabulary must remain absent."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    # Day-1 round-1 suppression.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in system_prompt
+    # Round-2 conditional anchors.
+    assert "2 巡目" in system_prompt
+    assert "2-0" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補" in system_prompt
+    assert "自然に出た霊媒 CO" in system_prompt
+    assert "対抗霊媒" in system_prompt
+    assert "出ざるを得ない" in system_prompt
+    # Madman-only wolf-position-unawareness caveat.
+    assert "本物の狼位置を知らない" in system_prompt
+    # Wolf-coordination leak guard preserved.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+
+
+# -------- 2026-04-29: 3-0 (3 seer COs + 0 medium COs) → no medium fake-CO
+# End-to-end mirrors of the unit-level 3-0 prohibition tests. Confirm the
+# directive reaches the LLM via build_system_prompt for wolf and madman seats,
+# stays out of non-wolf seats, and that the day-1 round-2 task block carries
+# the prohibition when `_do_one_discussion_speech(discussion_round=2)` runs.
+
+
+async def test_ask_system_prompt_wolf_seat_includes_3_0_no_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: a werewolf LLM's system prompt must carry the 3-0 medium-
+    fake prohibition via `_ROLE_STRATEGIES[Role.WEREWOLF]`."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "3-0" in system_prompt
+    assert "占い師 CO 3 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "絶対に霊媒師 CO しない" in system_prompt
+    assert "真霊媒師の対抗 CO" in system_prompt
+    assert "3-2" in system_prompt
+    assert "超過分合計" in system_prompt
+    assert "確白級" in system_prompt
+    assert "処刑候補が CO 群へ集中" in system_prompt
+    # Already-CO'd-seer continuation must be explicitly allowed.
+    assert "既に自分が占い師 CO 中なら" in system_prompt
+
+
+async def test_ask_system_prompt_madman_includes_3_0_no_medium_fake(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end madman analog with the wolf-position-unawareness anchor.
+    Wolf-coordination vocabulary must stay absent (existing leak guard)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "3-0" in system_prompt
+    assert "占い師 CO 3 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "絶対に霊媒師 CO しない" in system_prompt
+    assert "3-2" in system_prompt
+    assert "超過分合計" in system_prompt
+    assert "確白級" in system_prompt
+    assert "処刑候補が CO 群へ集中" in system_prompt
+    assert "本物の人狼位置を知らない" in system_prompt
+    # Already-CO'd-seer continuation explicitly allowed.
+    assert "既に自分が占い師 CO 中なら" in system_prompt
+    # Leak guard.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
+async def test_ask_system_prompt_non_wolf_excludes_3_0_directive(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """The 3-0 wolf-side prohibition must not bleed into non-wolf/non-madman
+    seats' system prompts. Mirrors the unit-level cross-leak guard."""
+    system_prompt = await _capture_ask_system_prompt(repo, role)
+    assert "絶対に霊媒師 CO しない" not in system_prompt, (
+        f"wolf-side 3-0 prohibition leaked into {role.name}"
+    )
+
+
+async def test_ask_system_prompt_medium_includes_day1_co_timing(
+    repo: SqliteRepo,
+) -> None:
+    """The true medium's system prompt must carry the day-1 round-1 silence
+    and the day-1 round-2 grey-CO / counter-CO directives. day-1 medium CO
+    must explicitly carry no execution result. Wolf-coordination vocabulary
+    must remain absent from the medium seat."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
+    # Round-1 silence.
+    assert "day 1 の 1 巡目では霊媒 CO しない" in system_prompt
+    # Round-2 grey CO anchors.
+    assert "2 巡目" in system_prompt
+    assert "2-0" in system_prompt
+    assert "占い師 CO 2 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補を狭め" in system_prompt
+    # Round-2 counter-CO on fake medium.
+    assert "霊媒騙りが出た場合" in system_prompt
+    assert "当然対抗 CO" in system_prompt
+    # Day-1 has no execution → no medium result.
+    assert "まだ処刑がないため霊媒結果はない" in system_prompt
+    # Wolf-coordination leak guard.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
 
 
 async def test_ask_system_prompt_seer_includes_night_targeting_axes(
@@ -1884,6 +2068,118 @@ async def test_ask_system_prompt_seer_divine_task_includes_targeting_checklist(
     assert "騎士候補度" not in task_text
     assert "翌日の説明しやすさ" not in task_text
     assert "騎士探し" not in task_text
+
+
+# ----------------------------- 2026-04-28: 占い無駄削減 / 過剰騙り抑止 / 騎士 day 別 CO
+# End-to-end mirrors of the unit-level prompt-builder tests for the same three
+# additions: seer + SEER_DIVINE no-waste, wolf/madman 3-seer-CO no-extra-fake,
+# and knight day-1/2/3 conditional CO. These exercise build_system_prompt via
+# `_capture_ask_system_prompt` so the production path is asserted, not just the
+# pure helpers.
+
+
+async def test_ask_system_prompt_seer_avoids_wasting_on_confirmed_white(
+    repo: SqliteRepo,
+) -> None:
+    """The seer's system prompt must carry the no-waste-divination guidance:
+    skip 確定白 / 非 CO 確白級 / progression-role-eligible positions, while
+    keeping the 白判定 vs 確定白 distinction (狂人 reads white too)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
+    assert "確定白" in system_prompt
+    assert "非 CO 確白級" in system_prompt
+    assert "無駄占い" in system_prompt
+    assert "信用が未確定" in system_prompt
+    assert "単発白" in system_prompt
+    assert "狂人も白に出る" in system_prompt
+
+
+async def test_ask_system_prompt_seer_divine_task_avoids_wasted_divination(
+    repo: SqliteRepo,
+) -> None:
+    """When the seer's task_text is the actual SEER_DIVINE prompt, the no-waste
+    tokens (確定白 / 非 CO 確白級 / 無駄占い / グレー / 対抗 CO 群) must reach
+    the LLM via the `{task_block}` slot. Existing targeting-axes tokens stay."""
+    task_text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
+    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER, task_text=task_text)
+    # New no-waste tokens reached the LLM.
+    assert "確定白" in system_prompt
+    assert "非 CO 確白級" in system_prompt
+    assert "無駄占い" in system_prompt
+    assert "グレー" in system_prompt
+    assert "対抗 CO 群" in system_prompt
+    # Existing axes preserved (no regression).
+    assert "占い価値" in system_prompt
+    assert "囲い候補" in system_prompt
+    assert "白でも黒でも情報が落ちる" in system_prompt
+
+
+async def test_ask_system_prompt_wolf_avoids_extra_fakes_under_three_seer_co(
+    repo: SqliteRepo,
+) -> None:
+    """The werewolf's system prompt must carry the no-extra-fake rule for
+    3-seer-CO boards: do not add medium/knight fakes — pushing CO overflow to
+    ≥3 hardens non-CO seats into 村陣営の確白級 and concentrates the village's
+    hangs onto the CO group."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
+    assert "占い師 CO が 3 人" in system_prompt
+    assert "霊媒師騙りや騎士騙りを追加しない" in system_prompt
+    assert "非 CO 位置" in system_prompt
+    assert "村陣営の確白級" in system_prompt
+    assert "処刑候補が CO 群に集中" in system_prompt
+    # Wolf-actor partner vocabulary remains usable in the wolf seat.
+    assert "相方" in system_prompt
+
+
+async def test_ask_system_prompt_madman_avoids_extra_fakes_under_three_seer_co(
+    repo: SqliteRepo,
+) -> None:
+    """The madman's system prompt must carry the same no-extra-fake rule with
+    public-information-only framing (本物の狼位置を知らない) and must not leak
+    wolf-coordination vocabulary. Existing prohibition phrase remains."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
+    assert "占い師 CO が 3 人" in system_prompt
+    assert "霊媒師騙りや騎士騙りを追加しない" in system_prompt
+    assert "本物の狼位置を知らない" in system_prompt
+    assert "非 CO 確白" in system_prompt
+    assert "処刑候補を狭める" in system_prompt
+    # Existing leak guard preserved. Bare 相方 (actor mode) absent;
+    # 相方候補 (public-log inference) allowed.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
+    # Existing prohibition phrase remains.
+    assert "人狼位置を知っている前提で話してはならない" in system_prompt
+
+
+async def test_ask_system_prompt_knight_includes_day_conditional_co(
+    repo: SqliteRepo,
+) -> None:
+    """The knight's system prompt must carry the day-1 round-2 2-1 grey-4 CO
+    rule, the day-2 not-confirmed-white + guard-success CO rule, and the
+    day-3 not-confirmed-white CO rule. Existing knight peaceful-morning and
+    endgame CO guidance must remain alongside (no regression)."""
+    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
+    # day 1 round 2 2-1 grey-4 CO.
+    assert "day 1" in system_prompt
+    assert "2 巡目" in system_prompt
+    assert "2-1" in system_prompt
+    assert "グレーが 4 人" in system_prompt
+    assert "自分がそのグレー位置なら" in system_prompt
+    assert "投票位置を 4 人から 3 人" in system_prompt
+    assert "捏造しない" in system_prompt
+    # day 2 not-confirmed-white + guard-success CO.
+    assert "day 2" in system_prompt
+    assert "自分が確定白ではなく" in system_prompt
+    assert "護衛成功した場合" in system_prompt
+    assert "機械的に CO しない" in system_prompt
+    # day 3 not-confirmed-white CO.
+    assert "day 3" in system_prompt
+    assert "自分が確定白でないなら" in system_prompt
+    assert "対抗騎士" in system_prompt
+    # Existing knight unique anchor remains.
+    assert "前夜と違う相手を選ぶ" in system_prompt
+    # Wolf-coordination leak guard preserved.
+    assert not re.search(r"相方(?!候補)", system_prompt)
+    assert "襲撃先を揃える" not in system_prompt
 
 
 async def test_ask_system_prompt_wolf_seat_includes_day2_round1_fake_publication(
@@ -2083,6 +2379,293 @@ async def test_discussion_speech_day1_round1_omits_day2_rule(
     # phrase ("これは day 2 以降の 1 巡目発言です。") must not appear.
     assert "day 2 以降の 1 巡目発言" not in system_prompt
     assert "前夜の能力結果" not in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+async def test_discussion_speech_day1_round1_wolf_suppresses_medium_fake(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """End-to-end: when `_do_one_discussion_speech(discussion_round=1)` runs
+    on a day-1 game with a wolf or madman LLM seat, the captured task block
+    must include the day-1 round-1 medium-fake suppression directive — and
+    the old 3-way (seer/medium/lurk) phrasing must be fully removed."""
+    game = Game(
+        id=f"g-d1r1-w-{role.value}",
+        guild_id=f"gu-d1r1-w-{role.value}",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=1
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Day-1 round-1 suppression directive must reach the LLM via the task block.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in system_prompt
+    # Old 3-way (seer/medium/lurk) phrasing must be fully removed.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+async def test_discussion_speech_day1_round2_wolf_includes_conditional_medium_fake(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """End-to-end: when `_do_one_discussion_speech(discussion_round=2)` runs
+    on a day-1 game with a wolf or madman LLM seat, the captured task block
+    must include the day-1 round-2 conditional medium-fake guidance: 2-0
+    self-grey natural CO, or 2-1 counter-medium when forced. day-1 has no
+    execution → no medium result allowed."""
+    game = Game(
+        id=f"g-d1r2-w-{role.value}",
+        guild_id=f"gu-d1r2-w-{role.value}",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=2
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Round-2 conditional anchors must reach the LLM via the task block.
+    assert "2-0" in system_prompt
+    assert "2-1" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "投票候補" in system_prompt
+    assert "自然に出た霊媒 CO" in system_prompt
+    assert "対抗霊媒" in system_prompt
+    assert "出ざるを得ない" in system_prompt
+    # Day-1 has no execution → no medium result.
+    assert "霊媒結果は出さず" in system_prompt
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+async def test_discussion_speech_day1_round2_wolf_includes_3_0_no_medium_fake(
+    repo: SqliteRepo,
+    role: Role,
+) -> None:
+    """End-to-end: when `_do_one_discussion_speech(discussion_round=2)` runs
+    on a day-1 game with a wolf or madman LLM seat, the captured task block
+    must include the 3-0 medium-fake prohibition (3 seer COs + 0 medium COs
+    → no medium CO, even when self-grey)."""
+    game = Game(
+        id=f"g-d1r2-30-{role.value}",
+        guild_id=f"gu-d1r2-30-{role.value}",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, role)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=2
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Task-level 3-0 directive reached the LLM via the task block.
+    assert "3-0" in system_prompt
+    assert "占い師 CO 3 人" in system_prompt
+    assert "霊媒師 CO 0 人" in system_prompt
+    assert "絶対に霊媒師 CO しない" in system_prompt
+    assert "3-2" in system_prompt
+    assert "確白級" in system_prompt
+
+
+async def test_discussion_speech_day1_round1_medium_lurks(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: at day-1 round-1, the true medium gets an explicit don't-CO
+    directive via the captured task block. Wolf-side phrasing must not leak."""
+    game = Game(
+        id="g-d1r1-medium",
+        guild_id="gu-d1r1-medium",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.MEDIUM)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=1
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Medium round-1 silence directive must reach the LLM via the task block.
+    assert "day 1 の 1 巡目では霊媒 CO しない" in system_prompt
+    # Wolf-side phrasing must not leak into medium task block.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in system_prompt
+
+
+async def test_discussion_speech_day1_round2_medium_co_or_counter(
+    repo: SqliteRepo,
+) -> None:
+    """End-to-end: at day-1 round-2, the true medium gets the 2-0 self-grey
+    CO directive plus a counter-CO directive if a medium-fake surfaces.
+    Day-1 has no execution → no medium result."""
+    game = Game(
+        id="g-d1r2-medium",
+        guild_id="gu-d1r2-medium",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.MEDIUM)
+
+    decider = _CapturingDecider()
+    adapter = LLMAdapter(repo=repo, decider=decider, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+    llm_player = next(p for p in players if p.seat_no == 2)
+    llm_seat = next(s for s in seats if s.seat_no == 2)
+
+    await adapter._do_one_discussion_speech(
+        game=game, player=llm_player, seat=llm_seat, seats=seats, discussion_round=2
+    )
+
+    assert len(decider.captured) == 1
+    system_prompt, _ = decider.captured[0]
+    # Round-2 medium CO / counter-CO directives must reach the LLM.
+    assert "2-0" in system_prompt
+    assert "自分がグレー位置" in system_prompt
+    assert "霊媒 CO" in system_prompt
+    assert "霊媒騙りが出た場合" in system_prompt
+    assert "当然対抗 CO" in system_prompt
+    # Day-1 has no execution → no medium result.
+    assert "霊媒結果はありません" in system_prompt
 
 
 def test_task_daytime_speech_runoff_default_omits_first_round_rule() -> None:
@@ -2481,8 +3064,10 @@ async def test_deepseek_decider_omits_reasoning_effort_when_thinking_disabled() 
 async def test_gemini_decider_sends_response_json_schema_and_thinking_level() -> None:
     """Gemini path: `response_mime_type=application/json` + `response_json_schema`,
     `thinking_level` forwarded via `ThinkingConfig`, system prompt as
-    `system_instruction`, user context as `contents`. Sampling controls and
-    DeepSeek-only knobs (`extra_body`, `reasoning_effort`) must NOT be sent."""
+    `system_instruction`, user context as `contents`. Sampling controls do NOT
+    appear as top-level kwargs (Gemini puts `temperature` on `config` instead;
+    the `config.temperature` flow is exercised by a sibling test). DeepSeek-only
+    knobs (`extra_body`, `reasoning_effort`) must NOT be sent at all."""
     from wolfbot.services.llm_service import RESPONSE_SCHEMA, GeminiLLMActionDecider
 
     fake = _FakeGenAIClient(_canned_action_json())
@@ -2509,6 +3094,26 @@ async def test_gemini_decider_sends_response_json_schema_and_thinking_level() ->
         assert forbidden not in call
     assert "extra_body" not in call
     assert "reasoning_effort" not in call
+
+
+async def test_gemini_decider_forwards_temperature_to_generate_content_config() -> None:
+    """Gemini path: a `temperature` constructor argument must reach
+    `GenerateContentConfig.temperature`. This is the only Gemini sampling
+    control wolfbot exposes — xAI / DeepSeek deliberately don't get one."""
+    from wolfbot.services.llm_service import GeminiLLMActionDecider
+
+    fake = _FakeGenAIClient(_canned_action_json())
+    decider = GeminiLLMActionDecider(
+        client=fake,
+        model="gemini-3-flash-preview",
+        thinking_level="high",
+        temperature=0.7,
+        timeout=15.0,
+    )
+    await decider.decide("sys", "ctx")
+
+    config = fake.aio.models.calls[0]["config"]
+    assert config.temperature == 0.7
 
 
 def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2602,3 +3207,316 @@ def test_make_gemini_decider_constructs_vertex_ai_client(
     assert decider.model == "gemini-3-flash-preview"
     assert decider.thinking_level == "high"
     assert decider.timeout == 15.0
+
+
+def test_make_llm_decider_gemini_branch_passes_temperature_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end factory wiring: `settings.GEMINI_TEMPERATURE` must reach the
+    constructed `GeminiLLMActionDecider.temperature`. The xAI and DeepSeek
+    branches still don't accept a sampling-control knob (no symmetrical test
+    needed — they have no temperature parameter to assert)."""
+    from pydantic import SecretStr
+
+    from wolfbot.config import Settings
+    from wolfbot.services.llm_service import GeminiLLMActionDecider, make_llm_decider
+
+    class _StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", _StubClient)
+
+    s = Settings(  # type: ignore[arg-type]
+        _env_file=None,
+        DISCORD_TOKEN=SecretStr("t"),
+        DISCORD_GUILD_ID=1,
+        MAIN_TEXT_CHANNEL_ID=2,
+        MAIN_VOICE_CHANNEL_ID=3,
+        LLM_PROVIDER="gemini",
+        GEMINI_VERTEX_PROJECT="my-project",
+        GEMINI_TEMPERATURE=0.3,
+    )
+    decider = make_llm_decider(s)
+    assert isinstance(decider, GeminiLLMActionDecider)
+    assert decider.temperature == 0.3
+
+
+# ============================================================
+# DAY_EXECUTION_SPEECH (LLM last words) — submit + per-seat run
+# ============================================================
+async def _seed_execution_speech_game(repo: SqliteRepo) -> tuple[Game, list[Seat]]:
+    """One LLM seat (seat 2, role=SEER) parked in DAY_EXECUTION_SPEECH on day 1.
+
+    The seat is the executed LLM about to give last words. Other seats are
+    irrelevant to this dispatch path so we keep them minimal.
+    """
+    game = Game(
+        id="g-exec-speech",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_EXECUTION_SPEECH,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="1001", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.SEER)
+    return game, seats
+
+
+async def test_submit_llm_execution_speech_is_fire_and_forget(repo: SqliteRepo) -> None:
+    """Caller returns immediately; xAI work happens in a background task."""
+    game, seats = await _seed_execution_speech_game(repo)
+    release = asyncio.Event()
+    decider = _BlockingDecider(
+        [
+            LLMAction(
+                intent="speak",
+                public_message="最後に村の方々へ、占い結果を残します。",
+                reason_summary="",
+                confidence=0.9,
+            )
+        ],
+        release,
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    # The submit call must return promptly even though decider blocks.
+    await asyncio.wait_for(
+        adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2),
+        timeout=0.5,
+    )
+    # Allow the background task to start (it will block on `release`).
+    await asyncio.sleep(0.05)
+    # No public post yet — decider hasn't returned.
+    assert poster.public == []
+    # Release and drain the task.
+    release.set()
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+    assert len(poster.public) == 1
+
+
+async def test_execution_speech_speak_intent_posts_and_logs(repo: SqliteRepo) -> None:
+    """speak + non-empty message → post_public + PLAYER_SPEECH log."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider(
+        [
+            LLMAction(
+                intent="speak",
+                public_message="占い師 CO。day 0 ランダム白は H1。day 1 朝の発言で 3 を黒予想。",
+                reason_summary="",
+                confidence=0.9,
+            )
+        ]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(
+        repo=repo, decider=decider, message_poster=poster, rng=random.Random(0), clock=lambda: 555
+    )
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert len(poster.public) == 1
+    body = poster.public[0][1]
+    assert "セツ" in body and "占い師 CO" in body
+    logs = await repo.load_public_logs(game.id, limit=40)
+    speech_rows = [r for r in logs if r.get("kind") == "PLAYER_SPEECH"]
+    assert len(speech_rows) == 1
+    assert speech_rows[0].get("actor_seat") == 2
+    # Progress marked.
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+async def test_execution_speech_skip_intent_marks_done_without_posting(
+    repo: SqliteRepo,
+) -> None:
+    """intent=skip is allowed (rare) — nothing is posted, but the seat must
+    still be marked done so the engine can advance."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider(
+        [LLMAction(intent="skip", reason_summary="nothing useful to add", confidence=0.3)]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+    logs = await repo.load_public_logs(game.id, limit=40)
+    assert [r for r in logs if r.get("kind") == "PLAYER_SPEECH"] == []
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+async def test_execution_speech_empty_message_marks_done_without_posting(
+    repo: SqliteRepo,
+) -> None:
+    """speak with empty/whitespace message → no post but progress marked."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider(
+        [LLMAction(intent="speak", public_message="   ", reason_summary="", confidence=0.5)]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+class _ExplodingDecider:
+    async def decide(self, system_prompt: str, user_context: str) -> LLMAction:
+        raise RuntimeError("simulated decider failure")
+
+
+async def test_execution_speech_decider_exception_still_marks_done(
+    repo: SqliteRepo,
+) -> None:
+    """Decider raises → caught, progress still set so engine can advance."""
+    game, seats = await _seed_execution_speech_game(repo)
+    poster = _FakePoster()
+    adapter = LLMAdapter(
+        repo=repo, decider=_ExplodingDecider(), message_poster=poster, rng=random.Random(0)
+    )
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # _ask catches decider exceptions and returns intent=skip, so no post.
+    # Progress is marked in the run loop's finally regardless.
+    assert poster.public == []
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=2) is True
+
+
+async def test_execution_speech_stale_phase_no_post(repo: SqliteRepo) -> None:
+    """If the game has already advanced past DAY_EXECUTION_SPEECH (e.g. host
+    force-skipped) by the time the background task runs, the speech is dropped."""
+    game, seats = await _seed_execution_speech_game(repo)
+    # Move the game out of DAY_EXECUTION_SPEECH before dispatch — the background
+    # task will reload `fresh` and bail.
+    async with repo._db.execute(  # type: ignore[attr-defined]
+        "UPDATE games SET phase=? WHERE id=?",
+        (Phase.NIGHT.value, game.id),
+    ):
+        pass
+    await repo._db.commit()  # type: ignore[attr-defined]
+
+    decider = _ScriptedDecider(
+        [
+            LLMAction(
+                intent="speak", public_message="should not post", reason_summary="", confidence=0.9
+            )
+        ]
+    )
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # No post; no progress mark either (the early-bail path doesn't write
+    # progress because the game isn't in DAY_EXECUTION_SPEECH any more — the
+    # mark only fires after a real attempt or skipped persona).
+    assert poster.public == []
+
+
+async def test_execution_speech_already_done_skips_redispatch(repo: SqliteRepo) -> None:
+    """Recovery overlap / double-wake: if execution_speech_done is already True,
+    re-dispatch is a no-op (no decider call, no post)."""
+    game, seats = await _seed_execution_speech_game(repo)
+    await repo.mark_llm_execution_speech_done(game.id, day=1, seat_no=2)
+    decider = _ScriptedDecider([])  # empty: any call would IndexError
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+
+
+async def test_execution_speech_skipped_for_human_seat(repo: SqliteRepo) -> None:
+    """If executed_seat happens to be human, the dispatcher no-ops without
+    invoking the decider — the planner shouldn't have parked in
+    DAY_EXECUTION_SPEECH for a human, but defense-in-depth keeps us safe."""
+    game, seats = await _seed_execution_speech_game(repo)
+    decider = _ScriptedDecider([])  # empty: any call would IndexError
+    poster = _FakePoster()
+    adapter = LLMAdapter(repo=repo, decider=decider, message_poster=poster, rng=random.Random(0))
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=1)  # H1
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert poster.public == []
+    # No flag set on the human seat either.
+    assert await repo.load_llm_execution_speech_done(game.id, day=1, seat_no=1) is False
+
+
+async def test_execution_speech_uses_task_last_words_text(repo: SqliteRepo) -> None:
+    """The decider receives a system prompt whose task block matches
+    `task_last_words(day, role=...)` — verifies role-specific guidance flows."""
+    from wolfbot.llm.prompt_builder import task_last_words
+
+    game, seats = await _seed_execution_speech_game(repo)
+    captured: list[tuple[str, str]] = []
+
+    class _Capturing:
+        async def decide(self, system: str, user: str) -> LLMAction:
+            captured.append((system, user))
+            return LLMAction(intent="skip", reason_summary="", confidence=0.5)
+
+    poster = _FakePoster()
+    adapter = LLMAdapter(
+        repo=repo, decider=_Capturing(), message_poster=poster, rng=random.Random(0)
+    )
+    adapter.set_game_service(_FakeGameService())  # type: ignore[arg-type]
+    players = await repo.load_players(game.id)
+
+    await adapter.submit_llm_execution_speech(game, players, seats, executed_seat=2)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    assert len(captured) == 1
+    system_prompt = captured[0][0]
+    # Seer-specific guidance from task_last_words must be present in the task block.
+    assert "占い師 CO" in system_prompt
+    # Cross-check: the helper itself produced the same line.
+    assert "占い師 CO" in task_last_words(1, role=Role.SEER)

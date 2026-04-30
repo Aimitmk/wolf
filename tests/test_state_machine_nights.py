@@ -590,6 +590,86 @@ def test_record_guard_persists_knight_choice() -> None:
     assert t.record_guard == (6, 8)
 
 
+def test_knight_guard_emits_private_log_with_day_and_target() -> None:
+    """Knight gets a private KNIGHT_GUARD log per night so the LLM can recall
+    its own guard history during day speeches and last words."""
+    game = _game(day=2)
+    players = _players()
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7, day=2),
+        _act(2, SubmissionType.WOLF_ATTACK, 7, day=2),
+        _act(4, SubmissionType.SEER_DIVINE, 3, day=2),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8, day=2),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    guard_logs = [lg for lg in t.private_logs if lg.kind == "KNIGHT_GUARD"]
+    assert len(guard_logs) == 1
+    assert guard_logs[0].audience_seat == 6  # the knight
+    assert "2日目" in guard_logs[0].text
+    assert "P8" in guard_logs[0].text
+
+
+def test_knight_guard_no_private_log_when_no_guard_action() -> None:
+    """No KNIGHT_GUARD private log when knight didn't submit (force-skip /
+    missing) — record_guard stays None and the private-log emit is gated on it."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        # no KNIGHT_GUARD action
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=True,  # allow missing knight without WAITING
+        now_epoch=1000,
+    )
+    guard_logs = [lg for lg in t.private_logs if lg.kind == "KNIGHT_GUARD"]
+    assert len(guard_logs) == 0
+
+
+def test_knight_guard_private_log_only_visible_to_knight() -> None:
+    """KNIGHT_GUARD private log audience_seat is the knight, not e.g. seer."""
+    game = _game(day=1)
+    players = _players()
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 3),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    guard_logs = [lg for lg in t.private_logs if lg.kind == "KNIGHT_GUARD"]
+    assert len(guard_logs) == 1
+    seer_seats = [lg.audience_seat for lg in t.private_logs if lg.kind == "SEER_RESULT"]
+    assert 6 not in seer_seats  # seer never receives knight's audience
+    assert guard_logs[0].audience_seat not in {4}  # knight log not addressed to seer
+
+
 def test_resolve_night_strict_order_medium_then_seer_then_morning() -> None:
     """Spec: 10-step order. Private logs are in (medium, seer) order;
     morning text is emitted after resolution."""
@@ -610,10 +690,12 @@ def test_resolve_night_strict_order_medium_then_seer_then_morning() -> None:
         force_skip=False,
         now_epoch=1000,
     )
-    # Private logs should include both MEDIUM_RESULT and SEER_RESULT,
-    # with MEDIUM coming BEFORE SEER (step 1 before step 2).
+    # Private logs should include MEDIUM_RESULT, SEER_RESULT, and KNIGHT_GUARD,
+    # with MEDIUM coming BEFORE SEER (step 1 before step 2). KNIGHT_GUARD comes
+    # last because it is emitted alongside the post-resolution `record_guard`
+    # computation — it carries history for the knight, not a real-time result.
     kinds = [lg.kind for lg in t.private_logs]
-    assert kinds == ["MEDIUM_RESULT", "SEER_RESULT"]
+    assert kinds == ["MEDIUM_RESULT", "SEER_RESULT", "KNIGHT_GUARD"]
     # morning text exists and references either the victim or peaceful
     assert t.morning_text is not None
 

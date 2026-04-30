@@ -746,6 +746,42 @@ class SqliteRepo:
                 (game_id, day, seat_no),
             )
 
+    async def mark_llm_execution_speech_done(self, game_id: str, day: int, seat_no: int) -> None:
+        """Set `execution_speech_done = 1` (idempotent UPSERT).
+
+        Called after each per-seat last-words attempt regardless of outcome
+        (success / skip / empty / decider exception). Recovery and grace
+        re-dispatches see this flag via `load_llm_execution_speech_done` and
+        skip without double-posting.
+        """
+        async with self._tx() as db:
+            await db.execute(
+                """
+                INSERT INTO llm_speech_counts (game_id, day, seat_no, execution_speech_done)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(game_id, day, seat_no) DO UPDATE SET
+                    execution_speech_done = 1
+                """,
+                (game_id, day, seat_no),
+            )
+
+    async def load_llm_execution_speech_done(self, game_id: str, day: int, seat_no: int) -> bool:
+        """Return True iff the seat's last-words turn has been completed.
+
+        Standalone loader (rather than extending `load_llm_speech_progress`)
+        to avoid breaking the existing 5-tuple shape used by DAY_DISCUSSION /
+        DAY_RUNOFF_SPEECH callers.
+        """
+        async with self._db.execute(
+            "SELECT execution_speech_done FROM llm_speech_counts "
+            "WHERE game_id=? AND day=? AND seat_no=?",
+            (game_id, day, seat_no),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return False
+        return bool(row["execution_speech_done"])
+
     async def load_llm_speech_progress(
         self, game_id: str, day: int, seat_no: int
     ) -> tuple[int, bool, int | None, int, bool]:

@@ -28,6 +28,7 @@ from wolfbot.llm.prompt_builder import (
     build_system_prompt,
     build_user_context,
     task_daytime_speech,
+    task_last_words,
     task_night_action,
     task_vote,
     task_wolf_chat,
@@ -515,6 +516,64 @@ def test_game_rules_block_contains_rope_calculation_formula() -> None:
     assert "4縄" in block
 
 
+def test_game_rules_block_states_kill_estimated_wolves_within_remaining_ropes() -> None:
+    """9 人村の勝ち筋として、残り縄のうち推定残り人狼数ぶんを投票で吊り切る
+    必要があることを共通ルールに明記する。"""
+    block = _build_game_rules_block()
+    assert "残り縄" in block
+    assert "推定残り人狼数" in block
+    assert "投票で吊り切る" in block
+
+
+def test_game_rules_block_defines_hanging_margin_formula() -> None:
+    """吊り余裕 = 残り縄 - 推定残り人狼数 を投票判断・ローラー継続・決め打ち
+    判断の核として明示する。"""
+    block = _build_game_rules_block()
+    assert "吊り余裕" in block
+    assert "残り縄 - 推定残り人狼数" in block
+    assert "ローラー継続" in block
+    assert "決め打ち判断" in block
+
+
+def test_game_rules_block_describes_zero_margin_must_target_wolves() -> None:
+    """吊り余裕が 0 以下の局面では、非狼濃厚位置・真寄り情報役・確白級・
+    狂人候補を吊ると敗着になり得る。残った処刑をすべて人狼候補に当てる。"""
+    block = _build_game_rules_block()
+    assert "吊り余裕が 0 以下" in block
+    assert "非狼濃厚位置" in block
+    assert "真寄り情報役" in block
+    assert "確白級" in block
+    assert "狂人っぽい" in block
+    assert "敗着になり得る" in block
+    assert "人狼候補へ集中" in block
+
+
+def test_game_rules_block_describes_positive_margin_use_explained_by_public_info() -> None:
+    """吊り余裕がある局面でも、その余裕をローラー継続・情報吊り・灰吊りの
+    どれに使うかを CO 履歴・判定履歴・票筋・噛み筋・PP/RPP リスクで説明する。
+    狂人生存可能性が高い、または PP/RPP が近いほど余裕を小さく見積もる。"""
+    block = _build_game_rules_block()
+    assert "吊り余裕がある局面" in block
+    assert "情報吊り" in block
+    assert "灰吊り" in block
+    assert "余裕を小さく見積もる" in block
+
+
+def test_game_rules_block_estimates_wolf_count_from_public_info() -> None:
+    """残り人狼数は bot が秘匿情報として教える値ではなく、公開ログ上の
+    霊媒結果・処刑結果・襲撃死・CO 破綻・対抗 CO 数・投票履歴から推定する。
+    断定せず推定根拠を短く添える原則を明文化する。"""
+    block = _build_game_rules_block()
+    assert "秘匿情報として教える値ではなく" in block
+    assert "霊媒結果" in block
+    assert "処刑結果" in block
+    assert "襲撃死" in block
+    assert "CO 破綻" in block
+    assert "対抗 CO 数" in block
+    assert "投票履歴" in block
+    assert "推定根拠" in block
+
+
 def test_game_rules_block_clarifies_white_is_not_village_confirmed() -> None:
     """Every LLM seat must see the contract that 白判定 ≠ 村陣営確定 because
     the madman reads white. This also cross-references the existing rule on
@@ -884,10 +943,12 @@ def test_fake_strategy_switches_to_medium_or_knight_fake_if_countered(role: Role
 
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
 def test_fake_strategy_warns_against_over_faking(role: Role) -> None:
-    """Both wolf and madman are warned that piling on fake COs (6+) confirms
-    non-CO seats as white — at that point all wolves+madman have CO'd."""
+    """Both wolf and madman are warned that piling on fake seer/medium COs
+    (5+ total) confirms non-CO seats as white. The wording must scope the
+    count to 占い師と霊媒師の CO specifically — knight CO timing is separate."""
     block = _build_strategy_block(role)
-    assert "6 人以上" in block
+    assert "5 人以上" in block
+    assert "占い師と霊媒師の CO" in block
     assert "騙りすぎ" in block
 
 
@@ -1265,6 +1326,59 @@ def test_co_overflow_role_framings_do_not_cross_leak(role: Role) -> None:
         )
 
 
+# ------------------------------------------ 自己犠牲価値 (刺し違え / 自吊り)
+# 人狼陣営の 2 役職が自分の死と引き換えに村側のリソース (縄・真役職・確白級・
+# 進行役) を削れる場面を、熟練者の交換判断として明文化したテスト群。
+# wolf には「重要 1 人と刺し違える」、madman には「自分が吊られても仕事を
+# 果たす」という強い趣旨を入れた一方、無意味な自爆や根拠なき自吊り誘導は
+# 推奨しない文面になっていることを確認する。
+def test_wolf_strategy_includes_sacrifice_value() -> None:
+    """The wolf strategy must teach 1-for-1 trade-off (刺し違え) of a key
+    village seat as a win-path-preserving move, while rejecting impulsive
+    self-destruction and self-confession."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "1 人刺し違えるだけでも人狼陣営の仕事を果たしたことになる" in block
+    # Reject impulsive collapse / self-confession.
+    assert "無計画な破綻" in block
+    assert "自白" in block
+    # Trade-value comparison axes the operator wants the LLM to weigh.
+    assert "残り縄" in block
+    assert "PP/RPP" in block
+    # Public-log discipline preserved when sacrificing — wolf must not leak
+    # partner-knowledge through the trade-off bullet.
+    assert "視点漏れ" in block
+
+
+def test_madman_strategy_includes_hanging_value() -> None:
+    """The madman strategy must teach that being voted out can itself complete
+    the wolf-side job (rope burn, dragging a true info role, disruption),
+    while rejecting impulsive self-hanging — and the wolf-positions-unknown
+    boundary must remain attached to the new content."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "自分が吊られるだけでも人狼陣営の仕事を果たしたことになる" in block
+    # Reject impulsive self-hanging / unilateral collapse.
+    assert "無意味な自吊り" in block
+    assert "単独破綻" in block
+    # Trade-value comparison axes the operator wants the LLM to weigh.
+    assert "残り縄" in block
+    assert "PP/RPP" in block
+    # Madman knowledge boundary must stay co-present with the new content
+    # so the LLM does not treat the trade-off as licence to assume wolf seats.
+    assert "本物の人狼位置を知らない" in block
+
+
+@pytest.mark.parametrize("role", [Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
+def test_sacrifice_value_phrasing_does_not_leak_to_village_roles(role: Role) -> None:
+    """Both `1 人刺し違える` (wolf) and `自分が吊られるだけでも` (madman) frame
+    sacrifice as a wolf-side tactic. Neither — nor the shared
+    `人狼陣営の仕事を果たしたことになる` framing — may leak to a village role:
+    village seats throwing the game would be a strategy regression."""
+    block = _build_strategy_block(role)
+    assert "1 人刺し違える" not in block
+    assert "自分が吊られるだけでも" not in block
+    assert "人狼陣営の仕事を果たしたことになる" not in block
+
+
 # --------------------------------- wolf night-attack guard-aware vocabulary
 # Wolf-only tactical phrases for night-attack reasoning. They must appear in
 # the werewolf strategy and never leak into another role's strategy or into
@@ -1311,17 +1425,13 @@ def test_werewolf_strategy_disclaims_real_role_inference() -> None:
     assert "公開情報からの推定" in block
 
 
-@pytest.mark.parametrize(
-    "role", [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER]
-)
+@pytest.mark.parametrize("role", [Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
 def test_wolf_attack_only_vocabulary_never_in_non_wolf_strategy(role: Role) -> None:
     """The new tactical phrases are wolf-private. Any leak (e.g. someone copies
     the wolf bullet into the knight strategy by mistake) must trip this guard."""
     block = _build_strategy_block(role)
     for phrase in _WOLF_ATTACK_ONLY_PHRASES:
-        assert phrase not in block, (
-            f"wolf-only attack vocab {phrase!r} leaked into {role.name}"
-        )
+        assert phrase not in block, f"wolf-only attack vocab {phrase!r} leaked into {role.name}"
 
 
 # ---------------------------------------------------- night-action task block
@@ -1548,14 +1658,32 @@ def test_madman_fake_strategy_acknowledges_misfire_and_legal_constraints() -> No
 
 # ------------------------------------------ day 1 medium fake-CO / 2-2 / 1-2 layout
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
-def test_fake_strategy_offers_medium_fake_as_day1_option(role: Role) -> None:
-    """Wolf and madman must teach day-1 medium fake-CO as a real choice
-    alongside seer fake and 潜伏 — not just a day-2+ post-hoc move. The
-    existing day-2+ post-hoc framing must remain (no regression)."""
+def test_fake_strategy_day1_round1_suppresses_medium_fake_round2_conditional(
+    role: Role,
+) -> None:
+    """Wolf and madman must NOT fake medium on day-1 round 1. The medium-fake
+    decision is pushed to day-1 round 2 and gated on the post-round-1 board
+    read: 2-0 self-grey natural medium-CO, or 2-1 counter-medium when forced.
+    The day-2+ post-hoc fake-medium-under-counter-seer framing must remain
+    (no regression)."""
     block = _build_strategy_block(role)
-    assert "霊媒師騙りも day 1 の選択肢" in block
+    # Day-1 round-1 suppression.
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in block
+    # Round-2 conditional anchors.
+    assert "2 巡目" in block
+    assert "2-0" in block
+    assert "占い師 CO 2 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "自分がグレー位置" in block
+    assert "投票候補" in block
+    assert "自然に出た霊媒 CO" in block
+    assert "2-1" in block
+    assert "対抗霊媒" in block
+    assert "出ざるを得ない" in block
+    # Existing seer-fake / lurk comparison vocabulary preserved on day 1 round 1.
     assert "占い師騙り" in block
     assert "潜伏" in block
+    # Existing day-2+ post-hoc fake-medium-under-counter-seer framing preserved.
     assert "対抗占い師 CO が出ている場合は、day 2 以降に霊媒師騙り" in block
 
 
@@ -1596,6 +1724,45 @@ def test_madman_medium_fake_carries_misfire_awareness_for_both_colors() -> None:
     assert "襲撃先を揃える" not in block
 
 
+def test_madman_strategy_carries_wolf_position_unawareness_in_medium_fake() -> None:
+    """Madman-only: the day-1 round-2 medium-fake guidance must explicitly
+    state madman never knows real wolf positions, so narrowing grey via
+    medium fake-CO can push real wolves toward execution. The wolf-side
+    medium-fake bullets do not carry this caveat (wolf does know its
+    partner)."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "本物の狼位置を知らない" in block
+    # Leak guards preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
+def test_medium_strategy_day1_co_timing() -> None:
+    """True medium must lurk on day-1 round 1 and CO on day-1 round 2 only
+    when the post-round-1 2-0 board confirms self in grey, or counter-CO
+    when a fake medium surfaces in round 2. day-1 medium CO must explicitly
+    carry no execution result. Wolf-coordination vocabulary stays absent
+    from the medium strategy block."""
+    block = _build_strategy_block(Role.MEDIUM)
+    # Round-1 silence.
+    assert "day 1 の 1 巡目では霊媒 CO しない" in block
+    # Round-2 grey CO anchors.
+    assert "2 巡目" in block
+    assert "2-0" in block
+    assert "占い師 CO 2 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "自分がグレー位置" in block
+    assert "投票候補を狭め" in block
+    # Round-2 counter-CO on fake medium.
+    assert "霊媒騙りが出た場合" in block
+    assert "当然対抗 CO" in block
+    # Day-1 has no execution → no medium result.
+    assert "まだ処刑がないため霊媒結果はない" in block
+    # Leak guard — medium block must not carry wolf vocabulary.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
 @pytest.mark.parametrize("role", list(Role))
 def test_layout_creation_directives_only_in_wolf_madman_strategy(role: Role) -> None:
     """The wolf-side directive form '2-2 を作' / '1-2 を作' / '霊媒師騙りを選'
@@ -1616,19 +1783,76 @@ def test_layout_creation_directives_only_in_wolf_madman_strategy(role: Role) -> 
 
 
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
-def test_task_daytime_speech_day1_round1_wolf_or_madman_offers_medium_fake_as_option(
+def test_task_daytime_speech_day1_round1_wolf_or_madman_suppresses_medium_fake(
     role: Role,
 ) -> None:
-    """At day-1 round-1 only, the daytime speech task injects a 3-way fake-CO
-    selection nudge for wolf and madman — a per-call task-level reminder that
-    re-surfaces the day-1 selection at the moment of speech generation.
-    Default (no role) and other rounds must not include it (verified by
-    sibling default-omission tests)."""
+    """At day-1 round-1, wolf and madman get a per-call task-level reminder
+    that medium-fake is OFF the table — only seer fake and lurk are compared.
+    The medium-fake decision is pushed to round 2 conditional on the post-
+    round-1 board read. Default (no role) and other rounds must not include
+    this nudge (verified by sibling default-omission tests)."""
     text = task_daytime_speech(1, discussion_round=1, role=role)
-    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" in text
-    assert "1-2" in text
-    assert "2-2 を作" in text
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in text
+    # Old 3-way (seer/medium/lurk) phrasing must be fully removed.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
+    # Round-2 conditional pointer present so the LLM knows when medium-fake
+    # becomes available again.
+    assert "2-0" in text
+    assert "2-1" in text
+    assert "2 巡目" in text
     # Leak-guard regression — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round2_wolf_or_madman_includes_conditional_medium_fake(
+    role: Role,
+) -> None:
+    """At day-1 round-2, wolf and madman get the conditional medium-fake
+    nudge: 2-0 self-grey natural medium-CO, or 2-1 counter-medium when
+    forced. day-1 has no execution → no medium result allowed."""
+    text = task_daytime_speech(1, discussion_round=2, role=role)
+    assert "2-0" in text
+    assert "2-1" in text
+    assert "自分がグレー位置" in text
+    assert "投票候補" in text
+    assert "自然に出た霊媒 CO" in text
+    assert "対抗霊媒" in text
+    assert "出ざるを得ない" in text
+    # Day-1 medium CO must not publish a result.
+    assert "霊媒結果は出さず" in text
+    # Leak-guard — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+def test_task_daytime_speech_day1_round1_medium_lurks() -> None:
+    """At day-1 round-1, the true medium gets an explicit don't-CO nudge so
+    the seat doesn't reveal too early. The old wolf-side 3-way phrasing
+    must not leak into the medium task block."""
+    text = task_daytime_speech(1, discussion_round=1, role=Role.MEDIUM)
+    assert "day 1 の 1 巡目では霊媒 CO しない" in text
+    # Wolf-side phrasing must not leak into medium task block.
+    assert "占い師騙り・霊媒師騙り・潜伏の 3 択" not in text
+    # Leak-guard.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+def test_task_daytime_speech_day1_round2_medium_co_or_counter() -> None:
+    """At day-1 round-2, the true medium gets the 2-0 self-grey CO nudge
+    plus a counter-CO directive if a medium-fake surfaces. day-1 has no
+    execution → no medium result allowed."""
+    text = task_daytime_speech(1, discussion_round=2, role=Role.MEDIUM)
+    assert "2-0" in text
+    assert "自分がグレー位置" in text
+    assert "霊媒 CO" in text
+    assert "霊媒騙りが出た場合" in text
+    assert "当然対抗 CO" in text
+    # Day-1 has no execution → no medium result.
+    assert "霊媒結果はありません" in text
+    # Leak-guard.
     assert not re.search(r"相方(?!候補)", text)
     assert "襲撃先を揃える" not in text
 
@@ -1647,6 +1871,309 @@ def test_seer_strategy_includes_night_divination_targeting_axes() -> None:
     assert "白でも黒でも情報が落ちる" in block
     # Existing SEER unique anchor (cross-leak pivot) must still be present.
     assert "判定履歴を時系列で一貫" in block
+
+
+# ----------------------------- 2026-04-28: 占い無駄削減 / 過剰騙り抑止 / 騎士 day 別 CO
+# Three sets of strategy/task additions for stronger LLM play in 9-player village:
+# (1) seer + SEER_DIVINE task — avoid 確定白 / 非 CO 確白級 wasted divinations,
+# (2) wolf + madman — do not add medium/knight fakes when 3 seer COs already exist,
+# (3) knight — day-1 round-2 2-1 grey-4, day-2 guard-success, day-3 non-confirmed-white.
+
+
+def test_seer_strategy_avoids_wasting_on_confirmed_white() -> None:
+    """The seer strategy must instruct the LLM to skip 確定白 / 非 CO 確白級 /
+    進行役にできる positions to avoid wasting a divination, while keeping the
+    白判定 vs 確定白 distinction (狂人 reads white too) so a single low-trust
+    white judgment is not auto-promoted to confirmed-white. Composes with the
+    existing CO-overflow guidance at the tail of the SEER strategy block."""
+    block = _build_strategy_block(Role.SEER)
+    assert "確定白" in block
+    assert "非 CO 確白級" in block
+    assert "無駄占い" in block
+    assert "信用が未確定" in block
+    assert "単発白" in block
+    assert "狂人も白に出る" in block
+
+
+def test_task_night_action_seer_divine_avoids_wasted_divination() -> None:
+    """The SEER_DIVINE task block surfaces the no-waste-divination guidance
+    inline so even an LLM that ignored the strategy block sees it on the action
+    turn. New no-waste tokens (確定白 / 非 CO 確白級 / 無駄占い / グレー /
+    対抗 CO 群) must coexist with the existing targeting-axes tokens (占い価値 /
+    囲い候補 / 白でも黒でも情報が落ちる)."""
+    text = task_night_action(SubmissionType.SEER_DIVINE, ["席1 A", "席2 B"])
+    # New no-waste tokens.
+    assert "確定白" in text
+    assert "非 CO 確白級" in text
+    assert "無駄占い" in text
+    assert "グレー" in text
+    assert "対抗 CO 群" in text
+    # Existing targeting-axes tokens preserved (no regression).
+    assert "占い価値" in text
+    assert "囲い候補" in text
+    assert "白でも黒でも情報が落ちる" in text
+
+
+def test_wolf_strategy_avoids_extra_fakes_under_three_seer_co() -> None:
+    """When 3 seer COs are already out, the wolf must not add medium- or
+    knight-fake CO on top — doing so pushes CO overflow to ≥3, hardens the
+    non-CO seats into 村陣営の確白級, and concentrates village hangs onto the
+    CO group. Wolf phrasing keeps `相方` (actor mode, partner-known)."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "占い師 CO が 3 人" in block
+    assert "霊媒師騙りや騎士騙りを追加しない" in block
+    assert "非 CO 位置" in block
+    assert "村陣営の確白級" in block
+    assert "処刑候補が CO 群に集中" in block
+    # Wolf-actor partner vocabulary remains usable in the wolf bullet.
+    assert "相方" in block
+
+
+def test_madman_strategy_avoids_extra_fakes_under_three_seer_co() -> None:
+    """The madman gets the same no-extra-fake rule, framed for the
+    public-information-only seat: real wolf positions are unknown, so adding a
+    medium/knight fake risks creating 非 CO 確白 that narrows the village's
+    hang candidates rather than helping the wolf side. Wolf-coordination
+    vocabulary (bare `相方`, `襲撃先を揃える`) must stay absent; existing
+    prohibition phrase remains."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "占い師 CO が 3 人" in block
+    assert "霊媒師騙りや騎士騙りを追加しない" in block
+    assert "本物の狼位置を知らない" in block
+    assert "非 CO 確白" in block
+    assert "処刑候補を狭める" in block
+    # Existing leak guard preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+    # Existing prohibition phrase still present.
+    assert "人狼位置を知っている前提で話してはならない" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_three_seer_co_extra_fake_directive_only_in_wolf_madman_strategy(
+    role: Role,
+) -> None:
+    """The directive `霊媒師騙りや騎士騙りを追加しない` is wolf-side
+    avoidance guidance for 3-seer-CO boards and must appear only in WEREWOLF
+    and MADMAN strategies. Mirrors `test_layout_creation_directives_only_in_wolf_madman_strategy`."""
+    block = _build_strategy_block(role)
+    if role in (Role.WEREWOLF, Role.MADMAN):
+        assert "霊媒師騙りや騎士騙りを追加しない" in block
+    else:
+        assert "霊媒師騙りや騎士騙りを追加しない" not in block, (
+            f"wolf-side no-extra-fake directive leaked into {role.name}"
+        )
+
+
+# ---------------- 2026-04-29: 3-0 (3 seer COs + 0 medium COs) → no medium fake-CO
+# At day-1 round-2, when the public log shows 3 seer COs and 0 medium COs (`3-0`),
+# wolf and madman seats must not add a medium fake. Adding one would invite the real
+# medium's counter-CO → 3-2, where the seer/medium CO-overflow sum reaches 3 and
+# every non-CO seat is hardened to 確白級 (per the shared rules block). The village
+# then concentrates execution candidates onto the CO group, which is a wolf-side
+# loss path. The strategy text and the day-1 round-2 task text both carry the
+# prohibition; non-wolf seats must not see it.
+
+
+def test_wolf_strategy_prohibits_3_0_medium_fake() -> None:
+    """At 3-0 (3 seer COs + 0 medium COs), the wolf's strategy block must
+    explicitly forbid adding a medium fake. The reason chain must be present:
+    counter-medium creates 3-2, overflow sum hits 3, non-CO seats become
+    確白級, hangs concentrate onto the CO group. Already-CO'd-as-seer wolves
+    are explicitly allowed to continue that fake (only the *new* 3-0 medium
+    fake is forbidden). Wolf-actor `相方` vocabulary is preserved."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    assert "3-0" in block
+    assert "占い師 CO 3 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "絶対に霊媒師 CO しない" in block
+    assert "自分がグレー位置でも" in block
+    assert "真霊媒師の対抗 CO" in block
+    assert "3-2" in block
+    assert "超過分合計" in block
+    assert "確白級" in block
+    assert "処刑候補が CO 群へ集中" in block
+    # Wolf-actor 相方 vocabulary remains usable in the wolf strategy block.
+    assert "相方" in block
+    # Already-CO'd-seer continuation must be explicitly allowed (the 3-0 ban
+    # is on adding a *new* medium fake, not on continuing existing fakes).
+    assert "既に自分が占い師 CO 中なら" in block
+
+
+def test_wolf_strategy_3_0_preserves_2_0_and_2_1_conditionals() -> None:
+    """The 3-0 prohibition must not silently overwrite the 2-0 / 2-1
+    conditional medium-fake guidance — the 3-0 bullet itself must
+    acknowledge that 2-0 / 2-1 stay conditional, and the pre-existing
+    2-0 / 2-1 bullets must remain in the wolf strategy block."""
+    block = _build_strategy_block(Role.WEREWOLF)
+    # The 3-0 bullet itself acknowledges 2-0 / 2-1 continue to apply.
+    assert "2-0 / 2-1 の条件付き霊媒師騙りは維持" in block
+    # Pre-existing 2-0 / 2-1 bullets must still be there (no regression).
+    assert "2-0" in block
+    assert "2-1" in block
+    assert "占い師 CO 2 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "出ざるを得ない" in block
+
+
+def test_madman_strategy_prohibits_3_0_medium_fake() -> None:
+    """The madman version of the 3-0 prohibition. Same reason chain plus the
+    madman-only 本物の人狼位置を知らない anchor: adding a medium CO at 3-0
+    risks pushing real wolves toward the CO-execution candidate group.
+    Already-CO'd-as-seer continuation is explicitly allowed. Wolf-coordination
+    vocabulary (bare 相方 / 襲撃先を揃える) must remain absent."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "3-0" in block
+    assert "占い師 CO 3 人" in block
+    assert "霊媒師 CO 0 人" in block
+    assert "絶対に霊媒師 CO しない" in block
+    assert "自分がグレー位置でも" in block
+    assert "真霊媒師の対抗 CO" in block
+    assert "3-2" in block
+    assert "超過分合計" in block
+    assert "確白級" in block
+    assert "処刑候補が CO 群へ集中" in block
+    # Madman-only knowledge boundary anchor.
+    assert "本物の人狼位置を知らない" in block
+    # Already-CO'd-seer continuation explicitly allowed.
+    assert "既に自分が占い師 CO 中なら" in block
+    # Wolf-coordination leak guard preserved.
+    assert not re.search(r"相方(?!候補)", block)
+    assert "襲撃先を揃える" not in block
+
+
+def test_madman_strategy_3_0_preserves_2_0_and_2_1_conditionals() -> None:
+    """Madman analog of the wolf preservation test."""
+    block = _build_strategy_block(Role.MADMAN)
+    assert "2-0 / 2-1 の条件付き霊媒師騙りは維持" in block
+    assert "2-0" in block
+    assert "2-1" in block
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_3_0_no_medium_fake_directive_only_in_wolf_madman_strategy(role: Role) -> None:
+    """The 3-0 medium-fake prohibition is wolf-side execution guidance (village
+    and info roles cannot fake CO at all), so the directive must appear only in
+    WEREWOLF and MADMAN strategies. Mirrors
+    `test_three_seer_co_extra_fake_directive_only_in_wolf_madman_strategy`."""
+    block = _build_strategy_block(role)
+    if role in (Role.WEREWOLF, Role.MADMAN):
+        assert "絶対に霊媒師 CO しない" in block
+    else:
+        assert "絶対に霊媒師 CO しない" not in block, (
+            f"wolf-side 3-0 prohibition leaked into {role.name}"
+        )
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round2_wolf_or_madman_includes_3_0_no_medium_fake(
+    role: Role,
+) -> None:
+    """At day-1 round-2, the task-level reminder for wolf and madman must
+    include the 3-0 prohibition (3 seer COs + 0 medium COs → no medium fake-
+    CO, even when self in grey). Composes with (does not replace) the
+    pre-existing 2-0 / 2-1 conditional medium-fake guidance."""
+    text = task_daytime_speech(1, discussion_round=2, role=role)
+    assert "3-0" in text
+    assert "占い師 CO 3 人" in text
+    assert "霊媒師 CO 0 人" in text
+    assert "絶対に霊媒師 CO しない" in text
+    assert "3-2" in text
+    assert "確白級" in text
+    assert "処刑候補が CO 群へ集中" in text
+    # Pre-existing 2-0 / 2-1 guidance still present (no regression).
+    assert "2-0" in text
+    assert "2-1" in text
+    # Leak-guard regression — no wolf-coordination vocab in the task block.
+    assert not re.search(r"相方(?!候補)", text)
+    assert "襲撃先を揃える" not in text
+
+
+@pytest.mark.parametrize("role", [Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.VILLAGER])
+def test_task_daytime_speech_day1_round2_non_wolf_omits_3_0_directive(role: Role) -> None:
+    """Non-wolf/non-madman roles at day-1 round-2 must NOT receive the 3-0
+    medium-fake prohibition: the directive is wolf-side and only fires when
+    role is WEREWOLF or MADMAN."""
+    text = task_daytime_speech(1, discussion_round=2, role=role)
+    assert "絶対に霊媒師 CO しない" not in text
+    assert "占い師 CO 3 人" not in text
+
+
+def test_task_daytime_speech_day1_round2_default_omits_3_0_directive() -> None:
+    """The default day-1 round-2 call (no role) must not include the wolf-
+    side 3-0 directive — only WEREWOLF / MADMAN callers see it."""
+    text = task_daytime_speech(1, discussion_round=2)
+    assert "絶対に霊媒師 CO しない" not in text
+    assert "占い師 CO 3 人" not in text
+
+
+def test_task_daytime_speech_default_omits_3_0_directive() -> None:
+    """The bare default call (no round, no role) must not include the
+    day-1 round-2 wolf-side 3-0 directive."""
+    text = task_daytime_speech(2)
+    assert "3-0" not in text
+    assert "絶対に霊媒師 CO しない" not in text
+
+
+@pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN])
+def test_task_daytime_speech_day1_round1_wolf_or_madman_omits_3_0_directive(
+    role: Role,
+) -> None:
+    """Round 1 of day 1 must NOT carry the round-2 only 3-0 directive — the
+    medium-fake decision (and its 3-0 prohibition) is the round-2 conditional
+    branch. The round-1 simpler suppression (no medium fake at all on round 1)
+    must remain."""
+    text = task_daytime_speech(1, discussion_round=1, role=role)
+    assert "絶対に霊媒師 CO しない" not in text
+    # Round-1 suppression preserved (no regression).
+    assert "day 1 の 1 巡目では霊媒師騙りをしない" in text
+
+
+def test_knight_strategy_includes_day1_round2_2_1_grey4_co() -> None:
+    """At day 1 round 2, in a confirmed 2-1 board with 4 grey seats remaining
+    after excluding the 2 seer COs, the NIGHT_0 random-white target, and the
+    sole medium CO, a true knight in one of those 4 grey seats must CO to
+    narrow the vote pool from 4 to 3. day-1 CO has no guard history yet, so
+    the knight must not fabricate one."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "day 1" in block
+    assert "2 巡目" in block
+    assert "2-1" in block
+    assert "グレーが 4 人" in block
+    assert "自分がそのグレー位置なら" in block
+    assert "騎士 CO" in block
+    assert "投票位置を 4 人から 3 人" in block
+    # day-1 CO must not fabricate guard history / guard-success.
+    assert "捏造しない" in block
+
+
+def test_knight_strategy_includes_day2_guard_success_co() -> None:
+    """On day 2, the knight CO trigger is `not already confirmed-white AND
+    successful guard last night`. The CO must include 護衛日 / 護衛先 / 平和
+    so the village can read the kami-success story; if the knight is already
+    confirmed-white, do not auto-CO on guard success alone."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "day 2" in block
+    assert "自分が確定白ではなく" in block
+    assert "護衛成功した場合" in block
+    assert "騎士 CO" in block
+    assert "護衛日" in block
+    assert "護衛先" in block
+    assert "平和" in block
+    assert "機械的に CO しない" in block
+
+
+def test_knight_strategy_includes_day3_non_kakushiro_co() -> None:
+    """On day 3, the knight must CO unless already confirmed-white. Guard
+    history is published in date order and must be legal (no self-guard, no
+    consecutive guard, no dead-target guard). When a counter-knight appears,
+    judge truth via guard history / guard-success claim / votes / 噛み筋."""
+    block = _build_strategy_block(Role.KNIGHT)
+    assert "day 3" in block
+    assert "自分が確定白でないなら" in block
+    assert "護衛履歴を日付順" in block
+    assert "合法" in block
+    assert "対抗騎士" in block
 
 
 # --------------------------------------------------- build_system_prompt
@@ -2430,3 +2957,198 @@ def test_task_vote_madman_inference_present_but_no_actor_partner() -> None:
     assert "相方を切" not in text
     # Bare `相方` (actor mode) must be absent in the madman vote text.
     assert not re.search(r"相方(?!候補)", text)
+
+
+# ----------------------------------- 縄計算・吊り余裕 (rope plan) in task_vote
+# The rope-plan guidance lives in `task_vote`'s base text so every role — wolf
+# or not — votes with awareness of `残り縄 - 推定残り人狼数` as the margin.
+# Wolf-only enrichment (相方救済 / 身内票 / ライン切り) must remain isolated.
+
+
+def test_task_vote_base_includes_rope_plan_for_all_roles() -> None:
+    """The shared `task_vote` body must teach the rope plan: every vote is
+    chosen against the plan to hang the estimated remaining wolves within the
+    remaining ropes. Bare `相方` (actor mode) must not leak into the base."""
+    text = task_vote(["席1 A", "席2 B"], runoff=False)
+    assert "残り縄" in text
+    assert "推定残り人狼数" in text
+    assert "吊り余裕" in text
+    assert "残り縄 - 推定残り人狼数" in text
+    assert "人狼候補へ票を集中" in text
+    # Reason summary guidance points at rope calculation, not just suspicion.
+    assert "reason_summary" in text
+    assert "縄計算上なぜ今日必要か" in text
+    # Wolf-only block must not leak into base.
+    assert "仲間の人狼" not in text
+    assert not re.search(r"相方(?!候補)", text)
+
+
+@pytest.mark.parametrize(
+    "role",
+    [Role.VILLAGER, Role.SEER, Role.MEDIUM, Role.KNIGHT, Role.MADMAN],
+)
+def test_task_vote_rope_plan_reaches_non_wolf_roles(role: Role) -> None:
+    """Non-wolf voters receive the rope-plan guidance through the same base
+    text, with no wolf-only enrichment regardless of role."""
+    text = task_vote(["席1 A", "席2 B"], runoff=False, role=role)
+    assert "吊り余裕" in text
+    assert "残り縄 - 推定残り人狼数" in text
+    # Wolf-only enrichment must stay out.
+    assert "仲間の人狼" not in text
+    assert "身内票" not in text
+    assert "ライン切り" not in text
+    assert not re.search(r"相方(?!候補)", text)
+
+
+def test_task_vote_wolf_path_keeps_rope_plan_alongside_partner_checklist() -> None:
+    """A wolf voter sees the base rope plan AND the wolf-only partner
+    checklist. The two layers must coexist so the wolf reasons about both
+    rope arithmetic and partner discipline."""
+    text = task_vote(
+        ["席1 A", "席2 B"],
+        runoff=False,
+        role=Role.WEREWOLF,
+        wolf_partner_tokens=["席2 B"],
+    )
+    # Base rope-plan reaches the wolf seat too.
+    assert "吊り余裕" in text
+    assert "残り縄 - 推定残り人狼数" in text
+    # Wolf-only enrichment still appended.
+    assert "仲間の人狼" in text
+    assert "身内票" in text
+
+
+# --------------------------- user_context rope block — margin reminder line
+# The rope block lives in user_context. It must NOT print the actual remaining
+# wolf count, but it should remind the LLM to apply
+# `吊り余裕 = 残り縄 - 推定残り人狼数` against the public-info estimate.
+
+
+def test_build_user_context_rope_block_reminds_hanging_margin() -> None:
+    """The user-context rope block reminds the LLM to compute the hanging
+    margin against the public-info-derived wolf count estimate. The existing
+    `公開情報から推定` line is preserved alongside the new reminder."""
+    seats = [_ctx_seat(i, f"S{i}") for i in range(1, 10)]
+    players = [_ctx_player(i, alive=True) for i in range(1, 10)]
+    out = build_user_context(
+        game=_ctx_game(),
+        me=players[0],
+        my_seat=seats[0],
+        seats=seats,
+        players=players,
+        public_logs=[],
+        private_logs=[],
+    )
+    # Existing public-info estimation note preserved.
+    assert "公開情報から推定" in out
+    # New margin reminder.
+    assert "推定残り人狼数を踏まえ" in out
+    assert "吊り余裕 = 残り縄 - 推定残り人狼数" in out
+
+
+# --------------------------------------------------- task_last_words
+def test_task_last_words_base_text_present() -> None:
+    """Base text covers: framing as last public turn, char range, role-agnostic
+    village-vs-wolf priorities, and meta-leak guard."""
+    text = task_last_words(2)
+    assert "処刑前遺言" in text
+    assert "最後の公開発言を 1 回だけ" in text
+    assert "80〜300 字" in text
+    assert "intent=skip" in text
+    assert "メタ発言" in text
+    assert "村陣営なら" in text
+    assert "人狼陣営なら" in text
+
+
+def test_task_last_words_seer_branch_publishes_results() -> None:
+    """Seer branch directs CO + chronological divination publication."""
+    text = task_last_words(3, role=Role.SEER)
+    assert "占い師 CO" in text
+    assert "初日のランダム白" in text
+    assert "時系列" in text
+
+
+def test_task_last_words_medium_branch_no_fabricated_results() -> None:
+    """Medium must not fabricate results for days with no execution (e.g. day 1)."""
+    text = task_last_words(2, role=Role.MEDIUM)
+    assert "霊媒師 CO" in text
+    assert "存在しない結果を作らない" in text
+
+
+def test_task_last_words_knight_branch_with_history_day_2() -> None:
+    """Knight branch on day 2+ asks for chronological guard history."""
+    text = task_last_words(3, role=Role.KNIGHT)
+    assert "騎士 CO" in text
+    assert "護衛履歴" in text
+    assert "日付順" in text
+    # Defensive guard-claim discipline
+    assert "自分護衛" in text
+    assert "同一対象連続護衛" in text
+
+
+def test_task_last_words_knight_day1_no_history_note() -> None:
+    """Day-1 knight has zero guard history; the prompt must steer them away
+    from a hollow CO and toward public-log推理 instead."""
+    text = task_last_words(1, role=Role.KNIGHT)
+    assert "day 1 は前夜の護衛履歴がありません" in text
+    assert "破綻" in text
+
+
+def test_task_last_words_werewolf_branch_forbids_partner_leak() -> None:
+    """Wolf last-words must reinforce the no-partner-leak rule strongly."""
+    text = task_last_words(2, role=Role.WEREWOLF)
+    assert "仲間の人狼名" in text
+    assert "絶対に書かない" in text
+    assert "夜の真の襲撃先" in text
+    # Available fake routes — but we don't assert ALL of them; just that the
+    # taxonomy is present.
+    assert "霊媒騙り" in text
+    assert "騎士騙り" in text
+    assert "占い騙り" in text
+
+
+def test_task_last_words_madman_branch_no_real_wolf_knowledge() -> None:
+    """Madman must not pretend to know real wolf positions."""
+    text = task_last_words(2, role=Role.MADMAN)
+    assert "本物の人狼位置を知っている前提で話してはいけません" in text
+    assert "誤爆" in text
+
+
+def test_task_last_words_villager_branch_forbids_villager_co() -> None:
+    """Villager last-words explicitly forbids 村人 / 素村 CO (matches
+    `_ROLE_STRATEGIES[Role.VILLAGER]`)."""
+    text = task_last_words(2, role=Role.VILLAGER)
+    assert "村人 CO" in text
+    assert "素村 CO" in text
+    assert "信用を取ろうとしない" in text
+
+
+@pytest.mark.parametrize(
+    "role,foreign",
+    [
+        (Role.VILLAGER, "仲間の人狼名"),  # wolf-only partner-leak prohibition
+        (Role.SEER, "本物の人狼位置を知っている前提"),  # madman line
+        (Role.MEDIUM, "存在しない結果を作らない"),  # this IS in medium, used as positive control
+        (Role.KNIGHT, "村人 CO"),  # villager-only
+        (Role.WEREWOLF, "占い師 CO してください"),  # seer's CO instruction
+    ],
+)
+def test_task_last_words_no_cross_role_leak(role: Role, foreign: str) -> None:
+    """Role-conditional branches must not leak content from other roles. The
+    medium row uses a positive control (the assertion is inverted there)."""
+    text = task_last_words(2, role=role)
+    if role is Role.MEDIUM:
+        assert foreign in text  # positive control on medium's own line
+    else:
+        assert foreign not in text
+
+
+def test_task_last_words_default_no_role_omits_role_specific_branches() -> None:
+    """Without a role, the prompt is the role-agnostic base text only."""
+    text = task_last_words(2)
+    # No role-conditional content should appear.
+    assert "占い師 CO" not in text
+    assert "霊媒師 CO" not in text
+    assert "騎士 CO" not in text
+    assert "仲間の人狼名" not in text
+    assert "村人 CO" not in text
