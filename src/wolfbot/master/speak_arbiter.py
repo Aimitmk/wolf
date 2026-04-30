@@ -342,6 +342,7 @@ class SpeakArbiter:
             past_votes=past_votes,
             seat_names=seat_names_lookup,
             claim_history=claim_history,
+            recipient_seat_no=seat_no,
         )
         try:
             await entry.send(packet.model_dump_json())

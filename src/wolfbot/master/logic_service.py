@@ -49,6 +49,7 @@ def build_logic_packet(
     ] = (),
     seat_names: dict[int, str] | None = None,
     claim_history: ClaimHistory | None = None,
+    recipient_seat_no: int | None = None,
 ) -> LogicPacket:
     """Construct a `LogicPacket` for `recipient_npc_id`.
 
@@ -147,6 +148,58 @@ def build_logic_packet(
                     f"{medium_summary}\n"
                 )
         summary = summary.rstrip()
+        # Per-recipient nudge when the addressee themselves is a CO'd
+        # claimer whose announced result count lags the day-N expected
+        # count. Without this, observation games (a51615d32274 day 2
+        # ユリコ, 100b9e88e75a day 2 シゲミチ) showed the wolf seer
+        # repeating the day-1 result instead of producing the night-1
+        # result on day-2 morning, even though the count rule lives in
+        # the system prompt — the LLM consistently failed to act on
+        # the gap. Surface it here as a direct "this applies to YOU"
+        # instruction so the model can't deflect to general advice.
+        if (
+            recipient_seat_no is not None
+            and recipient_seat_no in claim_history.by_seat
+            and state.day >= 1
+        ):
+            recipient_history = claim_history.by_seat[recipient_seat_no]
+            recipient_seer_count = len(recipient_history.seer_claims)
+            if (
+                recipient_seer_count > 0
+                and recipient_seer_count < expected
+            ):
+                missing = expected - recipient_seer_count
+                summary += (
+                    f"\n\n## 【あなた宛 / 緊急】占いCO 結果の発表が不足しています\n"
+                    f"あなたは占いCO 者で、現在の発表結果は通算 "
+                    f"{recipient_seer_count} 件、本日 day{state.day} 朝の"
+                    f"期待値は {expected} 件 (NIGHT_0 + 各夜 1 件)。"
+                    f"未発表が {missing} 件あります。"
+                    f"**この発話で前夜 (NIGHT_{state.day}) の新しい占い結果を必ず発表し、"
+                    f"`claimed_seer_result` に `{{target_seat, is_wolf}}` を構造化"
+                    f"して入れてください**。"
+                    f"過去の結果 ({', '.join(c.target_name for c in recipient_history.seer_claims)}) "
+                    f"を再表明するだけでは整合しません。"
+                    f"対象は前夜 NIGHT_{state.day} の開始時点で生存していた相手から選ぶこと。"
+                )
+            # Same gating logic for medium claimers: if the seat has
+            # CO'd as medium and yesterday's execution exists in the
+            # public log, they should produce yesterday's medium
+            # result. We don't have a clean execution-count signal in
+            # this packet (the audit games haven't shown medium drift
+            # at the same severity yet), so a softer cumulative-count
+            # instruction is enough — refining when we observe the
+            # failure mode in real games.
+            recipient_medium_count = len(recipient_history.medium_claims)
+            if recipient_medium_count > 0 and state.day >= 2:
+                summary += (
+                    f"\n\n## 【あなた宛】霊媒CO 結果の発表確認\n"
+                    f"あなたは霊媒CO 者で、現在の発表結果は通算 "
+                    f"{recipient_medium_count} 件。day{state.day} 朝の時点で、"
+                    f"昨日 (day{state.day - 1}) の処刑があった場合は"
+                    f"その霊媒結果を `claimed_medium_result` に入れて発表する義務があります。"
+                    f"処刑がなかった日は `is_wolf=null` で「結果なし」を明言してください。"
+                )
     # Prefer the multi-addressee set; fall back to the legacy singular
     # field for state objects that haven't been migrated (e.g. test
     # fixtures that only set `last_addressed_seat`).
