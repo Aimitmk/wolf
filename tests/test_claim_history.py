@@ -160,10 +160,30 @@ def test_collect_claim_history_drops_partial_seer_claims() -> None:
     assert history.by_seat == {}
 
 
-def test_expected_seer_claim_count_for_day_follows_n_plus_one_rule() -> None:
-    assert expected_seer_claim_count_for_day(0) == 1  # NIGHT_0 random white
-    assert expected_seer_claim_count_for_day(1) == 2  # + night 0 result
-    assert expected_seer_claim_count_for_day(4) == 5
+def test_expected_seer_claim_count_for_day_returns_announced_entries() -> None:
+    """Real seer's announced-claim count: 1 entry per declared day.
+
+    The claim ledger tags each entry with the day it was *announced*
+    (not the night the divination happened on). NIGHT_0 surfaces day-1
+    morning → entry day=1; NIGHT_K (K>=1) surfaces day-(K+1) morning →
+    entry day=K+1. So by day-N morning the count is exactly N. This
+    matches `claim_validator._validate_seer_fake`'s
+    "1 entry per declared day" rule (`same_day_priors`) — the prompt
+    builder's expected count and the validator's structural rule must
+    not disagree, otherwise an "緊急: 結果が不足" nudge tells the LLM
+    to declare a 2nd same-day target that the validator instantly
+    rejects as `seer_target_swap` (regression observed in game
+    7faf339713cf where ジナ got fabrication-capped on day-1 runoff
+    and never spoke).
+    """
+    # Day 0: SETUP / NIGHT_0 only — no morning, no announced results.
+    assert expected_seer_claim_count_for_day(0) == 0
+    # Day 1 morning: only NIGHT_0's random white announced (1 entry).
+    assert expected_seer_claim_count_for_day(1) == 1
+    # Day 2 morning: NIGHT_0 + NIGHT_1 announced (2 entries).
+    assert expected_seer_claim_count_for_day(2) == 2
+    # Day N morning: N entries.
+    assert expected_seer_claim_count_for_day(4) == 4
     # Defensive: negative day clamps to zero so the rule reads "no
     # results before the game has begun" rather than blowing up.
     assert expected_seer_claim_count_for_day(-1) == 0
@@ -217,9 +237,10 @@ def test_logic_packet_summary_includes_claim_history_block() -> None:
     assert "公開された占い/霊媒CO結果" in summary
     # Distinct-claimer count vs cap shown in the role header.
     assert "通算 2 件 / 上限 3 件" in summary
-    # Per-day expected count (= day+1 results per real seer) shown
-    # under the seer header so the LLM has a numeric anchor.
-    assert "day+1 = 2 件まで整合" in summary
+    # Per-day expected count (= N entries by day-N morning, one per
+    # declared day) shown under the seer header so the LLM has a
+    # numeric anchor that matches the validator's same-day rule.
+    assert "day1 朝までに通算 1 件まで整合" in summary
     # Per-row format includes seat number + alive/dead tag inline.
     assert "Jonas (席2," in summary
     assert "day1: Comet白" in summary

@@ -349,6 +349,56 @@ def test_build_user_prompt_renders_recent_speeches_and_seats() -> None:
     assert "席1 Alice [テキスト]" not in user_msg
 
 
+def test_build_user_prompt_runoff_speech_block_appears_only_in_runoff_phase() -> None:
+    """Tied candidates speaking in DAY_RUNOFF_SPEECH need a phase-specific
+    nudge to (1) name a suspect and (2) cite concrete evidence — not just
+    re-cite their CO/seer result. The nudge must NOT appear in
+    DAY_DISCUSSION (where the rotation is broader and the LLM speech is
+    already conversational). Regression for game 7faf339713cf where ジナ
+    only ever re-cited her seer result during runoff and got
+    fabrication-capped trying to invent a 2nd same-day claim.
+    """
+    logic = LogicPacket(
+        ts=1,
+        trace_id="t",
+        packet_id="lp",
+        phase_id="g1::day1::DAY_RUNOFF_SPEECH::1",
+        recipient_npc_id="npc_1",
+        public_state_summary="alive=[1,2,3]",
+        expires_at_ms=9999,
+    )
+    runoff_request = SpeakRequest(
+        ts=1,
+        trace_id="t",
+        request_id="sr",
+        npc_id="npc_1",
+        phase_id="g1::day1::DAY_RUNOFF_SPEECH::1",
+        seat_no=2,
+        logic_packet_id="lp",
+        suggested_intent="speak",
+        max_chars=140,
+        expires_at_ms=5000,
+        alive_seats=((1, "Alice"), (2, "Bob"), (3, "🌙セツ")),
+    )
+    user_msg = _build_user(logic, runoff_request)
+    # Runoff guidance must surface the two required content axes.
+    assert "決選投票 直前の最終演説" in user_msg
+    assert "誰を最も怪しいと思っているか" in user_msg
+    assert "その根拠" in user_msg
+    # And reinforce the validator's "no new same-day result" rule so the
+    # LLM doesn't try to invent a 2nd day-1 divination target.
+    assert "新しい占い/霊媒結果は出せない" in user_msg
+
+    # DAY_DISCUSSION (different phase id) must NOT include the runoff
+    # block — it would distort regular discussion into pre-vote
+    # accusations.
+    discuss_request = runoff_request.model_copy(
+        update={"phase_id": "g1::day1::DAY_DISCUSSION::1"}
+    )
+    discuss_msg = _build_user(logic, discuss_request)
+    assert "決選投票 直前の最終演説" not in discuss_msg
+
+
 def test_build_user_prompt_uses_npc_state_over_request_fields() -> None:
     """Phase-D: when an `NpcGameState` is supplied, the speech user prompt
     pulls alive/dead/private info from it rather than the SpeakRequest.

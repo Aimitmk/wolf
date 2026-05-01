@@ -129,8 +129,9 @@ def build_logic_packet(
         #    to know whether a claimer is still around.
         # 4. Distinct-claimer count vs cap is shown next to the role
         #    header (max 3 seer / 2 medium per CLAUDE rules). Per-day
-        #    expected count (= day+1 results per real seer) stays as a
-        #    separate sub-line under the seer header.
+        #    expected count (= N results per real seer by day-N morning,
+        #    one per declared day) stays as a separate sub-line under
+        #    the seer header.
         expected = expected_seer_claim_count_for_day(state.day)
         seer_claimers = sorted(
             s for s, h in claim_history.by_seat.items() if h.seer_claims
@@ -153,7 +154,7 @@ def build_logic_packet(
         if seer_claimers:
             summary += (
                 f"\n### 占いCO  通算 {len(seer_claimers)} 件 / 上限 3 件 "
-                f"(各人の発表は朝までに day+1 = {expected} 件まで整合)\n"
+                f"(各人の発表は day{state.day} 朝までに通算 {expected} 件まで整合)\n"
             )
             for seat_no in seer_claimers:
                 history = claim_history.by_seat[seat_no]
@@ -205,18 +206,24 @@ def build_logic_packet(
                 and recipient_seer_count < expected
             ):
                 missing = expected - recipient_seer_count
+                # Past-night index in the ledger convention: at day-N
+                # morning the most recent night is NIGHT_(N-1) (NIGHT_0
+                # is the night before day 1, NIGHT_(N-1) is the night
+                # before day N). `prev_night = state.day - 1` is the
+                # one whose result is announced *today*.
+                prev_night = max(0, state.day - 1)
                 summary += (
                     f"\n\n## 【あなた宛 / 緊急】占いCO 結果の発表が不足しています\n"
                     f"あなたは占いCO 者で、現在の発表結果は通算 "
-                    f"{recipient_seer_count} 件、本日 day{state.day} 朝の"
-                    f"期待値は {expected} 件 (NIGHT_0 + 各夜 1 件)。"
+                    f"{recipient_seer_count} 件。day{state.day} 朝までの"
+                    f"期待値は {expected} 件 (day1 朝で 1 件、以後毎朝 +1 件)。"
                     f"未発表が {missing} 件あります。"
-                    f"**この発話で前夜 (NIGHT_{state.day}) の新しい占い結果を必ず発表し、"
+                    f"**この発話で前夜 (NIGHT_{prev_night}) の新しい占い結果を必ず発表し、"
                     f"`claimed_seer_result` に `{{target_seat, is_wolf}}` を構造化"
                     f"して入れてください**。"
                     f"過去の結果 ({', '.join(c.target_name for c in recipient_history.seer_claims)}) "
                     f"を再表明するだけでは整合しません。"
-                    f"対象は前夜 NIGHT_{state.day} の開始時点で生存していた相手から選ぶこと。"
+                    f"対象は NIGHT_{prev_night} の開始時点で生存していた相手から選ぶこと。"
                 )
             # Same gating logic for medium claimers: if the seat has
             # CO'd as medium and yesterday's execution exists in the

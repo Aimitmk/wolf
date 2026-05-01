@@ -24,11 +24,16 @@ per-game cache is required.
 
 Day-vs-count integrity
 ----------------------
-A real seer at day-N morning has performed ``N + 1`` divinations
-(NIGHT_0 random white at day=0, plus one per night through night
-N-1, surfaced morning of day N). A liar must mirror that count or
-get caught — :func:`expected_claim_count_for_day` exposes the rule
-so the prompt builder and viewer can both reference the same number.
+A real seer at day-N morning has issued ``N`` public divination
+claims: 1 for NIGHT_0 (random white, declared day-1 morning), plus
+1 per subsequent night surfaced on the next morning. The claim
+ledger tags each entry with the day it was *announced*, so by day
+N morning the count is exactly N (one entry per declared day,
+day=1..N). :func:`expected_seer_claim_count_for_day` exposes the
+rule so the prompt builder and viewer can both reference the same
+number — and so the count never disagrees with
+``claim_validator``'s ``same_day_priors`` (= "1 entry per declared
+day") rule. A liar must mirror that count or get caught.
 """
 
 from __future__ import annotations
@@ -160,16 +165,25 @@ def collect_claim_history(
 
 
 def expected_seer_claim_count_for_day(day: int) -> int:
-    """Number of seer results a real seer should have announced by day N.
+    """Number of seer claim entries a real seer should have announced by day N.
 
-    The seer performs the NIGHT_0 random white on day 0 and one
-    divination each subsequent night. The day-N morning therefore
-    surfaces ``N + 1`` cumulative results (day 0 + nights 0..N-1).
-    A claimer reporting fewer or more results breaks the invariant.
+    The claim ledger tags each entry with the day it was *announced*:
+
+    - NIGHT_0's random white is declared on day 1 morning → entry day=1.
+    - NIGHT_K's result (for K>=1) is declared on day K+1 morning →
+      entry day=K+1.
+
+    So by day N morning the seer has announced exactly N entries
+    (one per declared day, day=1..N). This matches
+    :func:`wolfbot.master.claim_validator._validate_seer_fake`'s
+    "1 entry per declared day" rule (``same_day_priors``).
+
+    Day 0 has no morning discussion (SETUP / NIGHT_0 are transient),
+    so the rule reads "no announced results before day 1".
     """
-    if day < 0:
+    if day < 1:
         return 0
-    return day + 1
+    return day
 
 
 def expected_medium_claim_count_for_day(executions_so_far: int) -> int:

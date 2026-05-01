@@ -232,8 +232,11 @@ def _build_system(
         "両フィールドとも `null` にする。"
         "プロンプト中の `## 公開された占い/霊媒CO結果` ブロックが過去の発表履歴 (公式記録) であり、"
         "そこに矛盾する/重複する/数が合わない結果を出すと **破綻判定** され狼/騙り側は即吊られる。"
-        "占いCO した seat は day N の朝までに通算 N 個の結果を持つ "
-        "(NIGHT_0 の day0 ランダム白 + 毎晩1個追加; day1 朝なら通算 1 個、day2 朝なら 2 個…)。"
+        "占いCO した seat は day N の朝までに通算 N 個の結果を発表できる "
+        "(day1 朝で NIGHT_0 ランダム白 1 件、day N 朝までに各夜分が +1 件ずつ加算; "
+        "day1 朝なら通算 1 個、day2 朝なら 2 個…)。"
+        "**同じ day に 2 件目の占い結果は出せない (本物の占い師は一夜 1 件まで)**。"
+        "決選演説 (DAY_RUNOFF_SPEECH) もその day 内なので、新しい占い結果は出さない。"
         "1 回の発話で複数 seat を占ったと言う「すべて白」「全員白」は破綻なので絶対に出さない。\n"
         "- 特定の席に向けて話す場合は `addressed_seat_nos` にその席番号の配列を入れる。"
         "1人だけなら `[3]`、複数人に同時に問いかけるなら `[2, 3]` (例「セツとジナはどう?」)。"
@@ -306,6 +309,34 @@ def _build_user(
             "あなたの非公開記録 (`自分の占い結果` / `自分の霊媒結果`) "
             "または過去にあなたが公の場で出した主張と完全に一致する内容にする"
             "(新しい結果がないなら null)。"
+        )
+
+    # DAY_RUNOFF_SPEECH-specific guidance: tied candidates each get one
+    # final speech before the runoff vote. Without a phase-specific
+    # nudge the speech LLM defaults to the DAY_DISCUSSION pattern of
+    # "re-cite my divination result and ask people to trust me", which
+    # is structurally weak — the village already heard that during the
+    # main discussion. A runoff speech needs to PUSH suspicion onto a
+    # specific other player (with reasoning) so listeners have a
+    # reason to vote the other way.
+    if "DAY_RUNOFF_SPEECH" in request.phase_id:
+        lines.append("")
+        lines.append("## 【決選投票 直前の最終演説】")
+        lines.append(
+            "あなたは決選投票の対象として、これが処刑回避のための最後の発言です。"
+            "占い結果や霊媒結果の再表明だけで終わると村は判断材料を得られず、"
+            "あなたへの票は動きません。次の 2 つを必ず言葉にしてください:\n"
+            "1. **誰を最も怪しいと思っているか** — 同じ決選候補者または他の生存者を"
+            "1 人名指しする (display_name で呼ぶ)。\n"
+            "2. **その根拠** — 投票履歴の不自然さ、CO/対抗のタイミング、"
+            "発言の矛盾、占い・霊媒結果の整合性、ライン (庇い合い) の動きなど、"
+            "公開ログから引ける具体的な事実を 1 つ以上挙げる。\n"
+            "自分が真を主張する場合は、相手 (対抗 CO) の何が偽だと判断したかを"
+            "具体的に指摘する (例: 「対抗の発表が遅すぎた」「占い先の選び方が黒先狙いに見えない」"
+            "「私への投票理由が薄い」など)。"
+            "「私を信じてください」「誠実に話します」のような感情訴えだけでは票は動きません。"
+            "新しい占い/霊媒結果は出せない (`claimed_seer_result` / `claimed_medium_result` は"
+            "`null`、または既に公表した過去の結果と完全一致のいずれか)。"
         )
 
     # Roster header — the ONLY block where seat numbers explicitly
