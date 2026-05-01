@@ -57,15 +57,19 @@ class DecisionDispatcherConfig:
     time so we don't burst N parallel requests at the LLM provider.
     Game ``6a0dd72d63e3`` exhausted Gemini's per-minute quota with a
     9-NPC parallel vote dispatch (9 requests in <1s → 429 RESOURCE_
-    EXHAUSTED on 5+ of them, all returning ``target=None`` with
-    ``reason=llm_error``). 800ms * 9 actors = ~7.2s spread keeps the
-    wall-clock under 12s while smoothing the request rate enough that
-    the provider's rate limiter doesn't throttle the late ones. Set
-    to 0 in tests so they finish in milliseconds.
+    EXHAUSTED on 5+ of them). Game ``824ebf79edf4`` (post-800ms
+    rollout) still hit a 429 on Comet's NIGHT_1 attack call because
+    the per-project Vertex quota is shared across speech + decision
+    + wolf-chat phases that run back-to-back. Bumping to 1500ms gives
+    the rate limiter ~13.5s of spread for 9 actors; combined with the
+    per-task ``request_ttl_ms`` (12s computed at task start) the worst-
+    case wall-clock is ~25s for a fully-staggered run, well under any
+    discussion or night-action deadline. Tests pin this to 0 so they
+    finish in milliseconds.
     """
 
     request_ttl_ms: int = 12_000
-    inter_request_stagger_ms: int = 800
+    inter_request_stagger_ms: int = 1500
 
 
 @dataclass
