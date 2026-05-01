@@ -4102,3 +4102,100 @@ async def test_fabrication_cap_blocks_seat_from_re_selection(
     assert any('"speak_request"' in m for m in b_buf), (
         "seat 3 should have been picked, got buf: " + str(b_buf)
     )
+
+
+async def test_co_cap_exceeded_one_shot_skip_no_retry(repo: SqliteRepo) -> None:
+    """A 4th seat trying to seer-CO when the ledger already has 3
+    distinct seers gets PlaybackRejected on this dispatch — but the
+    fabrication retry counter stays 0 and the seat is NOT blocked
+    from future picks. The cap is a structural rule, not a self-
+    correction problem; retrying the same NPC with feedback won't
+    help (the model would have to abandon CO entirely, which is
+    cleaner to enforce by simply not re-dispatching this attempt)."""
+    from wolfbot.domain.discussion import (
+        SpeakerKind as SK,
+    )
+    from wolfbot.domain.discussion import (
+        SpeechEvent as SE,
+    )
+    from wolfbot.domain.discussion import (
+        SpeechSource as SS,
+    )
+    from wolfbot.domain.ws_messages import ClaimedSeerResult
+
+    g = Game(
+        id="rv_cocap", guild_id="gu", host_user_id="h",
+        phase=Phase.DAY_DISCUSSION, day_number=1,
+        main_text_channel_id="c1", main_vc_channel_id="c2",
+        created_at=0, discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(seat_no=1, display_name="A", discord_user_id=None, is_llm=True, persona_key="setsu"),
+        Seat(seat_no=2, display_name="B", discord_user_id=None, is_llm=True, persona_key="gina"),
+        Seat(seat_no=3, display_name="C", discord_user_id=None, is_llm=True, persona_key="raqio"),
+        Seat(seat_no=4, display_name="D", discord_user_id=None, is_llm=True, persona_key="comet"),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in [(1, Role.SEER), (2, Role.WEREWOLF), (3, Role.MADMAN), (4, Role.VILLAGER)]:
+        await repo.set_player_role(g.id, sn, role)
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    await store.insert(make_phase_baseline(
+        game_id=g.id, phase_id=phase_id, day=1, phase=Phase.DAY_DISCUSSION,
+        alive_seat_nos=(1, 2, 3, 4), created_at_ms=900,
+    ))
+    # Seed 3 prior seer COs in speech_events from seats 1, 2, 3.
+    for i, sn in enumerate([1, 2, 3]):
+        await store.insert(SE(
+            event_id=f"e_co_{sn}", game_id=g.id, phase_id=phase_id,
+            day=1, phase=Phase.DAY_DISCUSSION,
+            source=SS.NPC_GENERATED, speaker_kind=SK.NPC,
+            speaker_seat=sn, text=f"占い師CO from seat {sn}",
+            co_declaration="seer",
+            claimed_seer_target_seat=sn % 4 + 1,
+            claimed_seer_is_wolf=False,
+            created_at_ms=1000 + i,
+        ))
+    registry = InMemoryNpcRegistry()
+    npc4_buf: list[str] = []
+    registry.register(
+        npc_id="npc_p4", discord_bot_user_id="bot4", supported_voices=(),
+        version="1", send=_captured_send(npc4_buf), now_ms=1000,
+        persona_key="comet",
+    )
+    registry.assign("npc_p4", seat=4, game_id=g.id, phase_id=phase_id)
+    discussion = DiscussionService(store=store)
+    arb = SpeakArbiter(repo=repo, registry=registry, discussion=discussion, now_ms=lambda: 1500)
+
+    state = PublicDiscussionState(
+        game_id=g.id, phase_id=phase_id, day=1,
+        alive_seat_nos=frozenset({1, 2, 3, 4}),
+        silent_seats=frozenset({4}),
+    )
+    req, _ = await arb.dispatch_request(
+        state=state, candidate_npc_id="npc_p4", seat_no=4, game_id=g.id,
+    )
+    assert req is not None
+    npc4_buf.clear()
+
+    # Seat 4 (villager) tries to CO seer despite 3 already out.
+    bad = SpeakResult(
+        ts=1600, trace_id="t", request_id=req.request_id,
+        npc_id="npc_p4", phase_id=req.phase_id, status="accepted",
+        text="僕も占い師だよ", co_declaration="seer",
+        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=False),
+    )
+    ok, reason = await arb.handle_speak_result(
+        bad, current_phase_id=req.phase_id, day=1,
+        phase=Phase.DAY_DISCUSSION,
+    )
+    assert not ok
+    assert reason == "seer_co_cap_exceeded"
+    # PlaybackRejected was sent.
+    assert any('"playback_rejected"' in m for m in npc4_buf)
+    # Fabrication retry counter stayed 0 (cap is NOT a fabrication).
+    assert (g.id, req.phase_id, "npc_p4") not in arb._fabrication_retries  # type: ignore[attr-defined]
+    # Seat is NOT in the cap-block set (= remains eligible for future picks).
+    assert 4 not in arb._fabrication_capped.get((g.id, req.phase_id), set())  # type: ignore[attr-defined]

@@ -419,3 +419,108 @@ def test_madman_first_seer_claim_passes() -> None:
         prior_public_claims=ClaimerHistory(claimer_seat=8),
     )
     assert res.ok
+
+
+# ─── CO saturation cap ───────────────────────────────────────────────
+
+
+def test_4th_seer_co_rejected() -> None:
+    """Reproduces game `59d5377c6794`: a 4th seat tries to seer-CO when
+    3 distinct seats already have seer claims in the public ledger."""
+    from wolfbot.master.claim_validator import REASON_SEER_CO_CAP_EXCEEDED
+
+    res = validate_claim_against_truth(
+        speaker_role=Role.VILLAGER,
+        speaker_seat=6,
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        claimed_seer=ClaimedSeerResult(target_seat=1, is_wolf=False),
+        claimed_medium=None,
+        # Speaker has no prior CO of their own.
+        prior_public_claims=ClaimerHistory(claimer_seat=6),
+        # 3 OTHER seats already CO'd seer.
+        seer_co_count=3,
+    )
+    assert not res.ok
+    assert res.reason == REASON_SEER_CO_CAP_EXCEEDED
+    assert "3 件" in (res.feedback or "")
+
+
+def test_3rd_seer_co_passes_when_under_cap() -> None:
+    """At seer_co_count=2, a 3rd CO is still legal (within the cap)."""
+    res = validate_claim_against_truth(
+        speaker_role=Role.WEREWOLF,
+        speaker_seat=4,
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        claimed_seer=ClaimedSeerResult(target_seat=1, is_wolf=False),
+        claimed_medium=None,
+        prior_public_claims=ClaimerHistory(claimer_seat=4),
+        seer_co_count=2,
+    )
+    assert res.ok
+
+
+def test_repeat_claim_from_same_speaker_at_cap_passes() -> None:
+    """The cap only blocks NEW CO claimers. A speaker who's already
+    CO'd seer can keep adding new daily results past day 1 even when
+    the ledger has 3 distinct claimers (they're one of those 3)."""
+    from wolfbot.master.claim_history import ClaimedSeerEntry
+
+    prior = ClaimerHistory(
+        claimer_seat=4,
+        seer_claims=(
+            ClaimedSeerEntry(
+                day=1, target_seat=1, target_name="席1",
+                is_wolf=False, declared_at_event_id="e1",
+            ),
+        ),
+    )
+    res = validate_claim_against_truth(
+        speaker_role=Role.WEREWOLF,
+        speaker_seat=4,
+        day=2,
+        phase=Phase.DAY_DISCUSSION,
+        claimed_seer=ClaimedSeerResult(target_seat=2, is_wolf=False),
+        claimed_medium=None,
+        prior_public_claims=prior,
+        seer_co_count=3,
+    )
+    assert res.ok
+
+
+def test_3rd_medium_co_rejected() -> None:
+    """Medium cap is 2. A 3rd medium CO from a new claimer is rejected."""
+    from wolfbot.domain.ws_messages import ClaimedMediumResult
+    from wolfbot.master.claim_validator import REASON_MEDIUM_CO_CAP_EXCEEDED
+
+    res = validate_claim_against_truth(
+        speaker_role=Role.VILLAGER,
+        speaker_seat=5,
+        day=2,
+        phase=Phase.DAY_DISCUSSION,
+        claimed_seer=None,
+        claimed_medium=ClaimedMediumResult(target_seat=3, is_wolf=False),
+        prior_public_claims=ClaimerHistory(claimer_seat=5),
+        medium_co_count=2,
+        executions_so_far=1,
+    )
+    assert not res.ok
+    assert res.reason == REASON_MEDIUM_CO_CAP_EXCEEDED
+
+
+def test_2nd_medium_co_passes_when_under_cap() -> None:
+    from wolfbot.domain.ws_messages import ClaimedMediumResult
+
+    res = validate_claim_against_truth(
+        speaker_role=Role.WEREWOLF,
+        speaker_seat=5,
+        day=2,
+        phase=Phase.DAY_DISCUSSION,
+        claimed_seer=None,
+        claimed_medium=ClaimedMediumResult(target_seat=3, is_wolf=False),
+        prior_public_claims=ClaimerHistory(claimer_seat=5),
+        medium_co_count=1,
+        executions_so_far=1,
+    )
+    assert res.ok

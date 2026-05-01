@@ -54,6 +54,7 @@ from wolfbot.domain.ws_messages import (
 from wolfbot.llm.prompt_builder import build_strategy_block
 from wolfbot.master.claim_history import ClaimHistory, collect_claim_history
 from wolfbot.master.claim_validator import (
+    CO_CAP_REASONS,
     FABRICATION_REASONS,
     ActualMediumEvent,
     ActualSeerEvent,
@@ -914,6 +915,18 @@ class SpeakArbiter:
             prior_for_speaker = (
                 claim_history.by_seat.get(pending.seat_no) if claim_history is not None else None
             )
+            # Count distinct claimers per role for the global CO cap
+            # (max 3 seer / max 2 medium). A seat with non-empty
+            # seer_claims has CO'd at least once → counts as one
+            # distinct claimer.
+            seer_co_count = 0
+            medium_co_count = 0
+            if claim_history is not None:
+                for ch in claim_history.by_seat.values():
+                    if ch.seer_claims:
+                        seer_co_count += 1
+                    if ch.medium_claims:
+                        medium_co_count += 1
             validation = validate_claim_against_truth(
                 speaker_role=speaker_role or Role.VILLAGER,
                 speaker_seat=pending.seat_no,
@@ -925,7 +938,24 @@ class SpeakArbiter:
                 actual_medium_history=actual_medium,
                 prior_public_claims=prior_for_speaker,
                 executions_so_far=executions_so_far,
+                seer_co_count=seer_co_count,
+                medium_co_count=medium_co_count,
             )
+            if not validation.ok and validation.reason in CO_CAP_REASONS:
+                # CO cap exceeded: drop the audio (PlaybackRejected) and
+                # rotate to the next picker pick. Don't burn fabrication
+                # retries — the cap is a structural rule, not a self-
+                # correction problem. The same NPC remains eligible for
+                # subsequent dispatches; if they CO again next time,
+                # they get rejected again, but no retry cascade happens.
+                log.info(
+                    "co_cap_exceeded_skip game=%s npc=%s seat=%s reason=%s",
+                    pending.game_id,
+                    result.npc_id,
+                    pending.seat_no,
+                    validation.reason,
+                )
+                return await _reject_and_advance(validation.reason)
             if not validation.ok and validation.reason in FABRICATION_REASONS:
                 key = (pending.game_id, result.phase_id, result.npc_id)
                 self._fabrication_retries[key] = self._fabrication_retries.get(key, 0) + 1

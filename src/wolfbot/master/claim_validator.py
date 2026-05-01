@@ -42,12 +42,24 @@ REASON_SEER_WRONG_VERDICT = "fabricated_seer_verdict"
 REASON_SEER_DAY1_OVERFLOW = "day1_seer_claim_overflow"
 REASON_SEER_TARGET_SWAP = "seer_target_swap"
 REASON_SEER_VERDICT_FLIP = "seer_verdict_flip"
+REASON_SEER_CO_CAP_EXCEEDED = "seer_co_cap_exceeded"
 REASON_MEDIUM_FABRICATED_TARGET = "fabricated_medium_target"
 REASON_MEDIUM_WRONG_VERDICT = "fabricated_medium_verdict"
 REASON_MEDIUM_DAY1 = "day1_medium_claim"
 REASON_MEDIUM_NO_EXECUTION = "medium_claim_without_execution"
 REASON_MEDIUM_TARGET_SWAP = "medium_target_swap"
 REASON_MEDIUM_VERDICT_FLIP = "medium_verdict_flip"
+REASON_MEDIUM_CO_CAP_EXCEEDED = "medium_co_cap_exceeded"
+
+# Maximum number of distinct claimers per CO role. Beyond this, a fresh
+# CO from a not-yet-CO'd seat is structurally fabricated:
+#   * seer  — 真 1 + 狼 2 + 狂人 1 = 4 theoretical max, but a 4th CO can
+#              only come from a non-roleholder villager and is immediately
+#              cut by the village ledger.
+#   * medium — 真 1 + 狼/狂人 1 騙り = 2 theoretical max; 3rd is broken.
+#   * knight — same shape as medium.
+SEER_CO_CAP = 3
+MEDIUM_CO_CAP = 2
 
 FABRICATION_REASONS = frozenset(
     {
@@ -63,6 +75,17 @@ FABRICATION_REASONS = frozenset(
         REASON_MEDIUM_TARGET_SWAP,
         REASON_MEDIUM_VERDICT_FLIP,
     }
+)
+
+# CO-cap rejection reasons are NOT in FABRICATION_REASONS by design.
+# Fabrication rejections trigger the same-NPC retry loop with feedback;
+# the cap is a structural rule (= "you literally cannot CO this role
+# anymore, no amount of self-correction will fix it"), so the right
+# response is a one-time soft skip — drop this dispatch's audio, let
+# the picker rotate to the next NPC, and don't burn retries on a
+# speaker that the model can't help fixing.
+CO_CAP_REASONS = frozenset(
+    {REASON_SEER_CO_CAP_EXCEEDED, REASON_MEDIUM_CO_CAP_EXCEEDED}
 )
 
 
@@ -348,6 +371,8 @@ def validate_claim_against_truth(
     actual_medium_history: Sequence[ActualMediumEvent] = (),
     prior_public_claims: ClaimerHistory | None = None,
     executions_so_far: int = 0,
+    seer_co_count: int = 0,
+    medium_co_count: int = 0,
 ) -> ValidationResult:
     """Single entry point: validate this utterance's structured claims.
 
@@ -359,11 +384,43 @@ def validate_claim_against_truth(
     Both ``claimed_seer`` and ``claimed_medium`` may be ``None`` (the
     common case when the utterance doesn't announce a new result);
     that's always accepted.
+
+    ``seer_co_count`` / ``medium_co_count`` are the count of *distinct
+    seats* that have already issued a CO of that role in the public
+    ledger. When this seat is brand-new to the role (no prior claim
+    of their own) AND the count is already at the structural cap
+    (3 for seer, 2 for medium), the new CO is rejected as
+    fabrication. Game ``59d5377c6794`` reproduced this: a 4th seer
+    CO appeared (seat 6 ジョナス) on day 1 explicitly noting "占い師
+    が三人も揃うとはね、私こそが導き手" and the prompt-side
+    rule didn't stop it — only a hard validator catches it.
     """
     prior_seer = prior_public_claims.seer_claims if prior_public_claims else ()
     prior_medium = prior_public_claims.medium_claims if prior_public_claims else ()
 
     if claimed_seer is not None:
+        # CO cap check: applies BEFORE real/fake-specific rules. If the
+        # ledger already has SEER_CO_CAP distinct claimers and this
+        # speaker hasn't claimed yet, the CO is structurally fabricated
+        # regardless of role (real seer would still fail this — but
+        # `seer_co_count >= cap` while the real seer hasn't CO'd is
+        # itself impossible because the real seer is one of the distinct
+        # claimers; so this branch only fires for non-real CO inflation).
+        if not prior_seer and seer_co_count >= SEER_CO_CAP:
+            return ValidationResult.reject(
+                reason=REASON_SEER_CO_CAP_EXCEEDED,
+                feedback=(
+                    f"前回の発話で占い師 CO を出したが、"
+                    f"既に公開ログ上 {seer_co_count} 件の占い師 CO が出ている。"
+                    f"占い師 CO は構造的に最大 {SEER_CO_CAP} 件 (真 1 + 狼 2 + 狂人 1) で、"
+                    f"{SEER_CO_CAP + 1} 件目は村陣営の村人騙りとしてしか説明がつかず、"
+                    "村側に強い狼/狂人ラインとして即座に切られる破綻行動である。"
+                    "次の発話では占い師 CO に出ないこと "
+                    "(`co_declaration=null`、`claimed_seer_result=null` を設定)。"
+                    "潜伏のまま発話するか、別役職 (霊媒/騎士) の対抗 CO 余地を考える "
+                    "(ただし霊媒/騎士も既に上限に達していないか確認すること)。"
+                ),
+            )
         if speaker_role is Role.SEER:
             res = _validate_seer_real(
                 claim=claimed_seer,
@@ -382,6 +439,19 @@ def validate_claim_against_truth(
                 return res
 
     if claimed_medium is not None:
+        # Mirror the seer cap for medium (max 2 distinct claimers).
+        if not prior_medium and medium_co_count >= MEDIUM_CO_CAP:
+            return ValidationResult.reject(
+                reason=REASON_MEDIUM_CO_CAP_EXCEEDED,
+                feedback=(
+                    f"前回の発話で霊媒師 CO を出したが、"
+                    f"既に公開ログ上 {medium_co_count} 件の霊媒師 CO が出ている。"
+                    f"霊媒師 CO は構造的に最大 {MEDIUM_CO_CAP} 件 (真 1 + 狼/狂人 1) で、"
+                    f"{MEDIUM_CO_CAP + 1} 件目は本物の霊媒師ではあり得ない破綻行動である。"
+                    "次の発話では霊媒師 CO に出ないこと "
+                    "(`co_declaration=null`、`claimed_medium_result=null` を設定)。"
+                ),
+            )
         if speaker_role is Role.MEDIUM:
             res = _validate_medium_real(
                 claim=claimed_medium,
@@ -404,18 +474,23 @@ def validate_claim_against_truth(
 
 
 __all__ = [
+    "CO_CAP_REASONS",
     "FABRICATION_REASONS",
+    "MEDIUM_CO_CAP",
+    "REASON_MEDIUM_CO_CAP_EXCEEDED",
     "REASON_MEDIUM_DAY1",
     "REASON_MEDIUM_FABRICATED_TARGET",
     "REASON_MEDIUM_NO_EXECUTION",
     "REASON_MEDIUM_TARGET_SWAP",
     "REASON_MEDIUM_VERDICT_FLIP",
     "REASON_MEDIUM_WRONG_VERDICT",
+    "REASON_SEER_CO_CAP_EXCEEDED",
     "REASON_SEER_DAY1_OVERFLOW",
     "REASON_SEER_FABRICATED_TARGET",
     "REASON_SEER_TARGET_SWAP",
     "REASON_SEER_VERDICT_FLIP",
     "REASON_SEER_WRONG_VERDICT",
+    "SEER_CO_CAP",
     "ActualMediumEvent",
     "ActualSeerEvent",
     "ValidationResult",
