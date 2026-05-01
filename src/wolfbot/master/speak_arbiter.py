@@ -40,7 +40,7 @@ from wolfbot.domain.discussion import (
 )
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Seat
-from wolfbot.domain.rules import compute_vote_result
+from wolfbot.domain.rules import compute_vote_result, is_detected_as_wolf
 from wolfbot.domain.ws_messages import (
     PlaybackAuthorized,
     PlaybackFailed,
@@ -53,6 +53,12 @@ from wolfbot.domain.ws_messages import (
 )
 from wolfbot.llm.prompt_builder import build_strategy_block
 from wolfbot.master.claim_history import ClaimHistory, collect_claim_history
+from wolfbot.master.claim_validator import (
+    FABRICATION_REASONS,
+    ActualMediumEvent,
+    ActualSeerEvent,
+    validate_claim_against_truth,
+)
 from wolfbot.master.logic_service import build_logic_packet
 from wolfbot.master.npc_registry import NpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
@@ -83,6 +89,14 @@ _RECENT_SPEECH_CAP = 20
 #   or when a buggy upstream tries to dispatch the same seat twice.
 _PAIR_VOLLEY_WINDOW = 4
 _CONSECUTIVE_CAP = 3
+
+# Maximum number of times Master will re-dispatch the same NPC after a
+# fabricated `claimed_*_result`. With ~80% pass-rate per attempt
+# (empirical: gemini-2.5-flash + thinking_budget=0 on the SEER prompt),
+# 5 retries gives P(all fail) ≈ 0.03% — past that we give up and let
+# normal rotation pick another NPC so the phase doesn't stall on one
+# stuck speaker.
+_MAX_FABRICATION_RETRIES = 5
 
 
 def _parse_day_from_phase_id(phase_id: str) -> int | None:
@@ -141,7 +155,18 @@ class SpeakArbiterConfig:
     # model to finish a sentence even if it has to be shorter than this
     # cap, so 140 is the ceiling, not the target length.
     max_chars_reactive: int = 140
-    request_ttl_ms: int = 8000
+    # Was 8000 — too tight for Gemini 2.5 Flash with any thinking
+    # budget (game 75a3b1f379cc had p50 latency 14.7s, p90 25s, max
+    # 25.7s; 80% of NPC speeches expired at 8s TTL). xAI Grok 4-1-fast
+    # comfortably fit under 8s, but the broader model lineup (Gemini
+    # 2.5/3, DeepSeek with thinking) routinely needs 15-25s. 30s
+    # gives a generous margin while still bounding the phase clock —
+    # the discussion phase is 300s so even a worst-case 30s TTL only
+    # consumes 10% of the phase per dispatch. Combined with thinking
+    # disabled at the env level (NPC_LLM_THINKING_LEVEL=minimal), most
+    # responses still come back in 2-4s; the 30s ceiling is purely
+    # for tail-latency tolerance.
+    request_ttl_ms: int = 30_000
     playback_deadline_ms: int = 12_000
     heartbeat_timeout_ms: int = 5000
     vad_finalization_timeout_ms: int = 4000
@@ -222,6 +247,11 @@ class SpeakArbiter:
         # same pool member when others decline; with it, each pool
         # member gets at most one chance per callout.
         self._callout_pool_asked: dict[str, set[int]] = {}
+        # Per-(game_id, phase_id, npc_id) count of fabricated-claim
+        # rejections. Drives the "same NPC retries until accepted" loop
+        # in handle_speak_result. Cleared on phase change (alongside
+        # _callout_pool_asked) and on a successful accept for the NPC.
+        self._fabrication_retries: dict[tuple[str, str, str], int] = {}
 
     # ------------------------------------------------------------- gates
 
@@ -245,9 +275,7 @@ class SpeakArbiter:
         now = self._now_ms()
         # Sweep expired STT finalization deadlines — release segments whose
         # STT never arrived within vad_finalization_timeout_ms.
-        expired_stt = [
-            sid for sid, dl in self._pending_stt_segments.items() if now > dl
-        ]
+        expired_stt = [sid for sid, dl in self._pending_stt_segments.items() if now > dl]
         for sid in expired_stt:
             log.info("stt_finalization_timeout segment=%s", sid)
             self._pending_stt_segments.pop(sid, None)
@@ -256,9 +284,7 @@ class SpeakArbiter:
             return "human_currently_speaking"
         # Sweep expired playback deadlines — close rows whose NPC never
         # reported tts_failed / playback_finished / playback_failed.
-        expired_pb = [
-            rid for rid, dl in self._playback_deadlines.items() if now > dl
-        ]
+        expired_pb = [rid for rid, dl in self._playback_deadlines.items() if now > dl]
         for rid in expired_pb:
             log.info("playback_deadline_exceeded request=%s", rid)
             self._active_playback.discard(rid)
@@ -282,6 +308,7 @@ class SpeakArbiter:
         suggested_intent: str = "speak",
         selection_reason: str | None = None,
         public_state_snapshot: dict[str, Any] | None = None,
+        retry_feedback: str | None = None,
     ) -> tuple[SpeakRequest | None, str | None]:
         """Try to send a SpeakRequest to `candidate_npc_id`.
 
@@ -320,16 +347,18 @@ class SpeakArbiter:
         # best-effort — if a load fails we fall back to empty/null and
         # still dispatch (the prompt degrades gracefully to the historical
         # minimal shape).
-        recent_speeches, alive_seats, dead_seats, role_name, role_strategy = (
-            await self._collect_request_context(state, seat_no)
-        )
+        (
+            recent_speeches,
+            alive_seats,
+            dead_seats,
+            role_name,
+            role_strategy,
+        ) = await self._collect_request_context(state, seat_no)
         past_votes = await self._load_past_votes(game_id, state.day)
         seat_names_lookup: dict[int, str] = {
             seat: name for seat, name in (list(alive_seats) + list(dead_seats))
         }
-        claim_history = await self._load_claim_history(
-            game_id, seat_names_lookup
-        )
+        claim_history = await self._load_claim_history(game_id, seat_names_lookup)
 
         # Build LogicPacket (sent first so the NPC has context for the
         # subsequent speak_request).
@@ -367,6 +396,7 @@ class SpeakArbiter:
             role_strategy=role_strategy,
             alive_seats=alive_seats,
             dead_seats=dead_seats,
+            retry_feedback=retry_feedback,
         )
 
         await self.repo.insert_npc_speak_request(
@@ -495,7 +525,8 @@ class SpeakArbiter:
         except Exception:
             log.exception(
                 "seat_role_load_failed game_id=%s seat=%s",
-                state.game_id, seat_no,
+                state.game_id,
+                seat_no,
             )
 
         role_strategy: str | None = None
@@ -525,7 +556,8 @@ class SpeakArbiter:
             events = await self.discussion.load_for_game(game_id)
         except Exception:
             log.exception(
-                "claim_history_load_failed game=%s", game_id,
+                "claim_history_load_failed game=%s",
+                game_id,
             )
             return None
         return collect_claim_history(events, seat_names=seat_names)
@@ -549,7 +581,9 @@ class SpeakArbiter:
             for day in range(1, current_day):
                 for round_ in (0, 1):
                     rows = await self.repo.load_votes(
-                        game_id, day=day, round_=round_,
+                        game_id,
+                        day=day,
+                        round_=round_,
                     )
                     if not rows:
                         continue
@@ -562,6 +596,124 @@ class SpeakArbiter:
             log.exception("past_votes_load_failed game=%s", game_id)
             return ()
         return tuple(out)
+
+    async def _load_actual_seer_history(
+        self,
+        game_id: str,
+        seat_no: int,
+        current_day: int,
+    ) -> list[ActualSeerEvent]:
+        """Build the real-seer history for `seat_no`. Empty list when
+        the speaker isn't the seer or when DB reads fail. The
+        :func:`is_wolf` field is computed from the target seat's actual
+        role at lookup time — wolves and only wolves yield ``True``,
+        matching ``rules.is_detected_as_wolf`` semantics."""
+        try:
+            players = await self.repo.load_players(game_id)
+        except Exception:
+            log.exception("actual_seer_load_players_failed game=%s", game_id)
+            return []
+        role_by_seat = {p.seat_no: p.role for p in players if p.role is not None}
+        out: list[ActualSeerEvent] = []
+        # Seer divinations happen on NIGHT_0 (= day 0 row in
+        # night_actions) plus one per night N (rows at day=N) through
+        # the night before today's morning.
+        from wolfbot.domain.enums import SubmissionType
+
+        for day in range(0, current_day):
+            try:
+                actions = await self.repo.load_night_actions(game_id, day)
+            except Exception:
+                log.exception(
+                    "actual_seer_load_night_actions_failed game=%s day=%s",
+                    game_id,
+                    day,
+                )
+                continue
+            for action in actions:
+                if action.actor_seat != seat_no:
+                    continue
+                if action.kind != SubmissionType.SEER_DIVINE:
+                    continue
+                target_role = role_by_seat.get(action.target_seat or -1)
+                if target_role is None or action.target_seat is None:
+                    continue
+                # The morning-N "claim day" the LLM sees in `自分の占い結果`
+                # for a divination submitted on day=D matches the prompt
+                # convention `day{D}: target → ...`. ClaimedSeerEntry
+                # also stores `day` as the speech day. So we treat the
+                # divination's `day` as the canonical claim day.
+                out.append(
+                    ActualSeerEvent(
+                        day=day,
+                        target_seat=action.target_seat,
+                        is_wolf=is_detected_as_wolf(target_role),
+                    )
+                )
+        return out
+
+    async def _load_actual_medium_history(
+        self,
+        game_id: str,
+        seat_no: int,
+        current_day: int,
+    ) -> tuple[list[ActualMediumEvent], int]:
+        """Derive the medium history (executed seat + actual role) plus
+        the count of executions so far. Real medium has no per-night
+        action submission, so we walk public EXECUTION log entries and
+        cross-reference with `seats.role`. Returns ``(history, count)``;
+        ``count`` is the same length as ``history`` and useful for the
+        fake-medium "no execution yet" rule even when the speaker isn't
+        the real medium."""
+        try:
+            logs = await self.repo.load_public_logs(game_id, limit=200)
+            players = await self.repo.load_players(game_id)
+        except Exception:
+            log.exception("actual_medium_load_failed game=%s", game_id)
+            return ([], 0)
+        role_by_seat = {p.seat_no: p.role for p in players if p.role is not None}
+        history: list[ActualMediumEvent] = []
+        count = 0
+        for row in logs:
+            if row.get("kind") != "EXECUTION":
+                continue
+            if row.get("day") is None or row.get("actor_seat") is None:
+                continue
+            day_int = int(row["day"])
+            executed_seat = int(row["actor_seat"])
+            target_role = role_by_seat.get(executed_seat)
+            if target_role is None:
+                continue
+            count += 1
+            # Conventionally the medium "result" is announced on the
+            # morning AFTER the execution. We tag the event with the
+            # execution day; the validator's same-day match against
+            # ``ClaimedMediumEntry.day`` (which uses the speech day)
+            # works because the prompt builder feeds `自分の霊媒結果`
+            # rows tagged with the EXECUTION's day too.
+            history.append(
+                ActualMediumEvent(
+                    day=day_int,
+                    target_seat=executed_seat,
+                    is_wolf=is_detected_as_wolf(target_role),
+                )
+            )
+        # Filter to only events strictly before today's morning — we
+        # don't want to include an execution that hasn't happened yet
+        # (defensive; load_public_logs is past-only by construction).
+        history = [h for h in history if h.day < current_day]
+        return (history, count)
+
+    async def _load_speaker_role(self, game_id: str, seat_no: int) -> Role | None:
+        try:
+            players = await self.repo.load_players(game_id)
+        except Exception:
+            log.exception("speaker_role_load_failed game=%s", game_id)
+            return None
+        for p in players:
+            if p.seat_no == seat_no:
+                return p.role
+        return None
 
     # ------------------------------------------------------------- handle result
 
@@ -590,8 +742,7 @@ class SpeakArbiter:
                 try:
                     await entry.send(payload)
                 except Exception:
-                    log.exception(
-                        "speak_result_response_send_failed npc=%s", result.npc_id)
+                    log.exception("speak_result_response_send_failed npc=%s", result.npc_id)
 
         async def _record_rejection(reason: str) -> None:
             await self.repo.insert_npc_speak_result(
@@ -648,6 +799,56 @@ class SpeakArbiter:
                 )
             return (False, reason)
 
+        async def _reject_and_retry_same_npc(
+            reason: str,
+            feedback: str,
+        ) -> tuple[bool, str | None]:
+            """Same-NPC retry path for fabrication-class rejections.
+
+            Records the rejection (so the audit trail keeps every
+            attempt), sends a ``PlaybackRejected`` so the NPC drops
+            its queued audio, then re-dispatches a fresh SpeakRequest
+            to the same seat with ``retry_feedback`` filled in. The
+            rebuilt LogicPacket carries the latest public state (the
+            previous attempt's text is NOT in the public log because
+            it never played, so the recent-speech section is unchanged
+            from the original attempt). Increments
+            ``_fabrication_retries`` first; the caller checked the cap
+            already, so this method is the unconditional retry leg.
+            """
+            await _record_rejection(reason)
+            self._pending.pop(result.request_id, None)
+            try:
+                state_for_retry = await self.rebuild_public_state(
+                    game_id=pending.game_id,
+                    day=day,
+                    phase=phase,
+                )
+                if state_for_retry is None:
+                    log.info(
+                        "fabrication_retry_no_state game=%s npc=%s",
+                        pending.game_id,
+                        result.npc_id,
+                    )
+                    return (False, reason)
+                await self.dispatch_request(
+                    state=state_for_retry,
+                    candidate_npc_id=result.npc_id,
+                    seat_no=pending.seat_no,
+                    game_id=pending.game_id,
+                    suggested_intent="speak",
+                    selection_reason="fabrication_retry",
+                    retry_feedback=feedback,
+                )
+            except Exception:
+                log.exception(
+                    "fabrication_retry_dispatch_failed game=%s npc=%s reason=%s",
+                    pending.game_id,
+                    result.npc_id,
+                    reason,
+                )
+            return (False, reason)
+
         if result.phase_id != current_phase_id:
             return await _reject_and_advance("stale_phase")
         if now > pending.expires_at_ms:
@@ -656,6 +857,90 @@ class SpeakArbiter:
             return await _reject_and_advance("speaker_declined")
         if len(result.text) > self.config.max_chars_reactive:
             return await _reject_and_advance("utterance_too_long")
+
+        # Fabrication validation: catch a real seer / medium claiming an
+        # unrecorded target, OR a fake CO swapping its own past target /
+        # color. On hit, retry the same NPC up to _MAX_FABRICATION_RETRIES
+        # times with feedback in the next prompt; past the cap, fall
+        # back to normal rotation so the phase doesn't stall.
+        if result.claimed_seer_result is not None or result.claimed_medium_result is not None:
+            speaker_role = await self._load_speaker_role(
+                pending.game_id,
+                pending.seat_no,
+            )
+            actual_seer: list[ActualSeerEvent] = []
+            actual_medium: list[ActualMediumEvent] = []
+            executions_so_far = 0
+            if speaker_role is Role.SEER:
+                actual_seer = await self._load_actual_seer_history(
+                    pending.game_id,
+                    pending.seat_no,
+                    day,
+                )
+            if speaker_role is Role.MEDIUM:
+                actual_medium, executions_so_far = await self._load_actual_medium_history(
+                    pending.game_id,
+                    pending.seat_no,
+                    day,
+                )
+            else:
+                # Need executions_so_far for the fake-medium "no execution
+                # yet" rule even when the speaker isn't the real medium.
+                _, executions_so_far = await self._load_actual_medium_history(
+                    pending.game_id,
+                    pending.seat_no,
+                    day,
+                )
+            seats = await self.repo.load_seats(pending.game_id)
+            seat_names_for_history = {s.seat_no: s.display_name for s in seats}
+            claim_history = await self._load_claim_history(
+                pending.game_id,
+                seat_names_for_history,
+            )
+            prior_for_speaker = (
+                claim_history.by_seat.get(pending.seat_no) if claim_history is not None else None
+            )
+            validation = validate_claim_against_truth(
+                speaker_role=speaker_role or Role.VILLAGER,
+                speaker_seat=pending.seat_no,
+                day=day,
+                phase=phase,
+                claimed_seer=result.claimed_seer_result,
+                claimed_medium=result.claimed_medium_result,
+                actual_seer_history=actual_seer,
+                actual_medium_history=actual_medium,
+                prior_public_claims=prior_for_speaker,
+                executions_so_far=executions_so_far,
+            )
+            if not validation.ok and validation.reason in FABRICATION_REASONS:
+                key = (pending.game_id, result.phase_id, result.npc_id)
+                self._fabrication_retries[key] = self._fabrication_retries.get(key, 0) + 1
+                attempt = self._fabrication_retries[key]
+                log.warning(
+                    "fabrication_detected game=%s npc=%s seat=%s reason=%s attempt=%d/%d",
+                    pending.game_id,
+                    result.npc_id,
+                    pending.seat_no,
+                    validation.reason,
+                    attempt,
+                    _MAX_FABRICATION_RETRIES,
+                )
+                if attempt >= _MAX_FABRICATION_RETRIES:
+                    # Give up: bail to normal rotation so the phase
+                    # doesn't stall on one stuck NPC.
+                    return await _reject_and_advance(validation.reason)
+                return await _reject_and_retry_same_npc(
+                    reason=validation.reason,
+                    feedback=validation.feedback or "",
+                )
+
+        # Accepted. Clear any prior fabrication-retry count for this
+        # (game, phase, npc) so the cap resets if the NPC fabricates
+        # again later in the same phase.
+        self._fabrication_retries.pop(
+            (pending.game_id, result.phase_id, result.npc_id),
+            None,
+        )
 
         # Accepted. Persist result + SpeechEvent + open playback row.
         await self.repo.insert_npc_speak_result(
@@ -685,16 +970,11 @@ class SpeakArbiter:
                 continue
             seen.add(seat)
             addressed_candidates.append(int(seat))
-        if (
-            result.addressed_seat_no is not None
-            and result.addressed_seat_no not in seen
-        ):
+        if result.addressed_seat_no is not None and result.addressed_seat_no not in seen:
             seen.add(result.addressed_seat_no)
             addressed_candidates.append(int(result.addressed_seat_no))
         # Drop self-address.
-        addressed_candidates = [
-            s for s in addressed_candidates if s != pending.seat_no
-        ]
+        addressed_candidates = [s for s in addressed_candidates if s != pending.seat_no]
         if addressed_candidates:
             try:
                 alive_seats = await self.repo.load_players(pending.game_id)
@@ -711,9 +991,10 @@ class SpeakArbiter:
                     filtered.append(s)
                 else:
                     log.info(
-                        "npc_addressed_seat_unknown game=%s seat=%d "
-                        "addressed=%s — dropped",
-                        pending.game_id, pending.seat_no, s,
+                        "npc_addressed_seat_unknown game=%s seat=%d addressed=%s — dropped",
+                        pending.game_id,
+                        pending.seat_no,
+                        s,
                     )
             addressed_candidates = filtered
         addressed_seat_nos: tuple[int, ...] = tuple(addressed_candidates)
@@ -742,18 +1023,12 @@ class SpeakArbiter:
             co_declaration=result.co_declaration,
             addressed_seat_no=addressed_seat_no,
             addressed_seat_nos=addressed_seat_nos,
-            claimed_seer_target_seat=(
-                seer_claim.target_seat if seer_claim is not None else None
-            ),
-            claimed_seer_is_wolf=(
-                seer_claim.is_wolf if seer_claim is not None else None
-            ),
+            claimed_seer_target_seat=(seer_claim.target_seat if seer_claim is not None else None),
+            claimed_seer_is_wolf=(seer_claim.is_wolf if seer_claim is not None else None),
             claimed_medium_target_seat=(
                 medium_claim.target_seat if medium_claim is not None else None
             ),
-            claimed_medium_is_wolf=(
-                medium_claim.is_wolf if medium_claim is not None else None
-            ),
+            claimed_medium_is_wolf=(medium_claim.is_wolf if medium_claim is not None else None),
             created_at_ms=now,
         )
         await self.discussion.record(speech_event)
@@ -845,9 +1120,7 @@ class SpeakArbiter:
     async def _sweep_expired_playback(self) -> None:
         """Close DB rows for playback windows that exceeded their deadline."""
         now = self._now_ms()
-        expired = [
-            rid for rid, dl in list(self._playback_deadlines.items()) if now > dl
-        ]
+        expired = [rid for rid, dl in list(self._playback_deadlines.items()) if now > dl]
         for rid in expired:
             log.info("playback_deadline_enforced request=%s", rid)
             try:
@@ -943,10 +1216,7 @@ class SpeakArbiter:
         # rotating wolf-side seats — the just-asked seat would get
         # re-picked on the very next dispatch.
         unasked_remaining = bool(callout_pool - asked)
-        no_active_signal = (
-            not state.pending_role_callouts
-            and not state.pending_co_response
-        )
+        no_active_signal = not state.pending_role_callouts and not state.pending_co_response
         if no_active_signal and asked and not unasked_remaining:
             self._callout_pool_asked.pop(game_id, None)
             asked = set()
@@ -958,18 +1228,18 @@ class SpeakArbiter:
             is_demoted = 1 if seat in demoted else 0
             is_addressed = 0 if seat in addressed_set else 1
             count = state.speech_counts.get(seat, 0)
-            is_just_spoke = 1 if (
-                last_speaker is not None and seat == last_speaker
-            ) else 0
+            is_just_spoke = 1 if (last_speaker is not None and seat == last_speaker) else 0
             return (
-                is_in_pool, is_demoted, is_addressed, count,
-                is_just_spoke, self._rng.random(),
+                is_in_pool,
+                is_demoted,
+                is_addressed,
+                count,
+                is_just_spoke,
+                self._rng.random(),
             )
 
         online_npc_seats = sorted(
-            e.assigned_seat
-            for e in online
-            if e.assigned_seat is not None and e.game_id == game_id
+            e.assigned_seat for e in online if e.assigned_seat is not None and e.game_id == game_id
         )
         # Counts per seat, restricted to the candidates the arbiter can
         # actually pick — used both for the snapshot and to classify the
@@ -985,9 +1255,7 @@ class SpeakArbiter:
             "phase_id": state.phase_id,
             "day": state.day,
             "phase": game.phase.value,
-            "last_addressed_seat": (
-                next(iter(sorted(addressed_set))) if addressed_set else None
-            ),
+            "last_addressed_seat": (next(iter(sorted(addressed_set))) if addressed_set else None),
             "last_addressed_seats": sorted(addressed_set),
             "last_speaker_seat": last_speaker,
             "silent_seats": sorted(state.silent_seats),
@@ -1088,9 +1356,7 @@ class SpeakArbiter:
             seat = seats_by_no.get(seat_no)
             if seat is None or not seat.is_llm:
                 continue
-            progress = await self.repo.load_llm_speech_progress(
-                game_id, day, seat_no
-            )
+            progress = await self.repo.load_llm_speech_progress(game_id, day, seat_no)
             if progress[4]:  # runoff_speech_done
                 continue
             eligible.append(seat)
@@ -1112,15 +1378,12 @@ class SpeakArbiter:
             entry = self._find_npc_for_seat(game_id, seat.seat_no)
             if entry is None:
                 log.info(
-                    "runoff_speech_no_online_npc game=%s seat=%d — "
-                    "marking done so phase advances",
+                    "runoff_speech_no_online_npc game=%s seat=%d — marking done so phase advances",
                     game_id,
                     seat.seat_no,
                 )
                 try:
-                    await self.repo.mark_llm_runoff_speech_done(
-                        game_id, day, seat.seat_no
-                    )
+                    await self.repo.mark_llm_runoff_speech_done(game_id, day, seat.seat_no)
                 except Exception:
                     log.exception(
                         "runoff_speech_done_mark_failed game=%s seat=%d",
@@ -1234,17 +1497,13 @@ class SpeakArbiter:
             try:
                 await self.try_dispatch_next(game_id)
             except Exception:
-                log.exception(
-                    "runoff_watchdog_redispatch_failed game=%s", game_id
-                )
+                log.exception("runoff_watchdog_redispatch_failed game=%s", game_id)
 
         task = asyncio.create_task(_watchdog(), name=f"runoff-watchdog-{request_id}")
         self._runoff_watchdog_tasks.add(task)
         task.add_done_callback(self._runoff_watchdog_tasks.discard)
 
-    def _find_npc_for_seat(
-        self, game_id: str, seat_no: int
-    ) -> Any | None:
+    def _find_npc_for_seat(self, game_id: str, seat_no: int) -> Any | None:
         """Lookup the registry entry pinned to ``(game_id, seat_no)``."""
         for entry in self.registry.all_online():
             if entry.assigned_seat == seat_no and entry.game_id == game_id:
@@ -1308,9 +1567,7 @@ class SpeakArbiter:
             log.exception("callout_pool_load_failed game=%s", game_id)
             return frozenset()
         seats_by_no: dict[int, Seat] = {s.seat_no: s for s in seats}
-        co_keys: set[tuple[int, str]] = {
-            (c.seat, c.role_claim) for c in state.co_claims
-        }
+        co_keys: set[tuple[int, str]] = {(c.seat, c.role_claim) for c in state.co_claims}
         pool: set[int] = set()
         for player in players:
             if not player.alive:
@@ -1324,10 +1581,7 @@ class SpeakArbiter:
             # role. (For info_request, all three info roles are targets.)
             if player.role in target_roles:
                 role_callout_key = next(
-                    (
-                        k for k, r in callout_to_role.items()
-                        if r is player.role
-                    ),
+                    (k for k, r in callout_to_role.items() if r is player.role),
                     None,
                 )
                 if (
@@ -1339,8 +1593,7 @@ class SpeakArbiter:
             # of the requested roles, so prioritize them too.
             if player.role in (Role.WEREWOLF, Role.MADMAN):
                 already_co_info = any(
-                    (player.seat_no, role) in co_keys
-                    for role in ("seer", "medium", "knight")
+                    (player.seat_no, role) in co_keys for role in ("seer", "medium", "knight")
                 )
                 if not already_co_info:
                     pool.add(player.seat_no)
@@ -1374,9 +1627,7 @@ class SpeakArbiter:
         if day is None:
             return
         try:
-            await self.repo.mark_llm_runoff_speech_done(
-                game_id, day, seat_no
-            )
+            await self.repo.mark_llm_runoff_speech_done(game_id, day, seat_no)
         except Exception:
             log.exception(
                 "runoff_speech_done_mark_failed game=%s day=%d seat=%d",
@@ -1413,9 +1664,15 @@ class SpeakArbiter:
             self._playback_deadlines.pop(rid, None)
             swept += 1
         self._callout_pool_asked.pop(game_id, None)
+        # Drop fabrication-retry counters for this game.
+        for key in list(self._fabrication_retries.keys()):
+            if key[0] == game_id:
+                self._fabrication_retries.pop(key, None)
         if swept:
             log.info(
-                "speak_arbiter_cleanup_game game=%s swept=%d", game_id, swept,
+                "speak_arbiter_cleanup_game game=%s swept=%d",
+                game_id,
+                swept,
             )
         return swept
 
@@ -1489,17 +1746,11 @@ class SpeakArbiter:
         except Exception:
             log.exception("co_claim_history_load_failed game=%s", game_id)
             all_events = ()
-        prior_phase_events = tuple(
-            e for e in all_events if e.phase_id != phase_id
-        )
+        prior_phase_events = tuple(e for e in all_events if e.phase_id != phase_id)
         prior_co_claims = (
-            extract_co_claims_from_events(prior_phase_events)
-            if prior_phase_events
-            else ()
+            extract_co_claims_from_events(prior_phase_events) if prior_phase_events else ()
         )
-        prior_co_keys = frozenset(
-            (c.seat, c.role_claim) for c in prior_co_claims
-        )
+        prior_co_keys = frozenset((c.seat, c.role_claim) for c in prior_co_claims)
         state = rebuild_public_state_from_events(events, prior_co_keys=prior_co_keys)
         if state is None:
             return None

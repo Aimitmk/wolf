@@ -99,7 +99,9 @@ _RESPONSE_SCHEMA: dict[str, object] = {
                 "required": ["target_seat", "is_wolf"],
                 "properties": {
                     "target_seat": {
-                        "type": "integer", "minimum": 1, "maximum": 9,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9,
                     },
                     "is_wolf": {"type": "boolean"},
                 },
@@ -119,7 +121,9 @@ _RESPONSE_SCHEMA: dict[str, object] = {
                 "required": ["target_seat", "is_wolf"],
                 "properties": {
                     "target_seat": {
-                        "type": "integer", "minimum": 1, "maximum": 9,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9,
                     },
                     "is_wolf": {"type": ["boolean", "null"]},
                 },
@@ -215,13 +219,13 @@ def _build_system(
         "  推奨例: 「ジョナスさんはどう思う?」「ラキオが…」「ユリコ、答えて」"
         "「ジョナスとsakuraの占い主張、ユリコとセツの霊媒主張」\n"
         "- 役職 CO (占い師・霊媒師・騎士として名乗る) をするときは、"
-        "`co_declaration` を `\"seer\" / \"medium\" / \"knight\"` のいずれかに設定し、"
+        '`co_declaration` を `"seer" / "medium" / "knight"` のいずれかに設定し、'
         "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
         "CO しないなら `co_declaration=null`。"
         "「占いCO」のような語そのものは `text` に書かない。\n"
         "- **占い/霊媒結果は構造化フィールドにも必ず反映する。**"
         "発話 `text` で占い結果を述べる場合 (本物でも騙りでも同じ): "
-        "`claimed_seer_result` に `{\"target_seat\": 対象席, \"is_wolf\": true/false}` を設定し、"
+        '`claimed_seer_result` に `{"target_seat": 対象席, "is_wolf": true/false}` を設定し、'
         "述べた席・結果と完全一致させる。霊媒も同様に `claimed_medium_result` を使う"
         "(処刑なし/結果なしを明言する場合は `is_wolf=null` を設定し、`target_seat` は処刑対象の席)。"
         "新しい結果を発表しない発話 (前回までの結果に言及するだけ・一般議論・他人への質問) では "
@@ -262,14 +266,8 @@ def _build_user(
     # Phase-D: prefer the bot's own NpcGameState mirror over the stale
     # SpeakRequest fields. The state carries role + alive/dead + private
     # results + wolf chat that the speech LLM needs to be in character.
-    alive_seats = (
-        getattr(state, "alive_seats", None)
-        or list(request.alive_seats)
-    )
-    dead_seats = (
-        getattr(state, "dead_seats", None)
-        or list(request.dead_seats)
-    )
+    alive_seats = getattr(state, "alive_seats", None) or list(request.alive_seats)
+    dead_seats = getattr(state, "dead_seats", None) or list(request.dead_seats)
     cause_map = (getattr(state, "dead_seat_causes", None) or {}) if state else {}
 
     def _cause_tag(seat_no: int) -> str:
@@ -292,6 +290,23 @@ def _build_user(
         f"あなた: {own_label}",
         f"提案意図: {request.suggested_intent}",
     ]
+
+    # Master-side rejection feedback for the previous attempt. Surfaced
+    # at the top of the prompt (after the meta header) so the model
+    # reads the correction before any other context. Only present on
+    # retry dispatches; first-attempt prompts have request.retry_feedback=None.
+    retry_feedback = getattr(request, "retry_feedback", None)
+    if retry_feedback:
+        lines.append("")
+        lines.append("## 直前の発話が Master により拒否された")
+        lines.append(retry_feedback)
+        lines.append(
+            "今回の発話では上記の指摘を必ず修正すること。"
+            "`claimed_seer_result` と `claimed_medium_result` は、"
+            "あなたの非公開記録 (`自分の占い結果` / `自分の霊媒結果`) "
+            "または過去にあなたが公の場で出した主張と完全に一致する内容にする"
+            "(新しい結果がないなら null)。"
+        )
 
     # Roster header — the ONLY block where seat numbers explicitly
     # appear. All other blocks below reference players by display_name.
@@ -316,9 +331,7 @@ def _build_user(
             "medium": "霊媒師",
             "knight": "騎士",
         }
-        labels = "、".join(
-            f"{callout_ja.get(c, c)} ({c})" for c in logic.pending_role_callouts
-        )
+        labels = "、".join(f"{callout_ja.get(c, c)} ({c})" for c in logic.pending_role_callouts)
         lines.append("")
         lines.append("## 未回答の役職呼びかけ")
         lines.append(
@@ -341,9 +354,7 @@ def _build_user(
             lines.append("## 自分の占い結果 (非公開)")
             for sr in seer_results:
                 verdict = "黒 (人狼)" if sr.is_wolf else "白 (人狼ではない)"
-                lines.append(
-                    f"  day{sr.day}: {sr.target_name} → {verdict}"
-                )
+                lines.append(f"  day{sr.day}: {sr.target_name} → {verdict}")
         medium_results = getattr(state, "medium_results", []) or []
         if medium_results:
             lines.append("## 自分の霊媒結果 (非公開)")
@@ -354,28 +365,24 @@ def _build_user(
                     verdict = "人狼"
                 else:
                     verdict = "人狼ではない"
-                lines.append(
-                    f"  day{mr.day}: {mr.target_name} → {verdict}"
-                )
+                lines.append(f"  day{mr.day}: {mr.target_name} → {verdict}")
         guard_history = getattr(state, "guard_history", []) or []
         if guard_history:
             lines.append("## 自分の護衛履歴 (非公開)")
             for g in guard_history:
                 outcome = (
-                    "(平和な朝)" if g.peaceful_morning
-                    else "(襲撃発生)" if g.peaceful_morning is False
+                    "(平和な朝)"
+                    if g.peaceful_morning
+                    else "(襲撃発生)"
+                    if g.peaceful_morning is False
                     else "(結果未確定)"
                 )
-                lines.append(
-                    f"  day{g.day}: {g.target_name} を護衛 {outcome}"
-                )
+                lines.append(f"  day{g.day}: {g.target_name} を護衛 {outcome}")
         wolf_chat_history = getattr(state, "wolf_chat_history", []) or []
         if wolf_chat_history:
             lines.append("## 人狼チャット履歴 (狼/狂人にのみ見える)")
             for wc in wolf_chat_history[-15:]:
-                lines.append(
-                    f"  day{wc.day} {wc.speaker_name}: {wc.text}"
-                )
+                lines.append(f"  day{wc.day} {wc.speaker_name}: {wc.text}")
         wolf_attack_history = getattr(state, "wolf_attack_history", []) or []
         if wolf_attack_history:
             lines.append("## 自分達の襲撃履歴 (非公開)")
@@ -386,9 +393,7 @@ def _build_user(
                     outcome = "(襲撃成功)"
                 else:
                     outcome = "(結果未確定)"
-                lines.append(
-                    f"  day{atk.day}: {atk.target_name} を襲撃 {outcome}"
-                )
+                lines.append(f"  day{atk.day}: {atk.target_name} を襲撃 {outcome}")
     if logic.past_votes:
         # Public vote history. Each NPC saw the EXECUTION public log when
         # it landed, but the per-phase fold doesn't carry that text into
@@ -398,10 +403,7 @@ def _build_user(
         lines.append("")
         lines.append("## 公開された投票履歴")
         seat_name_lookup = {
-            seat_no: name
-            for seat_no, name in (
-                list(alive_seats) + list(dead_seats)
-            )
+            seat_no: name for seat_no, name in (list(alive_seats) + list(dead_seats))
         }
 
         def _voter_label(seat: int | None) -> str:
@@ -414,9 +416,7 @@ def _build_user(
             label = "決選投票" if round_ >= 1 else "投票"
             lines.append(f"- day{day} {label}:")
             for voter, target in pairs:
-                lines.append(
-                    f"    {_voter_label(voter)} → {_voter_label(target)}"
-                )
+                lines.append(f"    {_voter_label(voter)} → {_voter_label(target)}")
     if logic.recent_speeches:
         lines.append("")
         lines.append("## 直近の発言 (古い順)")
@@ -432,10 +432,7 @@ def _build_user(
         # MVP code paths leave this empty; rendered as name → score so
         # the seat-number column doesn't reappear here either.
         seat_name_lookup_p = {
-            seat_no: name
-            for seat_no, name in (
-                list(alive_seats) + list(dead_seats)
-            )
+            seat_no: name for seat_no, name in (list(alive_seats) + list(dead_seats))
         }
         lines.append("")
         lines.append("## 圧力マップ (疑い度)")
@@ -549,9 +546,7 @@ class OpenAICompatibleNpcGenerator:
         """
         if persona_key not in NPC_PERSONAS_BY_KEY:
             valid = ", ".join(sorted(NPC_PERSONAS_BY_KEY.keys()))
-            raise ValueError(
-                f"unknown persona_key {persona_key!r}; valid keys: {valid}"
-            )
+            raise ValueError(f"unknown persona_key {persona_key!r}; valid keys: {valid}")
         self._persona_key = persona_key
 
     async def generate(
@@ -617,9 +612,7 @@ class OpenAICompatibleNpcGenerator:
                 kwargs["reasoning_effort"] = self.config.reasoning_effort
 
         provider_tag = "deepseek" if self.config.mode == "json_object" else "openai-compat"
-        actor = (
-            f"npc_id={request.npc_id} seat={request.seat_no} persona={self._persona_key}"
-        )
+        actor = f"npc_id={request.npc_id} seat={request.seat_no} persona={self._persona_key}"
         timer = CallTimer()
         content = ""
         err: str | None = None
@@ -645,7 +638,8 @@ class OpenAICompatibleNpcGenerator:
                 err = f"{type(exc).__name__}: {exc}"
                 log.exception(
                     "npc_generate_failed model=%s base_url=%s",
-                    self.config.model, self.config.base_url,
+                    self.config.model,
+                    self.config.base_url,
                 )
                 await log_llm_call(
                     role="npc_speech",
@@ -680,7 +674,6 @@ class OpenAICompatibleNpcGenerator:
             return None
 
         return _build_speech_from_json(data)
-
 
     async def decide_json(
         self,
@@ -749,7 +742,8 @@ class OpenAICompatibleNpcGenerator:
             err = f"{type(exc).__name__}: {exc}"
             log.exception(
                 "npc_decide_failed model=%s base_url=%s",
-                self.config.model, self.config.base_url,
+                self.config.model,
+                self.config.base_url,
             )
             await log_llm_call(
                 role="npc_decision",
@@ -793,9 +787,7 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         return None
 
     raw_ids = data.get("used_logic_ids") or []
-    used_ids = (
-        tuple(str(x) for x in raw_ids) if isinstance(raw_ids, list) else ()
-    )
+    used_ids = tuple(str(x) for x in raw_ids) if isinstance(raw_ids, list) else ()
     co_raw = data.get("co_declaration")
     co_declaration = co_raw if co_raw in CO_CLAIM_VALUES else None
     # `addressed_seat_nos` (list) is the authoritative field; the legacy
@@ -807,11 +799,7 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
     addressed_seat_nos: list[int] = []
     if isinstance(raw_nos, list):
         for v in raw_nos:
-            if (
-                isinstance(v, int)
-                and not isinstance(v, bool)
-                and v not in addressed_seat_nos
-            ):
+            if isinstance(v, int) and not isinstance(v, bool) and v not in addressed_seat_nos:
                 addressed_seat_nos.append(v)
     raw_addr = data.get("addressed_seat_no")
     addressed_seat_no: int | None = None
@@ -823,10 +811,12 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         addressed_seat_no = addressed_seat_nos[0]
 
     seer_seat, seer_is_wolf = _parse_claim_fields(
-        data.get("claimed_seer_result"), allow_null_verdict=False,
+        data.get("claimed_seer_result"),
+        allow_null_verdict=False,
     )
     medium_seat, medium_is_wolf = _parse_claim_fields(
-        data.get("claimed_medium_result"), allow_null_verdict=True,
+        data.get("claimed_medium_result"),
+        allow_null_verdict=True,
     )
     # Rough estimate: ~150ms per character for TTS
     estimated_ms = max(500, len(text) * 150)
@@ -846,9 +836,7 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
     )
 
 
-def _parse_claim_fields(
-    raw: object, *, allow_null_verdict: bool
-) -> tuple[int | None, bool | None]:
+def _parse_claim_fields(raw: object, *, allow_null_verdict: bool) -> tuple[int | None, bool | None]:
     """Coerce a structured claim dict into ``(target_seat, is_wolf)``.
 
     Returns ``(None, None)`` for any malformed input — the speech is

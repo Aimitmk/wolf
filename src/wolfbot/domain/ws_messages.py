@@ -145,9 +145,7 @@ class LogicPacket(BaseEnvelope):
             "bots stay schema-compatible."
         ),
     )
-    past_votes: tuple[
-        tuple[int, int, tuple[tuple[int, int | None], ...]], ...
-    ] = Field(
+    past_votes: tuple[tuple[int, int, tuple[tuple[int, int | None], ...]], ...] = Field(
         default_factory=tuple,
         description=(
             "Public vote history for completed past days. Each entry is "
@@ -212,8 +210,7 @@ class SpeakRequest(BaseEnvelope):
     dead_seats: tuple[tuple[int, str], ...] = Field(
         default_factory=tuple,
         description=(
-            "(seat_no, display_name) pairs for dead seats. Same back-compat "
-            "story as `alive_seats`."
+            "(seat_no, display_name) pairs for dead seats. Same back-compat story as `alive_seats`."
         ),
     )
     dead_seat_causes: tuple[tuple[int, str], ...] = Field(
@@ -225,6 +222,18 @@ class SpeakRequest(BaseEnvelope):
             "without parsing the morning text. Optional — empty for "
             "back-compat with older Master builds; the NPC's prompt "
             "builder falls back to an unlabelled list when missing."
+        ),
+    )
+    retry_feedback: str | None = Field(
+        default=None,
+        description=(
+            "Master-side rejection note from a prior SpeakResult. Non-null "
+            "only when Master detected a fabricated `claimed_seer_result` "
+            "/ `claimed_medium_result` on the previous attempt and is "
+            "asking the same NPC to retry. The NPC's prompt builder must "
+            "surface this verbatim near the structured-output requirements "
+            "so the model corrects its claim. Empty / None on first "
+            "attempts and on non-fabrication retries."
         ),
     )
 
@@ -689,7 +698,7 @@ class SpeechEventPayload(BaseEnvelope):
     role_callout: CoDeclaration | None = Field(
         default=None,
         description=(
-            "Role the utterance is calling out for (e.g. \"占い師いますか?\" "
+            'Role the utterance is calling out for (e.g. "占い師いますか?" '
             "→ ``seer``). Mirrors the human-side STT field so wolf-side "
             "NPCs and real role holders can react. None for the vast "
             "majority of utterances; only set when the analyzer detects "
