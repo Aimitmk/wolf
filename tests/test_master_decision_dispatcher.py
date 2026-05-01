@@ -75,7 +75,7 @@ async def test_dispatch_votes_resolves_when_npcs_reply() -> None:
 
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=5_000),
+        config=DecisionDispatcherConfig(request_ttl_ms=5_000, inter_request_stagger_ms=0),
         now_ms=lambda: 2_000,
     )
 
@@ -125,7 +125,7 @@ async def test_dispatch_votes_offline_seat_resolves_to_none() -> None:
 
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=5_000),
+        config=DecisionDispatcherConfig(request_ttl_ms=5_000, inter_request_stagger_ms=0),
         now_ms=lambda: 2_000,
     )
 
@@ -168,7 +168,7 @@ async def test_dispatch_votes_timeout_yields_none() -> None:
     # Very short TTL so the test runs fast.
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=100),
+        config=DecisionDispatcherConfig(request_ttl_ms=100, inter_request_stagger_ms=0),
         now_ms=lambda: 0,
     )
     voter_only = [Player(seat_no=2, role=Role.VILLAGER, alive=True)]
@@ -195,7 +195,7 @@ async def test_dispatch_votes_send_failure_yields_none() -> None:
 
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=200),
+        config=DecisionDispatcherConfig(request_ttl_ms=200, inter_request_stagger_ms=0),
         now_ms=lambda: 0,
     )
     voter_only = [Player(seat_no=2, role=Role.VILLAGER, alive=True)]
@@ -219,7 +219,7 @@ async def test_dispatch_night_actions_routes_action_kind() -> None:
 
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=5_000),
+        config=DecisionDispatcherConfig(request_ttl_ms=5_000, inter_request_stagger_ms=0),
         now_ms=lambda: 0,
     )
     actor = Player(seat_no=3, role=Role.WEREWOLF, alive=True)
@@ -276,7 +276,7 @@ async def test_dispatch_wolf_chat_lines_resolves_sequentially() -> None:
 
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=5_000),
+        config=DecisionDispatcherConfig(request_ttl_ms=5_000, inter_request_stagger_ms=0),
         now_ms=lambda: 1_000,
     )
     wolves = [
@@ -336,7 +336,7 @@ async def test_dispatch_wolf_chat_lines_timeout_yields_none() -> None:
     registry.assign("npc_w2", seat=2, game_id="g1", phase_id="g1::day1::NIGHT::1")
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=100),
+        config=DecisionDispatcherConfig(request_ttl_ms=100, inter_request_stagger_ms=0),
         now_ms=lambda: 0,
     )
     wolves = [Player(seat_no=2, role=Role.WEREWOLF, alive=True)]
@@ -361,7 +361,7 @@ async def test_decide_vote_request_payload_shape() -> None:
 
     dispatcher = NpcDecisionDispatcher(
         registry=registry,
-        config=DecisionDispatcherConfig(request_ttl_ms=5_000),
+        config=DecisionDispatcherConfig(request_ttl_ms=5_000, inter_request_stagger_ms=0),
         now_ms=lambda: 1_000,
     )
 
@@ -423,7 +423,7 @@ async def test_cleanup_game_resolves_pending_for_target_game_only() -> None:
         registry=registry,
         # Long TTL so the test isn't racing the timeout path; cleanup must
         # win regardless.
-        config=DecisionDispatcherConfig(request_ttl_ms=60_000),
+        config=DecisionDispatcherConfig(request_ttl_ms=60_000, inter_request_stagger_ms=0),
         now_ms=lambda: 1_000,
     )
 
@@ -463,3 +463,142 @@ async def test_cleanup_game_resolves_pending_for_target_game_only() -> None:
         )
     )
     await g2_task
+
+
+async def test_dispatch_votes_staggers_outbound_requests() -> None:
+    """``inter_request_stagger_ms`` spaces the per-actor LLM calls in
+    time so 9 NPC bots don't burst-hit the upstream provider's quota.
+
+    Verifies: with stagger=120ms × 3 voters, the second outbound
+    payload arrives at least ~100ms after the first, and the third at
+    least ~200ms after the first. We don't assert exact wall-clock
+    (event-loop scheduling jitter) — the lower bound is the contract.
+    """
+    import time
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[int, list[float]] = {2: [], 3: [], 4: []}
+
+    def _timestamping_send(seat: int) -> Callable[[str], Awaitable[None]]:
+        async def _send(_msg: str) -> None:
+            bufs[seat].append(time.monotonic())
+        return _send
+
+    for seat, persona, npc_id, bot_id in (
+        (2, "setsu", "npc_seat2", "bot2"),
+        (3, "gina", "npc_seat3", "bot3"),
+        (4, "comet", "npc_seat4", "bot4"),
+    ):
+        registry.register(
+            npc_id=npc_id, discord_bot_user_id=bot_id,
+            supported_voices=(), version="1",
+            send=_timestamping_send(seat), now_ms=1000, persona_key=persona,
+        )
+        registry.assign(
+            npc_id, seat=seat, game_id="g1",
+            phase_id="g1::day1::DAY_VOTE::1",
+        )
+
+    dispatcher = NpcDecisionDispatcher(
+        registry=registry,
+        config=DecisionDispatcherConfig(
+            request_ttl_ms=200,
+            inter_request_stagger_ms=120,
+        ),
+        now_ms=lambda: int(time.time() * 1000),
+    )
+
+    seats: list[Seat] = [
+        Seat(seat_no=1, display_name="A", is_llm=False, persona_key=None,
+             discord_user_id="u1"),
+        Seat(seat_no=2, display_name="B", is_llm=True, persona_key="setsu",
+             discord_user_id=None),
+        Seat(seat_no=3, display_name="C", is_llm=True, persona_key="gina",
+             discord_user_id=None),
+        Seat(seat_no=4, display_name="D", is_llm=True, persona_key="comet",
+             discord_user_id=None),
+    ]
+    voters = [
+        Player(seat_no=2, role=Role.VILLAGER, alive=True),
+        Player(seat_no=3, role=Role.WEREWOLF, alive=True),
+        Player(seat_no=4, role=Role.VILLAGER, alive=True),
+    ]
+    # Don't send any responses — let the timeout fire so the call returns.
+    # We're only inspecting the OUTBOUND timestamps.
+    await dispatcher.dispatch_votes(
+        game_id="g1", day=1, round_=0,
+        voters=voters, seats=seats,
+        candidate_seats=[1, 2, 3, 4],
+    )
+
+    # All three NPCs received exactly one request.
+    assert all(len(b) == 1 for b in bufs.values()), bufs
+    t2, t3, t4 = bufs[2][0], bufs[3][0], bufs[4][0]
+    # Lower bounds: stagger=120ms ⇒ at least ~100ms of separation
+    # (allow some scheduler slack).
+    assert t3 - t2 >= 0.10, f"seat3 fired only {t3 - t2:.3f}s after seat2"
+    assert t4 - t3 >= 0.10, f"seat4 fired only {t4 - t3:.3f}s after seat3"
+
+
+async def test_dispatch_votes_stagger_zero_is_concurrent() -> None:
+    """With ``inter_request_stagger_ms=0`` (test-friendly mode) the
+    behaviour matches the historical ``asyncio.gather(*coros)``
+    fan-out — all outbound requests fire within the same event-loop
+    tick. Guards against accidental regression where a future change
+    sneaks in a non-zero default into this test path."""
+    import time
+
+    registry = InMemoryNpcRegistry()
+    seat2_buf: list[float] = []
+    seat3_buf: list[float] = []
+
+    def _timestamp(buf: list[float]) -> Callable[[str], Awaitable[None]]:
+        async def _send(_msg: str) -> None:
+            buf.append(time.monotonic())
+        return _send
+
+    registry.register(
+        npc_id="npc_seat2", discord_bot_user_id="bot2",
+        supported_voices=(), version="1",
+        send=_timestamp(seat2_buf), now_ms=1000, persona_key="setsu",
+    )
+    registry.assign("npc_seat2", seat=2, game_id="g1",
+                    phase_id="g1::day1::DAY_VOTE::1")
+    registry.register(
+        npc_id="npc_seat3", discord_bot_user_id="bot3",
+        supported_voices=(), version="1",
+        send=_timestamp(seat3_buf), now_ms=1000, persona_key="gina",
+    )
+    registry.assign("npc_seat3", seat=3, game_id="g1",
+                    phase_id="g1::day1::DAY_VOTE::1")
+
+    dispatcher = NpcDecisionDispatcher(
+        registry=registry,
+        config=DecisionDispatcherConfig(
+            request_ttl_ms=100, inter_request_stagger_ms=0,
+        ),
+        now_ms=lambda: int(time.time() * 1000),
+    )
+
+    seats: list[Seat] = [
+        Seat(seat_no=1, display_name="A", is_llm=False, persona_key=None,
+             discord_user_id="u1"),
+        Seat(seat_no=2, display_name="B", is_llm=True, persona_key="setsu",
+             discord_user_id=None),
+        Seat(seat_no=3, display_name="C", is_llm=True, persona_key="gina",
+             discord_user_id=None),
+    ]
+    voters = [
+        Player(seat_no=2, role=Role.VILLAGER, alive=True),
+        Player(seat_no=3, role=Role.WEREWOLF, alive=True),
+    ]
+    await dispatcher.dispatch_votes(
+        game_id="g1", day=1, round_=0,
+        voters=voters, seats=seats,
+        candidate_seats=[1, 2, 3],
+    )
+    # Both fired within the same scheduler tick (≪ stagger of 120ms
+    # we used in the staggered test). Use 50ms as a generous upper bound.
+    assert len(seat2_buf) == 1 and len(seat3_buf) == 1
+    spread = abs(seat2_buf[0] - seat3_buf[0])
+    assert spread < 0.05, f"stagger=0 should fire near-concurrently, got {spread:.3f}s"

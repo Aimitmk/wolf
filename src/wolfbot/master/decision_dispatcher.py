@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass
 
 from wolfbot.domain.discussion import make_phase_id
@@ -52,9 +52,20 @@ class DecisionDispatcherConfig:
     → reply over WS. A typical decision round-trips in well under 10s
     even at the bad tail; we set 12s so a slow provider still resolves
     before the deadline.
+
+    `inter_request_stagger_ms` spreads the per-actor LLM dispatches in
+    time so we don't burst N parallel requests at the LLM provider.
+    Game ``6a0dd72d63e3`` exhausted Gemini's per-minute quota with a
+    9-NPC parallel vote dispatch (9 requests in <1s → 429 RESOURCE_
+    EXHAUSTED on 5+ of them, all returning ``target=None`` with
+    ``reason=llm_error``). 800ms * 9 actors = ~7.2s spread keeps the
+    wall-clock under 12s while smoothing the request rate enough that
+    the provider's rate limiter doesn't throttle the late ones. Set
+    to 0 in tests so they finish in milliseconds.
     """
 
     request_ttl_ms: int = 12_000
+    inter_request_stagger_ms: int = 800
 
 
 @dataclass
@@ -132,9 +143,14 @@ class NpcDecisionDispatcher:
         )
         phase = Phase.DAY_RUNOFF if round_ >= 1 else Phase.DAY_VOTE
         phase_id = make_phase_id(game_id, day, phase)
-        deadline = self._now_ms() + self.config.request_ttl_ms
 
         async def _one(voter: Player) -> tuple[int, int | None]:
+            # Compute deadline at task start so each staggered task
+            # gets the full request_ttl_ms, not a shared shrinking
+            # window. Without this the 9th-staggered task at +6.4s
+            # would only have ~5s of TTL left from a 12s shared
+            # deadline.
+            expires_at_ms = self._now_ms() + self.config.request_ttl_ms
             target = await self._dispatch_one_vote(
                 voter=voter,
                 seats_by_no=seats_by_no,
@@ -142,14 +158,17 @@ class NpcDecisionDispatcher:
                 game_id=game_id,
                 phase_id=phase_id,
                 round_=round_,
-                expires_at_ms=deadline,
+                expires_at_ms=expires_at_ms,
                 public_state_summary=public_state_summary,
             )
             return voter.seat_no, target
 
-        results = await asyncio.gather(
-            *(_one(v) for v in voters), return_exceptions=False
-        )
+        def _factory(voter: Player) -> Callable[
+            [], Coroutine[object, object, tuple[int, int | None]]
+        ]:
+            return lambda: _one(voter)
+
+        results = await self._run_staggered(_factory(v) for v in voters)
         return dict(results)
 
     async def dispatch_wolf_chat_lines(
@@ -223,9 +242,10 @@ class NpcDecisionDispatcher:
         phase_id = make_phase_id(
             game_id, day, Phase.NIGHT_0 if day == 0 else Phase.NIGHT
         )
-        deadline = self._now_ms() + self.config.request_ttl_ms
 
         async def _one(actor: Player) -> tuple[int, int | None]:
+            # Per-task deadline (see dispatch_votes for rationale).
+            expires_at_ms = self._now_ms() + self.config.request_ttl_ms
             target = await self._dispatch_one_night(
                 actor=actor,
                 seats_by_no=seats_by_no,
@@ -233,14 +253,17 @@ class NpcDecisionDispatcher:
                 game_id=game_id,
                 phase_id=phase_id,
                 action_kind=action_kind,
-                expires_at_ms=deadline,
+                expires_at_ms=expires_at_ms,
                 public_state_summary=public_state_summary,
             )
             return actor.seat_no, target
 
-        results = await asyncio.gather(
-            *(_one(a) for a in actors), return_exceptions=False
-        )
+        def _factory(actor: Player) -> Callable[
+            [], Coroutine[object, object, tuple[int, int | None]]
+        ]:
+            return lambda: _one(actor)
+
+        results = await self._run_staggered(_factory(a) for a in actors)
         return dict(results)
 
     # ------------------------------------------------- WS handler hooks
@@ -458,6 +481,32 @@ class NpcDecisionDispatcher:
             payload_json=req.model_dump_json(),
             label=f"night-{action_kind}",
         )
+
+    async def _run_staggered(
+        self,
+        coro_factories: Iterable[
+            Callable[[], Coroutine[object, object, tuple[int, int | None]]]
+        ],
+    ) -> list[tuple[int, int | None]]:
+        """Launch one task per factory, spaced by ``inter_request_stagger_ms``.
+
+        Each factory is a zero-arg callable that returns a coroutine; we
+        wait for the stagger interval BETWEEN launches, not before
+        gathering. The first task starts immediately so the wall-clock
+        for a 1-actor dispatch is unchanged. With ``stagger_ms=0`` the
+        behaviour is equivalent to the historical
+        ``asyncio.gather(*coros)`` fan-out, which keeps the unit tests
+        snappy.
+        """
+        stagger_s = self.config.inter_request_stagger_ms / 1000.0
+        tasks: list[asyncio.Task[tuple[int, int | None]]] = []
+        for i, factory in enumerate(coro_factories):
+            if i > 0 and stagger_s > 0:
+                await asyncio.sleep(stagger_s)
+            tasks.append(asyncio.create_task(factory()))
+        if not tasks:
+            return []
+        return list(await asyncio.gather(*tasks, return_exceptions=False))
 
     async def _send_and_wait(
         self,
