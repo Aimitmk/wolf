@@ -42,6 +42,7 @@ from wolfbot.domain.enums import CO_CLAIM_VALUES
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
 from wolfbot.llm.persona_base import Persona
 from wolfbot.llm.prompt_builder import (
+    _build_game_rules_block,
     build_judgment_profile_block,
     build_speech_profile_block,
 )
@@ -152,6 +153,23 @@ def _build_system(
     SpeakRequest, the NPC sees its role and the role-specific strategy
     block. Older Master builds that don't send them produce a prompt that
     silently omits the role section (back-compat).
+
+    Game-rules block: rounds-mode injects ``_build_game_rules_block()``
+    via the markdown template (``{game_rules_block}`` placeholder) so
+    the gameplay LLM sees the canonical 30+ rule list (NIGHT_0 has no
+    attack/guard, day-1 single-target seer rule, 黒/白 binary, count
+    integrity, single-CO trust, etc.). The reactive_voice NPC builds
+    its prompt programmatically here, and historically *omitted* the
+    block entirely — meaning every prompt rule edit to
+    ``prompt_builder._build_game_rules_block`` since reactive_voice
+    landed has only affected the gameplay LLM (votes/night actions),
+    never the persona LLM that actually speaks. Game ``8ccc86215e97``
+    surfaced the bug: Rakio (knight) day-1 falsely claimed "I guarded
+    someone last night" (NIGHT_0 has no guard), Yuriko (wolf) day-1
+    fake-CO'd seer with **two** results in one morning ("シゲミチ村人
+    確定" + "ステラ人狼確定") — both forbidden by rules that simply
+    weren't in the prompt. Injecting the block here closes the gap so
+    every NPC sees the same canonical ruleset.
     """
     role_block = ""
     if role:
@@ -165,9 +183,10 @@ def _build_system(
         f"性格: {persona.style_guide}\n\n"
         f"## 話法\n{build_speech_profile_block(persona)}\n\n"
         f"## 判断のクセ\n{build_judgment_profile_block(persona)}\n\n"
+        f"## ゲームルール\n{_build_game_rules_block()}\n\n"
         f"{role_block}"
         f"{strategy_block}"
-        "## ルール\n"
+        "## 出力ルール\n"
         "- 日本語のみ。メタ発言禁止。AIであることに言及しない。\n"
         f"- `text` は {max_chars} 文字以内の短い発言。"
         f"上限ぎりぎりまで埋めようとせず、必ず文を最後まで言い切ること。"
