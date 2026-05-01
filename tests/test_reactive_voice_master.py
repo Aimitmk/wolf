@@ -3113,6 +3113,145 @@ async def test_runoff_dispatch_picks_tied_llm_candidates_in_order(
     assert not bufs["gina"]
 
 
+async def test_runoff_dispatch_skips_when_seat_already_pending(
+    repo: SqliteRepo,
+) -> None:
+    """Two sequential `try_dispatch_next` invocations on phase entry into
+    DAY_RUNOFF_SPEECH (post-PHASE_CHANGE-narration kick + the
+    `_on_reactive_phase_enter` callback) must NOT both run the Master
+    candidate intro. Between the first call's `dispatch_request` (which
+    only adds to `_pending`) and the NPC's SpeakResult arriving (which
+    flips `_active_playback`), the gate is open — without the
+    re-entrancy guard the second call picks the same chosen seat and
+    speaks the intro twice. Regression for the user-reported
+    "決選投票で最初の候補者の発言を促す案内が2回読み上げられる" bug.
+    """
+    from wolfbot.domain.models import Vote
+
+    g = Game(
+        id="rv-runoff-double-kick",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    for seat in (
+        Seat(
+            seat_no=1,
+            display_name="🦋ラキオ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="raqio",
+        ),
+        Seat(
+            seat_no=2,
+            display_name="🌙セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+        Seat(
+            seat_no=3,
+            display_name="🟣ジナ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="gina",
+        ),
+    ):
+        await repo.insert_seat(g.id, seat)
+    for sn, role in ((1, Role.WEREWOLF), (2, Role.SEER), (3, Role.MEDIUM)):
+        await repo.set_player_role(g.id, sn, role)
+    # Tie: seats 1 and 2 (voter 3 abstains).
+    for voter, target in ((1, 2), (2, 1), (3, None)):
+        await repo.insert_vote(
+            Vote(
+                game_id=g.id,
+                day=1,
+                round=0,
+                voter_seat=voter,
+                target_seat=target,
+                submitted_at=1,
+            )
+        )
+
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_RUNOFF_SPEECH)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_RUNOFF_SPEECH,
+            alive_seat_nos=[1, 2, 3],
+            created_at_ms=1,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "setsu": [], "gina": []}
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+        ("npc_gina", "gina", 3),
+    ):
+        registry.register(
+            npc_id=npc_id,
+            discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(),
+            version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000,
+            persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    intros: list[int] = []
+
+    async def _intro(seat: Seat) -> None:
+        intros.append(seat.seat_no)
+
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=registry,
+        discussion=discussion,
+        now_ms=lambda: 2000,
+        runoff_announce=_intro,
+    )
+
+    # Two sequential kicks — mirrors the prod ordering where
+    # `_master_narrate`'s post-PHASE_CHANGE kick runs before
+    # `_on_reactive_phase_enter` fires from `_dispatch_submissions`.
+    # Between them, the first dispatch's SpeakRequest is in
+    # `_pending` but no SpeakResult has arrived yet so
+    # `_active_playback` is empty.
+    await arb.try_dispatch_next(g.id)
+    await arb.try_dispatch_next(g.id)
+
+    # The intro must fire exactly once, not twice. Seat 1 (lowest
+    # tied seat-no) is the chosen candidate; the second kick sees
+    # the pending SpeakRequest and bails out.
+    assert intros == [1], (
+        "candidate intro must be voiced exactly once even on a "
+        f"double phase-entry kick (got intros={intros})"
+    )
+    # Exactly one SpeakRequest was emitted.
+    raqio_speak_requests = [m for m in bufs["raqio"] if '"speak_request"' in m]
+    assert len(raqio_speak_requests) == 1, (
+        "exactly one SpeakRequest must be emitted to the chosen NPC "
+        f"(got {len(raqio_speak_requests)})"
+    )
+    # The other tied seat (席2 セツ) must not be picked while seat 1
+    # is still in flight.
+    assert not any('"speak_request"' in m for m in bufs["setsu"])
+
+
 async def test_runoff_dispatch_marks_done_on_offline_npc(
     repo: SqliteRepo,
 ) -> None:

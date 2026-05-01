@@ -1469,6 +1469,28 @@ class SpeakArbiter:
             self._maybe_wake_runoff(game_id)
             return
 
+        # Re-entrancy guard: phase entry into DAY_RUNOFF_SPEECH fires
+        # `try_dispatch_next` from two sequential paths — the
+        # post-PHASE_CHANGE-narration kick in `_master_narrate` and the
+        # `_on_reactive_phase_enter` callback driven by
+        # `_dispatch_submissions`. Between the first call's
+        # `dispatch_request` (which only populates `_pending`) and the
+        # NPC's `SpeakResult` (which adds to `_active_playback`),
+        # `is_blocked()` returns None, so the second call would pick
+        # the same `chosen` seat again and have Master read the
+        # candidate intro twice. Skip when a SpeakRequest for this
+        # seat is already pending — the existing dispatch will flip
+        # `runoff_speech_done` itself.
+        for pending in self._pending.values():
+            if pending.game_id == game_id and pending.seat_no == chosen.seat_no:
+                log.debug(
+                    "runoff_dispatch_skipped_already_pending game=%s seat=%d request=%s",
+                    game_id,
+                    chosen.seat_no,
+                    pending.request_id,
+                )
+                return
+
         # Master narration: name the candidate before they speak. Awaited
         # so the intro finishes before the NPC's own TTS starts.
         if self._runoff_announce is not None:
