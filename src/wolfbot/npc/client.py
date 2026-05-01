@@ -556,22 +556,31 @@ class NpcClient:
             return None, "unknown_persona"
         legal = frozenset(seat for seat, _name in req.candidate_seats)
         system, user = build_vote_prompt(state=state, persona=persona, request=req)
+        # Mirror `_decide_night_target`: track the LLM call's success
+        # uniformly so the abstain fallback below covers transport errors
+        # (504 DEADLINE_EXCEEDED, 429 RESOURCE_EXHAUSTED, ...) the same
+        # way it covers parse failures. Without this, a Gemini 504 on
+        # the vote turn drops the ballot to abstain, weakening the
+        # village's ability to lynch a wolf when one round-trip flakes.
+        result_target_seat: int | None = None
+        reason_summary = "llm_error"
         try:
             raw = await self.decision_llm.decide_json(
                 system_prompt=system, user_prompt=user, schema=_VOTE_SCHEMA,
             )
+            result = parse_decision(raw, legal_seats=legal)
+            result_target_seat = result.target_seat
+            reason_summary = result.reason_summary
         except Exception:
             log.exception(
                 "npc_vote_llm_failed game=%s seat=%d", req.game_id, req.seat_no,
             )
-            return None, "llm_error"
-        result = parse_decision(raw, legal_seats=legal)
         # Forbid abstention in voting. The schema disallows null and the
         # prompt explicitly says "棄権禁止", but if the model still drops
-        # back (parse error, out-of-set target, persona inertia) we pick
-        # a deterministic-but-uniform fallback so the seat doesn't end
-        # up in the silent-abstain bucket.
-        if result.target_seat is None and legal:
+        # back (parse error, out-of-set target, persona inertia, or LLM
+        # transport error) we pick a deterministic-but-uniform fallback
+        # so the seat doesn't end up in the silent-abstain bucket.
+        if result_target_seat is None and legal:
             rng = random.Random(
                 f"{req.game_id}:{req.seat_no}:{req.round_}".__hash__()
             )
@@ -579,10 +588,10 @@ class NpcClient:
             log.info(
                 "npc_vote_abstain_fallback game=%s seat=%d -> %d reason=%s",
                 req.game_id, req.seat_no, fallback,
-                result.reason_summary or "(none)",
+                reason_summary or "(none)",
             )
-            return fallback, f"abstain_fallback:{result.reason_summary or ''}"
-        return result.target_seat, result.reason_summary
+            return fallback, f"abstain_fallback:{reason_summary or ''}"
+        return result_target_seat, reason_summary
 
     async def _on_decide_night_action_request(
         self, req: DecideNightActionRequest
@@ -686,17 +695,29 @@ class NpcClient:
             return None, "unknown_persona"
         legal = frozenset(seat for seat, _name in req.candidate_seats)
         system, user = build_night_prompt(state=state, persona=persona, request=req)
+        # Track parse + transport errors uniformly so the abstain
+        # fallback below covers BOTH cases. Game ``06c38cd43494``
+        # NIGHT_1 stalled because Vertex AI returned 504
+        # DEADLINE_EXCEEDED on the seer's divine call — the previous
+        # version of this method short-circuited with `return None,
+        # "llm_error"` on any exception, bypassing the random-legal
+        # fallback. The deadline closed with `pending_decisions
+        # missing_seats=[1]` and the game parked in
+        # WAITING_HOST_DECISION.
+        result_target_seat: int | None = None
+        reason_summary = "llm_error"
         try:
             raw = await self.decision_llm.decide_json(
                 system_prompt=system, user_prompt=user, schema=_NIGHT_SCHEMA,
             )
+            result = parse_decision(raw, legal_seats=legal)
+            result_target_seat = result.target_seat
+            reason_summary = result.reason_summary
         except Exception:
             log.exception(
                 "npc_night_llm_failed game=%s seat=%d kind=%s",
                 req.game_id, req.seat_no, req.action_kind,
             )
-            return None, "llm_error"
-        result = parse_decision(raw, legal_seats=legal)
         # Forbid skipping for night actions. Master rejects target=None
         # with ILLEGAL_TARGET; the missing seat then deadlocks the
         # NIGHT phase via pending_decisions until the host force-skips.
@@ -704,7 +725,7 @@ class NpcClient:
         # null saying "GJ リスク回避し次夜余地残す". Force a legal pick
         # so the phase always advances; persona keeps a chance to do
         # 捨て護衛 / 価値の薄い位置 via the LLM choice itself.
-        if result.target_seat is None and legal:
+        if result_target_seat is None and legal:
             rng = random.Random(
                 f"{req.game_id}:{req.seat_no}:{req.action_kind}".__hash__()
             )
@@ -713,10 +734,10 @@ class NpcClient:
                 "npc_night_abstain_fallback game=%s seat=%d kind=%s -> %d "
                 "reason=%s",
                 req.game_id, req.seat_no, req.action_kind, fallback,
-                result.reason_summary or "(none)",
+                reason_summary or "(none)",
             )
-            return fallback, f"abstain_fallback:{result.reason_summary or ''}"
-        return result.target_seat, result.reason_summary
+            return fallback, f"abstain_fallback:{reason_summary or ''}"
+        return result_target_seat, reason_summary
 
 
 __all__ = ["NpcClient", "NpcClientConfig"]

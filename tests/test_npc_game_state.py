@@ -458,3 +458,82 @@ def test_npcgamestate_constructs_with_defaults() -> None:
     )
     assert state.game_id == "g"
     assert state.seer_results == []
+
+
+@pytest.mark.asyncio
+async def test_vote_falls_back_when_llm_raises_exception() -> None:
+    """Vertex AI sometimes returns 504 DEADLINE_EXCEEDED / 429
+    RESOURCE_EXHAUSTED. The previous behaviour returned None on
+    exception, bypassing the abstain fallback and silently dropping
+    the ballot. Force a legal pick so the seat doesn't end up in the
+    silent-abstain bucket on a transient LLM failure.
+    """
+    client, sent = _make_client_with_capture()
+    await client.process_message(_snapshot().model_dump_json())
+
+    class _RaisingLLM:
+        async def decide_json(
+            self, *, system_prompt: str, user_prompt: str,
+            schema: dict[str, object],
+        ) -> str:
+            raise RuntimeError("simulated 504 DEADLINE_EXCEEDED")
+
+    client.decision_llm = _RaisingLLM()  # type: ignore[assignment]
+
+    vote_req = DecideVoteRequest(
+        ts=3000, trace_id="t-vote",
+        request_id="rv-llm-err", npc_id="npc_setsu", seat_no=3,
+        game_id="g1", phase_id="g1::day1::DAY_VOTE::1",
+        candidate_seats=((1, "Alice"), (5, "Bob")),
+        expires_at_ms=10_000,
+    )
+    await client.process_message(vote_req.model_dump_json())
+    decisions = [VoteDecision.model_validate_json(m) for m in sent if '"vote_decision"' in m]
+    assert len(decisions) == 1
+    assert decisions[0].target_seat in {1, 5}, (
+        "LLM exception must trigger abstain fallback, not silent abstain"
+    )
+    assert decisions[0].reason_summary is not None
+    assert "abstain_fallback" in decisions[0].reason_summary
+
+
+@pytest.mark.asyncio
+async def test_night_target_falls_back_when_llm_raises_exception() -> None:
+    """Reproduces game `06c38cd43494` NIGHT_1 stall: Vertex AI returned
+    504 DEADLINE_EXCEEDED on the seer's divine call → previous code
+    short-circuited with `None, "llm_error"` → Master's
+    `pending_decisions` retained `missing_seats=[seer]` past the
+    deadline → game parked in WAITING_HOST_DECISION. Now the random-
+    legal fallback covers transport errors too.
+    """
+    client, sent = _make_client_with_capture()
+    await client.process_message(_snapshot(role="SEER").model_dump_json())
+
+    class _RaisingLLM:
+        async def decide_json(
+            self, *, system_prompt: str, user_prompt: str,
+            schema: dict[str, object],
+        ) -> str:
+            raise RuntimeError("simulated 504 DEADLINE_EXCEEDED")
+
+    client.decision_llm = _RaisingLLM()  # type: ignore[assignment]
+
+    night_req = DecideNightActionRequest(
+        ts=4000, trace_id="t-night",
+        request_id="rn-llm-err", npc_id="npc_setsu", seat_no=3,
+        game_id="g1", phase_id="g1::day1::NIGHT::1",
+        action_kind="seer_divine",
+        candidate_seats=((1, "Alice"), (5, "Bob")),
+        expires_at_ms=20_000,
+    )
+    await client.process_message(night_req.model_dump_json())
+    decisions = [
+        NightActionDecision.model_validate_json(m)
+        for m in sent if '"night_action_decision"' in m
+    ]
+    assert len(decisions) == 1
+    assert decisions[0].target_seat in {1, 5}, (
+        "LLM exception must trigger abstain fallback for night actions too"
+    )
+    assert decisions[0].reason_summary is not None
+    assert "abstain_fallback" in decisions[0].reason_summary
