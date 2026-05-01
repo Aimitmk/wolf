@@ -867,6 +867,29 @@ class LLMAdapter:
                         target,
                     )
                     target = None
+                # Random-legal fallback: matches rounds-mode behaviour
+                # at llm_service._run_night_actions where
+                # `_resolve_target(..., allow_none=False)` already picks
+                # a uniform legal target when the LLM returns None /
+                # illegal. Without this, a slow NPC LLM that hits the
+                # dispatcher's request_ttl (12s) returns None →
+                # `submit_night_action` rejects it (ILLEGAL_TARGET) →
+                # the seat stays missing → `plan_night_resolve` parks
+                # the game in WAITING_HOST_DECISION. Observed in game
+                # bc20ebccb605 NIGHT 2 where jonas's knight_guard call
+                # took ~20s and stalled the entire phase.
+                if target is None:
+                    legal_for_actor = sorted(per_actor_legal[actor.seat_no])
+                    if legal_for_actor:
+                        target = self.rng.choice(legal_for_actor)
+                        log.info(
+                            "npc_night_decision_random_fallback game=%s seat=%d kind=%s target=%d "
+                            "reason=null_or_illegal_response_from_npc",
+                            game.id,
+                            actor.seat_no,
+                            action_label,
+                            target,
+                        )
                 kind = per_actor_kind[actor.seat_no]
                 try:
                     await self.gs.submit_night_action(

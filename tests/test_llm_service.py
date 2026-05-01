@@ -597,6 +597,124 @@ async def test_wolf_chat_skipped_when_phase_advances_during_ask(repo: SqliteRepo
     assert [r for r in priv_for_seat3 if r.get("kind") == "WOLF_CHAT"] == []
 
 
+async def test_reactive_voice_night_dispatcher_random_legal_fallback_on_null(
+    repo: SqliteRepo,
+) -> None:
+    """When the NPC bot's night-action LLM call times out (or returns
+    illegal), the dispatcher returns ``None`` for that seat. Without a
+    fallback this null target is forwarded to ``submit_night_action``
+    which rejects it as ILLEGAL_TARGET, leaving the seat missing →
+    ``plan_night_resolve`` parks the game in ``WAITING_HOST_DECISION``
+    until the host runs ``/wolf force-skip``. Regression for game
+    bc20ebccb605 NIGHT 2 where jonas's knight_guard call took ~20s
+    (over the 12s dispatcher TTL) and stalled the entire phase.
+
+    Match rounds-mode (`_resolve_target(allow_none=False)`) by picking
+    a uniform-random legal target so the night still resolves.
+    """
+    game = Game(
+        id="g-rv-night",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.NIGHT,
+        day_number=1,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        heaven_channel_id="h1",
+        wolves_channel_id="w1",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(game)
+    seats = [
+        Seat(seat_no=1, display_name="H1", discord_user_id="u1", is_llm=False, persona_key=None),
+        Seat(
+            seat_no=2,
+            display_name="Wolf",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="gina",
+        ),
+        Seat(
+            seat_no=3,
+            display_name="Knight",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="jonas",
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.WEREWOLF)
+    await repo.set_player_role(game.id, 3, Role.KNIGHT)
+
+    class _NullingDispatcher:
+        """Returns None for every actor — simulates a slow LLM hitting
+        the dispatcher's request_ttl_ms timeout."""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, list[int]]] = []
+
+        async def dispatch_night_actions(
+            self,
+            *,
+            game_id: str,
+            day: int,
+            action_kind: str,
+            actors: list[Player],
+            seats: list[Seat],
+            candidate_seats: list[int],
+            public_state_summary: str = "",
+        ) -> dict[int, int | None]:
+            self.calls.append((action_kind, [a.seat_no for a in actors]))
+            return {a.seat_no: None for a in actors}
+
+        async def dispatch_wolf_chat_lines(self, **kwargs: object) -> None:
+            return None
+
+    gs = _FakeGameService()
+    dispatcher = _NullingDispatcher()
+    adapter = LLMAdapter(
+        repo=repo,
+        decider=_ScriptedDecider([]),
+        rng=random.Random(0),
+        npc_decision_dispatcher=dispatcher,  # type: ignore[arg-type]
+    )
+    adapter.set_game_service(gs)  # type: ignore[arg-type]
+
+    players = await repo.load_players(game.id)
+    await adapter.submit_llm_night_actions(game, players, seats)
+    await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
+
+    # Dispatcher was invoked for both wolf_attack and knight_guard.
+    kinds_dispatched = {kind for kind, _ in dispatcher.calls}
+    assert "wolf_attack" in kinds_dispatched
+    assert "knight_guard" in kinds_dispatched
+
+    # CRITICAL: every submission must carry a non-null target despite
+    # the dispatcher returning None. Without the fallback, the wolf's
+    # attack and knight's guard would be rejected and the game would
+    # stall in WAITING_HOST_DECISION at deadline.
+    submitted_kinds = {kind for _gid, _seat, kind, _t, _d in gs.nights}
+    assert SubmissionType.WOLF_ATTACK in submitted_kinds
+    assert SubmissionType.KNIGHT_GUARD in submitted_kinds
+    for _gid, seat, kind, target, _d in gs.nights:
+        assert target is not None, (
+            f"seat={seat} kind={kind.value} got null target — "
+            "fallback to random legal target is missing, the night will stall"
+        )
+    # Targets must be legal — wolf can't self-attack, knight can't
+    # self-guard, etc.
+    for _gid, _seat, kind, target, _d in gs.nights:
+        if kind is SubmissionType.WOLF_ATTACK:
+            # Wolf attacks any non-wolf alive seat: 1 (villager) or 3 (knight).
+            assert target in {1, 3}
+        elif kind is SubmissionType.KNIGHT_GUARD:
+            # Knight guards any other alive seat: 1 (villager) or 2 (wolf).
+            assert target in {1, 2}
+
+
 async def test_run_night_actions_skips_seat_with_existing_action(repo: SqliteRepo) -> None:
     """Fix 1: night re-dispatch won't double-submit for a seat that already
     has a submission (unless it's in unresolved_seats for a wolf split)."""
