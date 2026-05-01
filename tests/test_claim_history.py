@@ -215,10 +215,18 @@ def test_logic_packet_summary_includes_claim_history_block() -> None:
 
     summary = packet.public_state_summary
     assert "公開された占い/霊媒CO結果" in summary
-    # Expected count rule surfaces the day-N anchor.
-    assert "通算 2 件まで整合" in summary
-    assert "Jonas (占いCO 通算 1 件): day1: Comet白" in summary
-    assert "Yuriko (占いCO 通算 1 件): day1: Setsu白" in summary
+    # Distinct-claimer count vs cap shown in the role header.
+    assert "通算 2 件 / 上限 3 件" in summary
+    # Per-day expected count (= day+1 results per real seer) shown
+    # under the seer header so the LLM has a numeric anchor.
+    assert "day+1 = 2 件まで整合" in summary
+    # Per-row format includes seat number + alive/dead tag inline.
+    assert "Jonas (席2," in summary
+    assert "day1: Comet白" in summary
+    assert "Yuriko (席9," in summary
+    assert "day1: Setsu白" in summary
+    # Top warning banner for the dead-CO awareness rule.
+    assert "死亡席の CO も依然として有効" in summary
 
 
 def test_logic_packet_summary_omits_block_without_history() -> None:
@@ -259,5 +267,7 @@ def test_logic_packet_summary_renders_medium_void_as_no_result() -> None:
         claim_history=history,
     )
 
-    assert "Shigemichi (霊媒CO" in packet.public_state_summary
+    # Medium ledger row format: claimer + seat + alive/dead, then results.
+    assert "霊媒CO  通算 1 件 / 上限 2 件" in packet.public_state_summary
+    assert "Shigemichi (席5," in packet.public_state_summary
     assert "結果なし" in packet.public_state_summary

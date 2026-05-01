@@ -112,29 +112,66 @@ def build_logic_packet(
         # the same record — real roles use it to keep their own past
         # results consistent in speech, fake-CO wolves see their own
         # prior lies and either commit to them or get caught when they
-        # contradict themselves. Compact rendering keeps the prompt
-        # token budget bounded even on day 4+.
-        summary += "\n\n## 公開された占い/霊媒CO結果 (公式記録)\n"
-        # Expected count rule: a real seer at day N has claimed N + 1
-        # results (NIGHT_0 random white + one per night). The line
-        # below surfaces it once so the LLM has a numeric anchor.
+        # contradict themselves.
+        #
+        # Layout (post-game ``74edf214638d`` redesign):
+        #
+        # 1. Top warning banner: dead-claimer COs are still valid public
+        #    info. Game ``74edf214638d`` had ステラ (madman) seer-CO on
+        #    day 1, get attacked night 1, then on day 2 morning every
+        #    NPC ignored her CO and called ユリコ "the single seer CO" —
+        #    the LLM was treating dead = irrelevant. Banner up top is
+        #    the cheapest fix; the rule also goes into prompt_builder.
+        # 2. Per-role section header (### 占いCO / ### 霊媒CO) so the
+        #    LLM doesn't confuse seer vs medium when scanning a row.
+        # 3. Each row carries an explicit alive/dead tag in-line so the
+        #    LLM doesn't need to cross-reference the participant list
+        #    to know whether a claimer is still around.
+        # 4. Distinct-claimer count vs cap is shown next to the role
+        #    header (max 3 seer / 2 medium per CLAUDE rules). Per-day
+        #    expected count (= day+1 results per real seer) stays as a
+        #    separate sub-line under the seer header.
         expected = expected_seer_claim_count_for_day(state.day)
-        summary += (
-            f"(占いCO: 通算 {expected} 件まで整合。これより少ない/多い結果は破綻)\n"
+        seer_claimers = sorted(
+            s for s, h in claim_history.by_seat.items() if h.seer_claims
         )
-        for seat_no in sorted(claim_history.by_seat.keys()):
-            history = claim_history.by_seat[seat_no]
-            who = _name(seat_no)
-            if history.seer_claims:
+        medium_claimers = sorted(
+            s for s, h in claim_history.by_seat.items() if h.medium_claims
+        )
+
+        def _alive_tag(seat: int) -> str:
+            return "生存" if seat in state.alive_seat_nos else "死亡"
+
+        summary += "\n\n## 公開された占い/霊媒CO結果 (公式記録)\n"
+        summary += (
+            "**重要**: 死亡席の CO も依然として有効な公開情報です。"
+            "alive/dead で ledger から除外しないでください。"
+            "「占い師は◯◯さん 1 人だけ」「単独 CO」のように現在生存中の CO 数だけで"
+            "結論を出すのは誤りで、必ず以下の通算件数で判断してください。\n"
+
+        )
+        if seer_claimers:
+            summary += (
+                f"\n### 占いCO  通算 {len(seer_claimers)} 件 / 上限 3 件 "
+                f"(各人の発表は朝までに day+1 = {expected} 件まで整合)\n"
+            )
+            for seat_no in seer_claimers:
+                history = claim_history.by_seat[seat_no]
+                who = _name(seat_no)
                 seer_summary = ", ".join(
                     f"day{c.day}: {c.target_name}{'黒' if c.is_wolf else '白'}"
                     for c in history.seer_claims
                 )
                 summary += (
-                    f"- {who} (占いCO 通算 {len(history.seer_claims)} 件): "
-                    f"{seer_summary}\n"
+                    f"- {who} (席{seat_no}, {_alive_tag(seat_no)}) — {seer_summary}\n"
                 )
-            if history.medium_claims:
+        if medium_claimers:
+            summary += (
+                f"\n### 霊媒CO  通算 {len(medium_claimers)} 件 / 上限 2 件\n"
+            )
+            for seat_no in medium_claimers:
+                history = claim_history.by_seat[seat_no]
+                who = _name(seat_no)
                 medium_summary = ", ".join(
                     f"day{c.day}: "
                     + (
@@ -144,8 +181,7 @@ def build_logic_packet(
                     for c in history.medium_claims
                 )
                 summary += (
-                    f"- {who} (霊媒CO 通算 {len(history.medium_claims)} 件): "
-                    f"{medium_summary}\n"
+                    f"- {who} (席{seat_no}, {_alive_tag(seat_no)}) — {medium_summary}\n"
                 )
         summary = summary.rstrip()
         # Per-recipient nudge when the addressee themselves is a CO'd
