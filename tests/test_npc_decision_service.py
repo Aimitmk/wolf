@@ -134,3 +134,31 @@ def test_parse_decision_drops_top_level_array() -> None:
     result = parse_decision("[1, 2]", legal_seats=frozenset({1, 5}))
     assert result.target_seat is None
     assert result.reason_summary == "not_object"
+
+
+def test_build_wolf_chat_prompt_includes_role_strategy_block() -> None:
+    """Wolf chat must include the WEREWOLF role-strategy block so the
+    chat-side decision sees the master tactical rules (multi-CO attack
+    avoidance, GJ rebite, info-role priority, knight-candidate scoring).
+
+    Game `38627df1ade1` had wolves agree in chat to attack a seer in a
+    3-CO board because the chat prompt was missing the strategy block.
+    The night-action prompt does carry it, but by then `wolf_chat_history`
+    already locks the wolves to the chat-time consensus.
+    """
+    from wolfbot.npc.decision_service import build_wolf_chat_prompt
+
+    persona = NPC_PERSONAS_BY_KEY["gina"]
+    _system, user = build_wolf_chat_prompt(
+        state=_state(role="WEREWOLF"),
+        persona=persona,
+        candidates=((1, "Alice"), (5, "Bob")),
+        public_state_summary="phase=NIGHT day=1",
+    )
+    # The role-strategy header marks the block's presence.
+    assert "## 役職別の戦術ヒント" in user
+    # Spot-check that the multi-CO attack-avoidance line from
+    # `_ROLE_STRATEGIES[WEREWOLF]` made it through.
+    assert "対抗 CO が出ている役職" in user
+    # And the no-4th-seer-CO rule too (same block).
+    assert "4 件目を出してはならない" in user

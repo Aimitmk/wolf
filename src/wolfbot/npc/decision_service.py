@@ -308,9 +308,20 @@ def build_wolf_chat_prompt(
     - propose / agree / counter on a target,
     - stay under 80 chars,
     - speak in the persona's voice (this is still character).
+
+    The role-strategy block (= ``build_strategy_block(WEREWOLF)``) is
+    INJECTED here too. Without it, the chat's "今夜誰を噛む?" decision
+    runs on the persona block + game ledger only; the master tactical
+    rules (multi-CO attack avoidance, GJ rebite, info-role priority,
+    knight-candidate scoring) live in the WEREWOLF strategy block and
+    were missing from the chat prompt — so wolves agreed to attack a
+    seer in a 3-CO board (game ``38627df1ade1`` night 1), and the
+    night-action prompt that follows already carries the chat history
+    as commitment, biasing both wolves to follow through.
     """
     persona_block = _build_persona_block(persona)
     state_block = _build_state_block(state)
+    role_block = _build_role_block(state.role)
     candidates_str = (
         "、".join(f"席{seat_no} {name}" for seat_no, name in candidates)
         or "(なし)"
@@ -335,6 +346,8 @@ def build_wolf_chat_prompt(
         f"## 現在: 人狼チャット (day {state.day_number})",
         "",
         persona_block,
+        "",
+        role_block,
         "",
         "## 自分の状況 (非公開)",
         state_block,
