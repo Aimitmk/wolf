@@ -22,7 +22,8 @@ from wolfbot.llm.decider_config import LLMDeciderConfig, LLMProvider
 
 class NpcSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env.npc", env_file_encoding="utf-8", extra="ignore")
+        env_file=".env.npc", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # NPC identity / Discord
     NPC_ID: str
@@ -84,21 +85,23 @@ class NpcSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_npc_provider_key(self) -> NpcSettings:
-        if (
-            self.NPC_LLM_PROVIDER in ("xai", "deepseek")
-            and self.NPC_LLM_API_KEY is None
-        ):
+        if self.NPC_LLM_PROVIDER in ("xai", "deepseek") and self.NPC_LLM_API_KEY is None:
             raise ValueError(
-                f"NPC_LLM_PROVIDER={self.NPC_LLM_PROVIDER} "
-                "requires NPC_LLM_API_KEY to be set"
+                f"NPC_LLM_PROVIDER={self.NPC_LLM_PROVIDER} requires NPC_LLM_API_KEY to be set"
             )
+        # Mirror MasterSettings: gemini accepts either Vertex AI
+        # (via NPC_LLM_VERTEX_PROJECT + ADC) or Google AI Studio
+        # (via NPC_LLM_API_KEY in AIza... format). At least one must
+        # be set; if both are present, Vertex wins.
         if (
             self.NPC_LLM_PROVIDER == "gemini"
             and not self.NPC_LLM_VERTEX_PROJECT
+            and self.NPC_LLM_API_KEY is None
         ):
             raise ValueError(
-                "NPC_LLM_PROVIDER=gemini requires "
-                "NPC_LLM_VERTEX_PROJECT to be set"
+                "NPC_LLM_PROVIDER=gemini requires either "
+                "NPC_LLM_VERTEX_PROJECT (Vertex AI / ADC) or "
+                "NPC_LLM_API_KEY (Google AI Studio)"
             )
         return self
 

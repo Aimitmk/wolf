@@ -74,7 +74,12 @@ def make_npc_generator(cfg: LLMDeciderConfig, *, persona_key: str) -> NpcGenerat
             GeminiVertexConfig,
         )
 
-        assert cfg.vertex_project is not None  # validated in NpcSettings
+        # Vertex (project) wins when both are set; AI Studio (api_key)
+        # is the fallback. NpcSettings.validator guarantees at least
+        # one is present.
+        api_key_value: str | None = (
+            cfg.api_key.get_secret_value() if cfg.api_key is not None else None
+        )
         gen_gemini = GeminiNpcGenerator(
             config=GeminiVertexConfig(
                 project=cfg.vertex_project,
@@ -82,6 +87,7 @@ def make_npc_generator(cfg: LLMDeciderConfig, *, persona_key: str) -> NpcGenerat
                 model=cfg.model,
                 thinking_level=cfg.thinking_level,
                 timeout=cfg.timeout,
+                api_key=api_key_value if not cfg.vertex_project else None,
             ),
         )
         gen_gemini.set_persona(persona_key)

@@ -188,7 +188,9 @@ RESPONSE_SCHEMA: dict[str, object] = {
                 "required": ["target_seat", "is_wolf"],
                 "properties": {
                     "target_seat": {
-                        "type": "integer", "minimum": 1, "maximum": 9,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9,
                     },
                     "is_wolf": {"type": "boolean"},
                 },
@@ -199,7 +201,9 @@ RESPONSE_SCHEMA: dict[str, object] = {
                 "required": ["target_seat", "is_wolf"],
                 "properties": {
                     "target_seat": {
-                        "type": "integer", "minimum": 1, "maximum": 9,
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9,
                     },
                     "is_wolf": {"type": ["boolean", "null"]},
                 },
@@ -393,6 +397,56 @@ class DeepSeekLLMActionDecider:
             )
 
 
+def _gemini_thinking_config(
+    model: str,
+    thinking_level: Literal["minimal", "low", "medium", "high"],
+) -> object | None:
+    """Return the right ``ThinkingConfig`` for ``model``, or ``None``.
+
+    Different Gemini model families take different thinking knobs:
+
+    * **gemini-3-** and ``gemini-flash-latest`` (= 3-family alias) accept
+      ``thinking_level`` (``minimal`` / ``low`` / ``medium`` / ``high``).
+    * **gemini-2.5-** accepts ``thinking_budget`` (integer). ``-1`` =
+      dynamic budget, ``0`` = disabled, positive int = fixed cap.
+    * **gemini-2.0-** has no thinking surface at all; passing either
+      knob throws ``INVALID_ARGUMENT`` at the API boundary.
+
+    The decider/generator stores the user-facing string from env
+    (``minimal``..``high``) and we map it to the family-specific
+    parameter here so callers don't have to branch model-by-model.
+
+    Returns ``None`` when the model doesn't support thinking, so the
+    caller can omit ``thinking_config`` from
+    ``GenerateContentConfig`` entirely (passing ``thinking_config=None``
+    would be invalid; the field has to be absent).
+    """
+    from google.genai import types
+
+    if model.startswith("gemini-3") or model.startswith("gemini-flash-latest"):
+        return types.ThinkingConfig(
+            # SDK normalizes the string into ThinkingLevel at runtime;
+            # the type annotation is enum-only, so silence the check.
+            thinking_level=thinking_level,  # type: ignore[arg-type]
+        )
+    if model.startswith("gemini-2.5"):
+        # Map the qualitative env knob to a numeric budget. Tuned so
+        # ``high`` keeps full reasoning headroom (-1 = unbounded) while
+        # ``low`` / ``minimal`` bias toward latency.
+        budget_map = {
+            "high": -1,  # dynamic / unbounded
+            "medium": 4096,
+            "low": 1024,
+            "minimal": 0,  # thinking disabled
+        }
+        return types.ThinkingConfig(
+            thinking_budget=budget_map.get(thinking_level, -1),
+        )
+    # gemini-2.0 / older / unknown families: omit the thinking surface
+    # entirely so the request stays valid.
+    return None
+
+
 class GeminiLLMActionDecider:
     """Calls Vertex AI's Gemini API through the official google-genai SDK.
 
@@ -429,19 +483,18 @@ class GeminiLLMActionDecider:
         err: str | None = None
         tokens: dict[str, int | None] | None = None
         try:
+            thinking_cfg = _gemini_thinking_config(self.model, self.thinking_level)
+            generate_config_kwargs: dict[str, object] = {
+                "system_instruction": system_prompt,
+                "response_mime_type": "application/json",
+                "response_json_schema": RESPONSE_SCHEMA["schema"],
+            }
+            if thinking_cfg is not None:
+                generate_config_kwargs["thinking_config"] = thinking_cfg
             resp = await self.client.aio.models.generate_content(  # type: ignore[attr-defined]
                 model=self.model,
                 contents=user_context,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    response_json_schema=RESPONSE_SCHEMA["schema"],
-                    thinking_config=types.ThinkingConfig(
-                        # SDK normalizes the string into ThinkingLevel at runtime;
-                        # the type annotation is enum-only, so silence the check.
-                        thinking_level=self.thinking_level,  # type: ignore[arg-type]
-                    ),
-                ),
+                config=types.GenerateContentConfig(**generate_config_kwargs),  # type: ignore[arg-type]
             )
             content = resp.text or "{}"
             tokens = extract_gemini_vertex_tokens(resp)
@@ -673,10 +726,7 @@ class LLMAdapter:
             llm_players = [p for p in llm_players if p.seat_no in restrict_to_seats]
         if not llm_players:
             return
-        if (
-            game.discussion_mode == "reactive_voice"
-            and self._npc_decision_dispatcher is not None
-        ):
+        if game.discussion_mode == "reactive_voice" and self._npc_decision_dispatcher is not None:
             task = asyncio.create_task(
                 self._run_night_actions_via_npc_dispatcher(
                     game, llm_players, players, seats, unresolved_seats
@@ -768,7 +818,8 @@ class LLMAdapter:
             except Exception:
                 log.exception(
                     "phase_d_wolf_chat_dispatch_failed game=%s day=%d",
-                    game.id, game.day_number,
+                    game.id,
+                    game.day_number,
                 )
 
         for action_label, items in buckets.items():
@@ -800,7 +851,9 @@ class LLMAdapter:
             except Exception:
                 log.exception(
                     "npc_night_dispatch_failed game=%s day=%d kind=%s",
-                    game.id, game.day_number, action_label,
+                    game.id,
+                    game.day_number,
+                    action_label,
                 )
                 continue
             for actor in actors:
@@ -808,18 +861,27 @@ class LLMAdapter:
                 if target is not None and target not in per_actor_legal[actor.seat_no]:
                     log.info(
                         "npc_night_decision_illegal_target game=%s seat=%d kind=%s target=%s",
-                        game.id, actor.seat_no, action_label, target,
+                        game.id,
+                        actor.seat_no,
+                        action_label,
+                        target,
                     )
                     target = None
                 kind = per_actor_kind[actor.seat_no]
                 try:
                     await self.gs.submit_night_action(
-                        game.id, actor.seat_no, kind, target, game.day_number,
+                        game.id,
+                        actor.seat_no,
+                        kind,
+                        target,
+                        game.day_number,
                     )
                 except Exception:
                     log.exception(
                         "npc_night_submit_failed game=%s seat=%d kind=%s",
-                        game.id, actor.seat_no, kind.value,
+                        game.id,
+                        actor.seat_no,
+                        kind.value,
                     )
         _ = seats_by_no  # lint: keep parameter live for log readers
 
@@ -1025,10 +1087,7 @@ class LLMAdapter:
             llm_voters = [p for p in llm_voters if p.seat_no in restrict_to_seats]
         if not llm_voters:
             return
-        if (
-            game.discussion_mode == "reactive_voice"
-            and self._npc_decision_dispatcher is not None
-        ):
+        if game.discussion_mode == "reactive_voice" and self._npc_decision_dispatcher is not None:
             task = asyncio.create_task(
                 self._run_votes_via_npc_dispatcher(
                     game, llm_voters, players, seats, candidates, round_
@@ -1071,22 +1130,10 @@ class LLMAdapter:
             )
 
             day = game.day_number
-            discussion_phase_id = _make_phase_id(
-                game.id, day, Phase.DAY_DISCUSSION
-            )
-            runoff_phase_id = _make_phase_id(
-                game.id, day, Phase.DAY_RUNOFF_SPEECH
-            )
-            events = list(
-                await self.discussion_service.load_phase(
-                    game.id, discussion_phase_id
-                )
-            )
-            runoff_events = list(
-                await self.discussion_service.load_phase(
-                    game.id, runoff_phase_id
-                )
-            )
+            discussion_phase_id = _make_phase_id(game.id, day, Phase.DAY_DISCUSSION)
+            runoff_phase_id = _make_phase_id(game.id, day, Phase.DAY_RUNOFF_SPEECH)
+            events = list(await self.discussion_service.load_phase(game.id, discussion_phase_id))
+            runoff_events = list(await self.discussion_service.load_phase(game.id, runoff_phase_id))
             # Append runoff events after discussion so they fold on top
             # of the day's accumulated state. Both phases carry their
             # own phase_baseline sentinel so the fold reads each
@@ -1110,7 +1157,8 @@ class LLMAdapter:
         except Exception:
             log.exception(
                 "public_digest_build_failed game=%s day=%d",
-                game.id, game.day_number,
+                game.id,
+                game.day_number,
             )
             return ""
 
@@ -1134,7 +1182,9 @@ class LLMAdapter:
             for day in range(1, current_day):
                 for round_ in (0, 1):
                     rows = await self.repo.load_votes(
-                        game_id, day=day, round_=round_,
+                        game_id,
+                        day=day,
+                        round_=round_,
                     )
                     if not rows:
                         continue
@@ -1176,9 +1226,7 @@ class LLMAdapter:
         # Build candidate set per voter — same shape as the decider path.
         # We fan out only voters who have at least one legal target;
         # voters with no legal target (e.g. last-survivor edge) abstain.
-        existing_votes = await self.repo.load_votes(
-            game.id, day=game.day_number, round_=round_
-        )
+        existing_votes = await self.repo.load_votes(game.id, day=game.day_number, round_=round_)
         voted = {v.voter_seat for v in existing_votes}
         per_voter_candidates: dict[int, list[int]] = {}
         voters_to_dispatch: list[Player] = []
@@ -1190,9 +1238,7 @@ class LLMAdapter:
                     s.seat_no
                     for s in seats
                     if s.seat_no != v.seat_no
-                    and any(
-                        p.seat_no == s.seat_no and p.alive for p in all_players
-                    )
+                    and any(p.seat_no == s.seat_no and p.alive for p in all_players)
                 ]
             else:
                 cands = [
@@ -1225,7 +1271,9 @@ class LLMAdapter:
         except Exception:
             log.exception(
                 "npc_vote_dispatch_failed game=%s day=%d round=%d",
-                game.id, game.day_number, round_,
+                game.id,
+                game.day_number,
+                round_,
             )
             return
         # Persist each result. ``None`` (offline / timeout / explicit
@@ -1234,12 +1282,12 @@ class LLMAdapter:
         for voter in voters_to_dispatch:
             target = results.get(voter.seat_no)
             # Validate target is in the voter's legal set, otherwise abstain.
-            if target is not None and target not in per_voter_candidates.get(
-                voter.seat_no, []
-            ):
+            if target is not None and target not in per_voter_candidates.get(voter.seat_no, []):
                 log.info(
                     "npc_vote_decision_illegal_target game=%s seat=%d target=%s",
-                    game.id, voter.seat_no, target,
+                    game.id,
+                    voter.seat_no,
+                    target,
                 )
                 target = None
             try:
@@ -1253,7 +1301,9 @@ class LLMAdapter:
             except Exception:
                 log.exception(
                     "npc_vote_submit_failed game=%s seat=%d round=%d",
-                    game.id, voter.seat_no, round_,
+                    game.id,
+                    voter.seat_no,
+                    round_,
                 )
         # Touch seats_by_no to keep the parameter live for log readers
         # auditing the dispatch (lint guard).
@@ -1820,9 +1870,7 @@ class LLMAdapter:
             private_logs=private_logs,
             deduced_facts_block=deduced_block,
         )
-        actor = (
-            f"seat={player.seat_no} persona={seat.persona_key} role={player.role.value}"
-        )
+        actor = f"seat={player.seat_no} persona={seat.persona_key} role={player.role.value}"
         task_tag = _classify_task_text(task_text)
         with trace_context(
             game_id=game.id,
@@ -1834,9 +1882,7 @@ class LLMAdapter:
             try:
                 return await self.decider.decide(system, user)
             except Exception:
-                log.exception(
-                    "LLM decide failed for seat %s game %s", player.seat_no, game.id
-                )
+                log.exception("LLM decide failed for seat %s game %s", player.seat_no, game.id)
                 return LLMAction(intent="skip", reason_summary="decider error")
 
     async def _build_deduced_facts_block(
@@ -2022,6 +2068,38 @@ def make_gemini_decider(
     )
 
 
+def make_gemini_aistudio_decider(
+    *,
+    api_key: str,
+    model: str = "gemini-3-flash-preview",
+    thinking_level: Literal["minimal", "low", "medium", "high"] = "high",
+    timeout: float = 30.0,
+) -> GeminiLLMActionDecider:
+    """Build a Google AI Studio Gemini-backed decider.
+
+    Mirror of :func:`make_gemini_decider` but authenticates via the
+    AI Studio API key path instead of Vertex AI / ADC. The same
+    ``GeminiLLMActionDecider`` runtime works because the only diff
+    between the two SDK modes is how the underlying client is
+    constructed; the structured-output schema and thinking config are
+    identical surface across both. Use this when running outside GCP
+    (no project / no service account) but with an ``AIza...`` key.
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=int(timeout * 1000)),
+    )
+    return GeminiLLMActionDecider(
+        client=client,
+        model=model,
+        thinking_level=thinking_level,
+        timeout=timeout,
+    )
+
+
 def make_llm_decider(cfg: LLMDeciderConfig) -> LLMActionDecider:
     """Provider-aware decider factory. Branches on ``cfg.provider``.
 
@@ -2053,10 +2131,20 @@ def make_llm_decider(cfg: LLMDeciderConfig) -> LLMActionDecider:
             timeout=cfg.timeout,
         )
     if cfg.provider == "gemini":
-        assert cfg.vertex_project is not None  # validated in Settings
-        return make_gemini_decider(
-            project=cfg.vertex_project,
-            location=cfg.vertex_location,
+        # Vertex AI wins when both are set (production deployments
+        # rely on attached-SA credentials, AI Studio key is a local-
+        # dev convenience).
+        if cfg.vertex_project:
+            return make_gemini_decider(
+                project=cfg.vertex_project,
+                location=cfg.vertex_location,
+                model=cfg.model,
+                thinking_level=cfg.thinking_level,
+                timeout=cfg.timeout,
+            )
+        assert cfg.api_key is not None  # validated in Settings
+        return make_gemini_aistudio_decider(
+            api_key=cfg.api_key.get_secret_value(),
             model=cfg.model,
             thinking_level=cfg.thinking_level,
             timeout=cfg.timeout,

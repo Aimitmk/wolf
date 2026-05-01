@@ -17,7 +17,8 @@ from wolfbot.llm.decider_config import LLMDeciderConfig, LLMProvider
 
 class MasterSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env.master", env_file_encoding="utf-8", extra="ignore")
+        env_file=".env.master", env_file_encoding="utf-8", extra="ignore"
+    )
 
     DISCORD_TOKEN: SecretStr
     DISCORD_GUILD_ID: int
@@ -134,42 +135,43 @@ class MasterSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_gameplay_provider_key(self) -> MasterSettings:
-        if (
-            self.GAMEPLAY_LLM_PROVIDER in ("xai", "deepseek")
-            and self.GAMEPLAY_LLM_API_KEY is None
-        ):
+        if self.GAMEPLAY_LLM_PROVIDER in ("xai", "deepseek") and self.GAMEPLAY_LLM_API_KEY is None:
             raise ValueError(
                 f"GAMEPLAY_LLM_PROVIDER={self.GAMEPLAY_LLM_PROVIDER} "
                 "requires GAMEPLAY_LLM_API_KEY to be set"
             )
+        # Gemini supports two auth modes:
+        #   * Vertex AI via ADC + GAMEPLAY_LLM_VERTEX_PROJECT
+        #   * Google AI Studio via GAMEPLAY_LLM_API_KEY (AIza... format)
+        # At least one must be set; if both are set, Vertex wins
+        # (production deployments rely on attached-SA credentials).
         if (
             self.GAMEPLAY_LLM_PROVIDER == "gemini"
             and not self.GAMEPLAY_LLM_VERTEX_PROJECT
+            and self.GAMEPLAY_LLM_API_KEY is None
         ):
             raise ValueError(
-                "GAMEPLAY_LLM_PROVIDER=gemini requires "
-                "GAMEPLAY_LLM_VERTEX_PROJECT to be set"
+                "GAMEPLAY_LLM_PROVIDER=gemini requires either "
+                "GAMEPLAY_LLM_VERTEX_PROJECT (Vertex AI / ADC) or "
+                "GAMEPLAY_LLM_API_KEY (Google AI Studio)"
             )
         return self
 
     @model_validator(mode="after")
     def _require_voice_stt_provider_key(self) -> MasterSettings:
         if self.VOICE_STT_PROVIDER == "groq" and self.GROQ_STT_API_KEY is None:
-            raise ValueError(
-                "VOICE_STT_PROVIDER=groq requires GROQ_STT_API_KEY to be set"
-            )
+            raise ValueError("VOICE_STT_PROVIDER=groq requires GROQ_STT_API_KEY to be set")
         # The Groq path's analyzer step reuses GAMEPLAY_LLM_*. The xAI/DeepSeek
         # case is already covered above; the Gemini case isn't fit for the
         # OpenAI-compatible analyzer call shape, so block that combo loud and
         # early rather than failing per-segment at runtime.
-        if (
-            self.VOICE_STT_PROVIDER == "groq"
-            and self.GAMEPLAY_LLM_PROVIDER == "gemini"
-        ):
+        if self.VOICE_STT_PROVIDER == "groq" and self.GAMEPLAY_LLM_PROVIDER == "gemini":
             raise ValueError(
                 "VOICE_STT_PROVIDER=groq's analyzer step reuses GAMEPLAY_LLM_* "
                 "but requires an OpenAI-compatible provider (xai or deepseek), "
-                f"not {self.GAMEPLAY_LLM_PROVIDER}"
+                f"not {self.GAMEPLAY_LLM_PROVIDER}. "
+                "Set VOICE_STT_PROVIDER=gemini (uses VOICE_LLM_API_KEY) when "
+                "switching gameplay to Gemini."
             )
         return self
 
