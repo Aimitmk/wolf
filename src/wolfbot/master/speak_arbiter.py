@@ -168,7 +168,17 @@ class SpeakArbiterConfig:
     # for tail-latency tolerance.
     request_ttl_ms: int = 30_000
     playback_deadline_ms: int = 12_000
-    heartbeat_timeout_ms: int = 5000
+    # Heartbeat freshness gate: an NPC bot is considered offline if its
+    # last heartbeat is older than this. Must be ≥3x ``HEARTBEAT_INTERVAL_S``
+    # in the NPC env so a single missed/jittered beat doesn't kick the
+    # bot offline. Game ``6366cb014a0a`` had ``heartbeat_timeout_ms=5000``
+    # against ``HEARTBEAT_INTERVAL_S=5`` (1:1 ratio) — Gina's NPC bot
+    # was chronically just-late on heartbeats and got skipped on EVERY
+    # SpeakRequest dispatch (0/59 across the whole game) while still
+    # receiving DecideVoteRequest (vote dispatch doesn't apply this
+    # gate). 15s = 3x interval, the textbook ratio for missed-beat
+    # tolerance.
+    heartbeat_timeout_ms: int = 15_000
     vad_finalization_timeout_ms: int = 4000
 
 
