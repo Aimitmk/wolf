@@ -3435,16 +3435,24 @@ def test_logic_packet_summary_falls_back_to_seat_when_no_names_supplied() -> Non
 
 
 async def _seed_seer_with_divine(repo: SqliteRepo) -> Game:
-    """Seed a game where seat 2 is real seer with NIGHT_0 divine on seat 1.
+    """Seed a game where seat 2 is real seer with NIGHT_0 random white on seat 1.
 
-    Seat 1 is werewolf so the real seer's color is 黒. We set up a
-    NIGHT_0 SEER_DIVINE row so the validator's actual_seer_history loader
-    has data to compare claims against. A phase_baseline event is also
-    seeded so ``rebuild_public_state`` (used by the fabrication retry
-    path to spin up a fresh dispatch) returns a non-None state.
+    Seat 1 is villager so seat 2's NIGHT_0 random white pointing at seat 1
+    is internally consistent (the system never picks a wolf for the random
+    white). We seed the result via a ``SEER_RESULT_NIGHT0`` row in
+    ``logs_private`` so the validator's ``_load_actual_seer_history``
+    (which goes through ``load_private_state_for_seat``) picks it up the
+    same way the NPC's ``自分の占い結果`` prompt section does.
+
+    The earlier version of this helper inserted into ``night_actions``,
+    which the NPC's prompt builder ignores for NIGHT_0; the validator
+    then read truth from a different source than the NPC and bounced
+    every legitimate Setsu claim. Game ``6a0dd72d63e3`` reproduced the
+    bug: real seer Setsu hit the 5-retry cap on her FIRST legitimate
+    Jonas白 claim because the validator couldn't find Jonas in her
+    actual history.
     """
-    from wolfbot.domain.enums import SubmissionType
-    from wolfbot.domain.models import NightAction
+    from wolfbot.domain.models import LogEntry
 
     g = Game(
         id="rv_fab",
@@ -3470,19 +3478,25 @@ async def _seed_seer_with_divine(repo: SqliteRepo) -> Game:
     ]
     for s in seats:
         await repo.insert_seat(g.id, s)
-    await repo.set_player_role(g.id, 1, Role.WEREWOLF)
+    # Seat 1 must NOT be a wolf — NIGHT_0 random white only ever picks
+    # non-wolf targets, so this keeps the seed internally consistent
+    # with the seer's recorded result.
+    await repo.set_player_role(g.id, 1, Role.VILLAGER)
     await repo.set_player_role(g.id, 2, Role.SEER)
-    # NIGHT_0: seer divined seat 1 (the wolf). Real history → 黒.
-    await repo.insert_night_action(
-        NightAction(
-            game_id=g.id,
-            day=0,
-            actor_seat=2,
-            kind=SubmissionType.SEER_DIVINE,
-            target_seat=1,
-            submitted_at=0,
-        )
-    )
+    # NIGHT_0 random white on seat 1 (Alice). Color = white (= is_wolf False).
+    # The text format must match `private_state._SEER_NIGHT0_RE` so the
+    # validator's `load_private_state_for_seat` parses it correctly.
+    await repo.insert_log_private(LogEntry(
+        game_id=g.id,
+        day=0,
+        phase=Phase.NIGHT_0,
+        kind="SEER_RESULT_NIGHT0",
+        actor_seat=2,
+        visibility="PRIVATE",
+        audience_seat=2,
+        text="初日ランダム白: Alice は 人狼ではありません。",
+        created_at=0,
+    ))
     # Seed phase_baseline so rebuild_public_state returns non-None.
     store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
     await store.insert(
@@ -3539,9 +3553,11 @@ async def test_real_seer_legal_claim_passes(repo: SqliteRepo) -> None:
         npc_id="npc_p2",
         phase_id=req.phase_id,
         status="accepted",
-        text="私は占い師。Aliceを占ったら黒。",
+        text="私は占い師。Aliceを占ったら白。",
         co_declaration="seer",
-        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=True),
+        # Real seer's NIGHT_0 random white is on seat 1 (Alice, villager).
+        # Matches the seeded SEER_RESULT_NIGHT0 entry exactly.
+        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=False),
     )
     ok, reason = await arb.handle_speak_result(
         result,
@@ -3591,11 +3607,9 @@ async def test_real_seer_fabricated_target_triggers_retry(
     )
     assert req is not None
     npc_buf.clear()
-    # Fabricated target_seat=99 (not in night_actions). Use seat 1 as
-    # the speaker is seat 2; we want a "doesn't appear in actual" target.
-    # _build_claimed_seer at NPC side would reject self-target so we
-    # use seat 1 black-flipped to white instead — wrong color is also
-    # FABRICATION_REASONS.
+    # The seeded NIGHT_0 result is `target=1, is_wolf=False`. Flipping
+    # the verdict to is_wolf=True for the same target triggers
+    # REASON_SEER_WRONG_VERDICT (one of FABRICATION_REASONS).
     bad = SpeakResult(
         ts=1600,
         trace_id="t",
@@ -3603,9 +3617,9 @@ async def test_real_seer_fabricated_target_triggers_retry(
         npc_id="npc_p2",
         phase_id=req.phase_id,
         status="accepted",
-        text="ジナを占って白だった",
+        text="Aliceを占ったら黒だった",
         co_declaration="seer",
-        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=False),
+        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=True),
     )
     ok, reason = await arb.handle_speak_result(
         bad,
@@ -3660,7 +3674,8 @@ async def test_fabrication_retries_capped_then_falls_back(
         now_ms=lambda: 1500,
     )
     state = _seed_state(g.id)
-    bad_claim = ClaimedSeerResult(target_seat=1, is_wolf=False)
+    # Wrong verdict for the seeded target (real history has is_wolf=False).
+    bad_claim = ClaimedSeerResult(target_seat=1, is_wolf=True)
     last_reason = None
     last_phase_id = None
     # 5 attempts of fabrication. Each loop dispatches a fresh request,
@@ -3752,7 +3767,8 @@ async def test_accept_resets_fabrication_counter(repo: SqliteRepo) -> None:
         status="accepted",
         text="間違い",
         co_declaration="seer",
-        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=False),
+        # Wrong verdict (truth is is_wolf=False on seat 1).
+        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=True),
     )
     await arb.handle_speak_result(
         bad,
@@ -3767,7 +3783,7 @@ async def test_accept_resets_fabrication_counter(repo: SqliteRepo) -> None:
     from wolfbot.domain.ws_messages import SpeakRequest as SR
 
     retry_req = SR.model_validate_json(speak_reqs[-1])
-    # Attempt 2: correct claim.
+    # Attempt 2: correct claim (matches seeded NIGHT_0 white).
     good = SpeakResult(
         ts=1700,
         trace_id="t",
@@ -3775,9 +3791,9 @@ async def test_accept_resets_fabrication_counter(repo: SqliteRepo) -> None:
         npc_id="npc_p2",
         phase_id=retry_req.phase_id,
         status="accepted",
-        text="Aliceは黒だった",
+        text="Aliceは白だった",
         co_declaration="seer",
-        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=True),
+        claimed_seer_result=ClaimedSeerResult(target_seat=1, is_wolf=False),
     )
     ok, _ = await arb.handle_speak_result(
         good,

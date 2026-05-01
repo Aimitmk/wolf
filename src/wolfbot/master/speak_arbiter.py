@@ -40,7 +40,7 @@ from wolfbot.domain.discussion import (
 )
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Seat
-from wolfbot.domain.rules import compute_vote_result, is_detected_as_wolf
+from wolfbot.domain.rules import compute_vote_result
 from wolfbot.domain.ws_messages import (
     PlaybackAuthorized,
     PlaybackFailed,
@@ -601,107 +601,110 @@ class SpeakArbiter:
         self,
         game_id: str,
         seat_no: int,
-        current_day: int,
     ) -> list[ActualSeerEvent]:
-        """Build the real-seer history for `seat_no`. Empty list when
-        the speaker isn't the seer or when DB reads fail. The
-        :func:`is_wolf` field is computed from the target seat's actual
-        role at lookup time — wolves and only wolves yield ``True``,
-        matching ``rules.is_detected_as_wolf`` semantics."""
+        """Build the real-seer history for `seat_no`.
+
+        Reuses :func:`master.private_state.load_private_state_for_seat`
+        so the validator reads the SAME private-log path the NPC's
+        ``自分の占い結果`` prompt section sees: ``SEER_RESULT_NIGHT0``
+        plus per-night ``SEER_RESULT`` rows in ``logs_private``.
+
+        Going through ``night_actions`` directly (the v1 implementation)
+        misses the NIGHT_0 random white because no submission row is
+        written for it — the system picks the target. Game
+        ``6a0dd72d63e3`` reproduced the bug: real seer Setsu's NIGHT_0
+        Jonas白 wasn't in ``night_actions``, so the validator treated
+        her legitimate Jonas claim as a fabricated target and bounced
+        her 6 times in a row.
+        """
+        from wolfbot.master.private_state import load_private_state_for_seat
         try:
             players = await self.repo.load_players(game_id)
+            seats = await self.repo.load_seats(game_id)
         except Exception:
-            log.exception("actual_seer_load_players_failed game=%s", game_id)
+            log.exception("actual_seer_load_meta_failed game=%s", game_id)
             return []
-        role_by_seat = {p.seat_no: p.role for p in players if p.role is not None}
-        out: list[ActualSeerEvent] = []
-        # Seer divinations happen on NIGHT_0 (= day 0 row in
-        # night_actions) plus one per night N (rows at day=N) through
-        # the night before today's morning.
-        from wolfbot.domain.enums import SubmissionType
-
-        for day in range(0, current_day):
-            try:
-                actions = await self.repo.load_night_actions(game_id, day)
-            except Exception:
-                log.exception(
-                    "actual_seer_load_night_actions_failed game=%s day=%s",
-                    game_id,
-                    day,
+        try:
+            seer_results, _medium, _guard, _wolfchat, _attacks = (
+                await load_private_state_for_seat(
+                    self.repo, game_id=game_id, seat_no=seat_no,
+                    role=Role.SEER, players=players, seats=seats,
                 )
-                continue
-            for action in actions:
-                if action.actor_seat != seat_no:
-                    continue
-                if action.kind != SubmissionType.SEER_DIVINE:
-                    continue
-                target_role = role_by_seat.get(action.target_seat or -1)
-                if target_role is None or action.target_seat is None:
-                    continue
-                # The morning-N "claim day" the LLM sees in `自分の占い結果`
-                # for a divination submitted on day=D matches the prompt
-                # convention `day{D}: target → ...`. ClaimedSeerEntry
-                # also stores `day` as the speech day. So we treat the
-                # divination's `day` as the canonical claim day.
-                out.append(
-                    ActualSeerEvent(
-                        day=day,
-                        target_seat=action.target_seat,
-                        is_wolf=is_detected_as_wolf(target_role),
-                    )
-                )
-        return out
+            )
+        except Exception:
+            log.exception(
+                "actual_seer_load_private_state_failed game=%s seat=%s",
+                game_id, seat_no,
+            )
+            return []
+        return [
+            ActualSeerEvent(
+                day=sr.day,
+                target_seat=sr.target_seat,
+                is_wolf=sr.is_wolf,
+            )
+            for sr in seer_results
+        ]
 
     async def _load_actual_medium_history(
         self,
         game_id: str,
         seat_no: int,
-        current_day: int,
     ) -> tuple[list[ActualMediumEvent], int]:
-        """Derive the medium history (executed seat + actual role) plus
-        the count of executions so far. Real medium has no per-night
-        action submission, so we walk public EXECUTION log entries and
-        cross-reference with `seats.role`. Returns ``(history, count)``;
-        ``count`` is the same length as ``history`` and useful for the
-        fake-medium "no execution yet" rule even when the speaker isn't
-        the real medium."""
+        """Build real-medium history + total executions-so-far count.
+
+        Mirrors :meth:`_load_actual_seer_history` for medium: parse
+        ``MEDIUM_RESULT`` rows in ``logs_private`` so the validator
+        and the NPC's ``自分の霊媒結果`` prompt section agree on truth.
+        For the ``executions_so_far`` count needed by fake-medium
+        guards, we additionally count public EXECUTION logs because
+        non-medium speakers don't have private medium logs. Returns
+        ``(history, count)`` — history empty unless the speaker IS
+        the real medium, count comes from the public log regardless.
+        """
+        from wolfbot.master.private_state import load_private_state_for_seat
         try:
-            logs = await self.repo.load_public_logs(game_id, limit=200)
             players = await self.repo.load_players(game_id)
+            seats = await self.repo.load_seats(game_id)
         except Exception:
-            log.exception("actual_medium_load_failed game=%s", game_id)
+            log.exception("actual_medium_load_meta_failed game=%s", game_id)
             return ([], 0)
-        role_by_seat = {p.seat_no: p.role for p in players if p.role is not None}
-        history: list[ActualMediumEvent] = []
-        count = 0
-        for row in logs:
-            if row.get("kind") != "EXECUTION":
-                continue
-            if row.get("day") is None or row.get("actor_seat") is None:
-                continue
-            day_int = int(row["day"])
-            executed_seat = int(row["actor_seat"])
-            target_role = role_by_seat.get(executed_seat)
-            if target_role is None:
-                continue
-            count += 1
-            # Conventionally the medium "result" is announced on the
-            # morning AFTER the execution. We tag the event with the
-            # execution day; the validator's same-day match against
-            # ``ClaimedMediumEntry.day`` (which uses the speech day)
-            # works because the prompt builder feeds `自分の霊媒結果`
-            # rows tagged with the EXECUTION's day too.
-            history.append(
-                ActualMediumEvent(
-                    day=day_int,
-                    target_seat=executed_seat,
-                    is_wolf=is_detected_as_wolf(target_role),
+        try:
+            _seer, medium_results, _guard, _wolfchat, _attacks = (
+                await load_private_state_for_seat(
+                    self.repo, game_id=game_id, seat_no=seat_no,
+                    role=Role.MEDIUM, players=players, seats=seats,
                 )
             )
-        # Filter to only events strictly before today's morning — we
-        # don't want to include an execution that hasn't happened yet
-        # (defensive; load_public_logs is past-only by construction).
-        history = [h for h in history if h.day < current_day]
+        except Exception:
+            log.exception(
+                "actual_medium_load_private_state_failed game=%s seat=%s",
+                game_id, seat_no,
+            )
+            medium_results = ()
+        # Real-medium results may include "no execution today" entries
+        # whose is_wolf is None — those don't need validating against
+        # because they carry no claim-able fact, so drop them here.
+        history = [
+            ActualMediumEvent(
+                day=mr.day,
+                target_seat=mr.target_seat,
+                is_wolf=mr.is_wolf,
+            )
+            for mr in medium_results
+            if mr.is_wolf is not None
+        ]
+        # Public EXECUTION count is needed even when the speaker isn't
+        # the real medium (fake-medium "no execution yet" rule).
+        count = 0
+        try:
+            logs = await self.repo.load_public_logs(game_id, limit=200)
+        except Exception:
+            log.exception("actual_medium_load_logs_failed game=%s", game_id)
+            logs = []
+        for row in logs:
+            if row.get("kind") == "EXECUTION":
+                count += 1
         return (history, count)
 
     async def _load_speaker_role(self, game_id: str, seat_no: int) -> Role | None:
@@ -873,23 +876,17 @@ class SpeakArbiter:
             executions_so_far = 0
             if speaker_role is Role.SEER:
                 actual_seer = await self._load_actual_seer_history(
-                    pending.game_id,
-                    pending.seat_no,
-                    day,
+                    pending.game_id, pending.seat_no,
                 )
             if speaker_role is Role.MEDIUM:
                 actual_medium, executions_so_far = await self._load_actual_medium_history(
-                    pending.game_id,
-                    pending.seat_no,
-                    day,
+                    pending.game_id, pending.seat_no,
                 )
             else:
                 # Need executions_so_far for the fake-medium "no execution
                 # yet" rule even when the speaker isn't the real medium.
                 _, executions_so_far = await self._load_actual_medium_history(
-                    pending.game_id,
-                    pending.seat_no,
-                    day,
+                    pending.game_id, pending.seat_no,
                 )
             seats = await self.repo.load_seats(pending.game_id)
             seat_names_for_history = {s.seat_no: s.display_name for s in seats}
