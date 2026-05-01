@@ -3991,3 +3991,114 @@ async def test_null_claim_passes_validator(repo: SqliteRepo) -> None:
         phase=Phase.DAY_DISCUSSION,
     )
     assert ok and reason is None
+
+
+async def test_fabrication_cap_blocks_seat_from_re_selection(
+    repo: SqliteRepo,
+) -> None:
+    """After a seat hits ``_MAX_FABRICATION_RETRIES``, the picker must
+    NOT re-select that seat for the rest of the phase. Without this
+    block, normal rotation re-picks the same NPC immediately (especially
+    when they're in the seer-callout pool), the retry counter increments
+    past the cap (observed in game ``6366cb014a0a``: attempt=6/5, 7/5,
+    8/5, 9/5...), and the phase stalls because no other NPC ever gets
+    dispatched.
+
+    Setup: 2 LLM seats online, both online for the same phase. NPC A
+    fabricates 5 times in a row → cap fires → A is blocked. The
+    arbiter's ``try_dispatch_next`` should now pick NPC B.
+    """
+    from wolfbot.domain.ws_messages import ClaimedSeerResult
+
+    g = await _seed_seer_with_divine(repo)
+    # Add a 3rd LLM seat and overwrite the phase_baseline so the alive
+    # set in `rebuild_public_state` includes seat 3 as a dispatchable
+    # candidate. The fold uses the FIRST baseline it sees, so we must
+    # delete the original (alive=(1,2)) before inserting the new one.
+    third = Seat(
+        seat_no=3, display_name="Charlie",
+        discord_user_id=None, is_llm=True, persona_key="raqio",
+    )
+    await repo.insert_seat(g.id, third)
+    await repo.set_player_role(g.id, 3, Role.VILLAGER)
+    await repo._conn.execute(  # type: ignore[attr-defined]
+        "DELETE FROM speech_events WHERE game_id=? AND source='phase_baseline'",
+        (g.id,),
+    )
+    await repo._conn.commit()  # type: ignore[attr-defined]
+    store_extra = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    await store_extra.insert(make_phase_baseline(
+        game_id=g.id,
+        phase_id=make_phase_id(g.id, 1, Phase.DAY_DISCUSSION),
+        day=1, phase=Phase.DAY_DISCUSSION,
+        alive_seat_nos=(1, 2, 3), created_at_ms=950,
+    ))
+
+    registry = InMemoryNpcRegistry()
+    a_buf: list[str] = []
+    b_buf: list[str] = []
+    registry.register(
+        npc_id="npc_p2", discord_bot_user_id="bot2", supported_voices=(),
+        version="1", send=_captured_send(a_buf), now_ms=1000,
+        persona_key="setsu",
+    )
+    registry.register(
+        npc_id="npc_p3", discord_bot_user_id="bot3", supported_voices=(),
+        version="1", send=_captured_send(b_buf), now_ms=1000,
+        persona_key="raqio",
+    )
+    registry.assign("npc_p2", seat=2, game_id=g.id,
+                    phase_id=make_phase_id(g.id, 1, Phase.DAY_DISCUSSION))
+    registry.assign("npc_p3", seat=3, game_id=g.id,
+                    phase_id=make_phase_id(g.id, 1, Phase.DAY_DISCUSSION))
+
+    discussion = DiscussionService(
+        store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    )
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion,
+        now_ms=lambda: 1500,
+    )
+    bad_claim = ClaimedSeerResult(target_seat=1, is_wolf=True)
+
+    last_phase_id = None
+    # 5 fabrication attempts on seat 2 → cap.
+    for i in range(5):
+        req, _ = await arb.dispatch_request(
+            state=_seed_state(g.id), candidate_npc_id="npc_p2",
+            seat_no=2, game_id=g.id,
+        )
+        assert req is not None
+        last_phase_id = req.phase_id
+        bad = SpeakResult(
+            ts=1600 + i, trace_id="t", request_id=req.request_id,
+            npc_id="npc_p2", phase_id=req.phase_id, status="accepted",
+            text=f"attempt {i}", co_declaration="seer",
+            claimed_seer_result=bad_claim,
+        )
+        await arb.handle_speak_result(
+            bad, current_phase_id=req.phase_id, day=1,
+            phase=Phase.DAY_DISCUSSION,
+        )
+
+    # Seat 2 must now be in the cap-hit set.
+    assert (g.id, last_phase_id) in arb._fabrication_capped  # type: ignore[attr-defined]
+    capped = arb._fabrication_capped[(g.id, last_phase_id)]  # type: ignore[attr-defined]
+    assert 2 in capped
+    assert 3 not in capped
+
+    # When the picker runs `try_dispatch_next`, it must skip seat 2
+    # and dispatch to seat 3 instead. We exercise this by calling
+    # `try_dispatch_next` directly and checking that npc_p3's send buffer
+    # received a SpeakRequest while npc_p2's didn't get a fresh one.
+    a_buf.clear()
+    b_buf.clear()
+    await arb.try_dispatch_next(g.id)
+    # Seat 2 (capped) should NOT have been dispatched.
+    assert not any('"speak_request"' in m for m in a_buf), (
+        "capped seat 2 should be skipped, but got: " + str(a_buf)
+    )
+    # Seat 3 (not capped) should have been dispatched.
+    assert any('"speak_request"' in m for m in b_buf), (
+        "seat 3 should have been picked, got buf: " + str(b_buf)
+    )

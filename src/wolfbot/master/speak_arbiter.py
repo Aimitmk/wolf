@@ -252,6 +252,13 @@ class SpeakArbiter:
         # in handle_speak_result. Cleared on phase change (alongside
         # _callout_pool_asked) and on a successful accept for the NPC.
         self._fabrication_retries: dict[tuple[str, str, str], int] = {}
+        # Per-(game_id, phase_id) set of seats that hit the fabrication
+        # retry cap (`_MAX_FABRICATION_RETRIES`). The dispatcher's
+        # candidate picker filters these seats out for the rest of the
+        # phase so a chronically-fabricating NPC can't monopolise the
+        # phase via the rotation re-selecting them. Cleared on phase
+        # change (alongside `_callout_pool_asked`).
+        self._fabrication_capped: dict[tuple[str, str], set[int]] = {}
 
     # ------------------------------------------------------------- gates
 
@@ -923,8 +930,24 @@ class SpeakArbiter:
                     _MAX_FABRICATION_RETRIES,
                 )
                 if attempt >= _MAX_FABRICATION_RETRIES:
-                    # Give up: bail to normal rotation so the phase
-                    # doesn't stall on one stuck NPC.
+                    # Give up: block this seat from being re-picked for
+                    # the rest of the phase, then bail to normal rotation.
+                    # Without the block, `try_dispatch_next` re-selects
+                    # the same NPC immediately (especially when they're
+                    # in the seer/medium callout pool), the retry counter
+                    # increments past the cap (observed: attempt=6/5,
+                    # 7/5, 8/5...), and the phase stalls because no other
+                    # NPC ever gets dispatched. Game ``6366cb014a0a``
+                    # day 1 hit this with ユリコ (madman) burning ~75s
+                    # of phase time on `day1_seer_claim_overflow` retries
+                    # before the deadline closed the discussion.
+                    self._fabrication_capped.setdefault(
+                        (pending.game_id, result.phase_id), set()
+                    ).add(pending.seat_no)
+                    log.info(
+                        "fabrication_capped_seat_blocked game=%s phase=%s seat=%s",
+                        pending.game_id, result.phase_id, pending.seat_no,
+                    )
                     return await _reject_and_advance(validation.reason)
                 return await _reject_and_retry_same_npc(
                     reason=validation.reason,
@@ -1262,10 +1285,18 @@ class SpeakArbiter:
             "speech_counts": sorted(candidate_counts.items()),
         }
 
+        capped_for_phase: frozenset[int] | set[int] = self._fabrication_capped.get(
+            (game_id, state.phase_id), frozenset()
+        )
         for entry in sorted(online, key=_pick_key):
             if entry.assigned_seat is None or entry.game_id != game_id:
                 continue
             if entry.assigned_seat not in state.alive_seat_nos:
+                continue
+            if entry.assigned_seat in capped_for_phase:
+                # Hit the fabrication cap this phase — skip so a chronically
+                # fabricating NPC can't monopolise rotation. Cleared when the
+                # phase advances (see cleanup_game / phase-change reset).
                 continue
             seat = entry.assigned_seat
             picked_count = state.speech_counts.get(seat, 0)
@@ -1665,6 +1696,10 @@ class SpeakArbiter:
         for key in list(self._fabrication_retries.keys()):
             if key[0] == game_id:
                 self._fabrication_retries.pop(key, None)
+        # Drop fabrication cap-hit blocklist for this game.
+        for cap_key in list(self._fabrication_capped.keys()):
+            if cap_key[0] == game_id:
+                self._fabrication_capped.pop(cap_key, None)
         if swept:
             log.info(
                 "speak_arbiter_cleanup_game game=%s swept=%d",
