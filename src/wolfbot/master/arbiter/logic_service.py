@@ -24,6 +24,7 @@ import uuid
 from collections.abc import Iterable
 
 from wolfbot.domain.discussion import PublicDiscussionState
+from wolfbot.domain.enums import Role
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, RecentSpeech
 from wolfbot.master.claim.claim_history import (
     ClaimHistory,
@@ -53,6 +54,7 @@ def build_logic_packet(
     seat_names: dict[int, str] | None = None,
     claim_history: ClaimHistory | None = None,
     recipient_seat_no: int | None = None,
+    recipient_role: Role | None = None,
 ) -> LogicPacket:
     """Construct a `LogicPacket` for `recipient_npc_id`.
 
@@ -245,6 +247,98 @@ def build_logic_packet(
                     f"昨日 (day{state.day - 1}) の処刑があった場合は"
                     f"その霊媒結果を `claimed_medium_result` に入れて発表する義務があります。"
                     f"処刑がなかった日は `is_wolf=null` で「結果なし」を明言してください。"
+                )
+
+    # Wolf-side counter-CO / fake-CO decision prompt. Fires when:
+    #   (a) recipient is WEREWOLF or MADMAN
+    #   (b) recipient hasn't CO'd as any info role yet
+    #   (c) an info-role callout is active (pending_role_callouts /
+    #       pending_co_response carries seer / medium / knight)
+    # Surfaces the decision explicitly so the LLM treats this turn as a
+    # binary "fake CO or skip" rather than drifting into generic chat.
+    # The choice is the LLM's; this block frames the prompt.
+    if recipient_role in (Role.WEREWOLF, Role.MADMAN) and recipient_seat_no is not None:
+        recipient_co_keys: set[str] = set()
+        if claim_history is not None and recipient_seat_no in claim_history.by_seat:
+            history = claim_history.by_seat[recipient_seat_no]
+            if history.seer_claims:
+                recipient_co_keys.add("seer")
+            if history.medium_claims:
+                recipient_co_keys.add("medium")
+        # Also check live state.co_claims (covers the in-phase case
+        # where claim_history is built up to the current packet but
+        # the brand-new CO this turn may not be folded yet).
+        for c in state.co_claims:
+            if c.seat == recipient_seat_no:
+                recipient_co_keys.add(c.role_claim)
+        already_co_info = bool(
+            recipient_co_keys & {"seer", "medium", "knight"}
+        )
+        if not already_co_info:
+            active_callouts: set[str] = set()
+            for k in ("seer", "medium", "knight"):
+                if (
+                    k in state.pending_role_callouts
+                    or k in state.pending_co_response
+                ):
+                    active_callouts.add(k)
+            if "info_request" in state.pending_role_callouts:
+                active_callouts |= {"seer", "medium", "knight"}
+            for k in tuple(active_callouts):
+                if any(c.role_claim == k for c in state.co_claims):
+                    # Real or fake CO landed for this role at the same
+                    # rough time as the prompt is being built — only
+                    # surface a counter-CO decision when the role is
+                    # genuinely unanswered. Drop already-answered
+                    # role keys from the active set.
+                    pass
+            if active_callouts:
+                role_label = {
+                    "seer": "占い師",
+                    "medium": "霊媒師",
+                    "knight": "騎士",
+                }
+                roles_jp = "・".join(role_label[k] for k in sorted(active_callouts))
+                # Per-role tactical hints — short reminders pulled from
+                # the existing strategy templates so the wolf-side LLM
+                # has the day-2+ medium / seer fake-CO playbook in
+                # mind without re-fetching the whole role-strategy
+                # block.
+                hints: list[str] = []
+                if "medium" in active_callouts and state.day >= 2:
+                    hints.append(
+                        "霊媒騙りを選ぶなら、`co_declaration=\"medium\"` を立てた上で、"
+                        "前日処刑者への霊媒結果 (`claimed_medium_result`) を必ず添える "
+                        "(処刑が無い日は `is_wolf=null` で結果なしを明言)。"
+                    )
+                if "seer" in active_callouts:
+                    hints.append(
+                        "占い騙りを選ぶなら、`co_declaration=\"seer\"` を立てた上で、"
+                        "占い結果 (`claimed_seer_result`) を必ず添える。"
+                        "day 1 朝なら NIGHT_0 ランダム白で必ず白判定、"
+                        "day 2 以降なら前夜の判定 (黒も可) を出す。"
+                        "対抗 CO がすでに出ている場合は対抗 ledger と矛盾しない対象を選ぶ。"
+                    )
+                if "knight" in active_callouts:
+                    hints.append(
+                        "騎士騙りを選ぶなら、`co_declaration=\"knight\"` を立て、"
+                        "合法な護衛履歴 (自己護衛・連続護衛・死亡対象護衛・存在しない護衛成功は禁止) のみ提示する。"
+                    )
+                hint_block = ("\n  - " + "\n  - ".join(hints)) if hints else ""
+                summary += (
+                    f"\n\n## 【あなた宛 / 緊急判断】対抗 CO のチャンス\n"
+                    f"今ターン {roles_jp} の CO が公開ログに登場しているか、誰かが該当役の名乗りを促しています。"
+                    f"あなたは人狼陣営側 ({recipient_role.value}) で、まだ占い/霊媒/騎士のいずれにも CO していません。"
+                    f"**この発話で {roles_jp} のいずれかとして対抗/騙り CO を出すか、それとも潜伏 (skip / 一般発話) を選ぶか** を判断してください。"
+                    f"\n\n判断軸:"
+                    f"\n  - 真役職者が単独で残ると村側が真寄りに固定する → 騙り CO で割って真偽比較を村に持ち込む価値"
+                    f"\n  - 縄数 / 残狼数 / 既出 CO 件数を見て、騙りを増やすことで処刑筋がどう変わるか"
+                    f"\n  - 騙ると「結果整合性 (発表内容の不変性)」を抱える義務が生じ、後の破綻リスクが上がる"
+                    f"\n  - 潜伏が強い盤面 (例: 占い CO がすでに 3 件出ているなど) では skip も選択肢"
+                    f"{hint_block}"
+                    f"\n\n決定したら、CO する場合は `co_declaration` を該当役にセットし、`public_message` で自然な日本語で名乗る。"
+                    f"潜伏する場合は `co_declaration=null` のままで、議論への一般的な反応・疑い表明・話題提示などを行う。"
+                    f"\"何もせず黙る\" のは情報漏洩こそ無いが、村側が CO 群を絞る時間を与える消極策である点に注意。"
                 )
     # Prefer the multi-addressee set; fall back to the legacy singular
     # field for state objects that haven't been migrated (e.g. test

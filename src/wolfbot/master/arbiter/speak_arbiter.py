@@ -402,6 +402,12 @@ class SpeakArbiter:
 
         # Build LogicPacket (sent first so the NPC has context for the
         # subsequent speak_request).
+        recipient_role: Role | None = None
+        if role_name is not None:
+            try:
+                recipient_role = Role(role_name)
+            except ValueError:
+                recipient_role = None
         packet = build_logic_packet(
             state=state,
             recipient_npc_id=candidate_npc_id,
@@ -413,6 +419,7 @@ class SpeakArbiter:
             seat_names=seat_names_lookup,
             claim_history=claim_history,
             recipient_seat_no=seat_no,
+            recipient_role=recipient_role,
         )
         try:
             await entry.send(packet.model_dump_json())
@@ -1401,6 +1408,24 @@ class SpeakArbiter:
         if state is None:
             return
 
+        # Auto-inject the medium-callout on day≥2 morning when no medium
+        # CO has landed yet. Without this, day 2+ discussions silently
+        # skip the medium topic — observed live in game 6c97c1cc22ef
+        # where day 2/3 went without a single mention of the medium
+        # role's expected result. The fold logic in `_compute_callout_pool`
+        # then naturally builds a priority pool from the real medium
+        # plus every wolf-side seat that hasn't CO'd as any info role,
+        # so they get first dispatch and choose between fake CO or skip.
+        auto_callouts = await self._compute_auto_callouts(state, game.day_number)
+        if auto_callouts:
+            state = state.model_copy(
+                update={
+                    "pending_role_callouts": frozenset(
+                        state.pending_role_callouts | auto_callouts
+                    ),
+                }
+            )
+
         # Pick the next NPC. Priority order (applied as a 7-key sort):
         #   1. callout pool member — seer/medium/knight callout in flight
         #      and this seat is in the priority pool (real role-holder +
@@ -1973,6 +1998,43 @@ class SpeakArbiter:
             if entry.assigned_seat == seat_no and entry.game_id == game_id:
                 return entry
         return None
+
+    async def _compute_auto_callouts(
+        self, state: PublicDiscussionState, day: int
+    ) -> frozenset[str]:
+        """Synthesize callout role keys to surface forgotten role topics.
+
+        Currently fires for **medium** on day ≥ 2 when no medium CO has
+        landed yet. Day 2+ morning is the natural time to disclose the
+        previous-day execution's medium result, but if no real medium
+        nor wolf-side fake-CO mentions the role, the discussion drifts
+        and the topic disappears entirely (observed live in game
+        6c97c1cc22ef where the medium was silent for two consecutive
+        days). Returning ``frozenset({"medium"})`` here merges the role
+        key into the public_state_summary's
+        ``pending_role_callouts=[medium]`` indicator AND triggers the
+        existing ``_compute_callout_pool`` priority bucket that rounds
+        up the real medium + every wolf-side seat without an info CO.
+        Each candidate gets one dispatch chance via
+        ``_callout_pool_asked``; they choose between fake-CO (`medium`)
+        or skip, then normal rotation resumes.
+
+        Auto-injection stops naturally as soon as a medium CO arrives:
+        the fold rule in `apply_speech_event` clears the role key from
+        ``pending_role_callouts`` once the matching CO appears in
+        ``state.co_claims``, so the next dispatch sees an empty pool.
+        """
+        if day < 2:
+            return frozenset()
+        # Only inject for the morning's first speaker round. We can't
+        # access the round number directly from state, so use the
+        # phase_id sequence — the morning is sequence 1.
+        if "::DAY_DISCUSSION::" not in state.phase_id:
+            return frozenset()
+        has_medium_co = any(c.role_claim == "medium" for c in state.co_claims)
+        if has_medium_co:
+            return frozenset()
+        return frozenset({"medium"})
 
     async def _compute_callout_pool(
         self, game_id: str, state: PublicDiscussionState

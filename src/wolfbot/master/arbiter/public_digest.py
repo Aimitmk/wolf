@@ -165,6 +165,63 @@ def build_public_digest(
                 row += f"  [{from_text}→{level_text} 更新理由: {update_reason or '(未記入)'}]"
             lines.append(row)
 
+        # Aggregate score per alive target — sum across suspecters using
+        # the LATEST level each suspecter has declared. Dead suspecters
+        # AND dead targets are dropped (a dead seat can't be attacked
+        # nor can their past suspicions be updated). Score weighting:
+        # trust=-1, low=1, medium=2, high=4. Wolves consult this to pick
+        # attack targets — the most-suspected seats will be lynched
+        # anyway, so attacking them is wasted; hit low-score (= village-
+        # trusted) seats instead.
+        alive_set = state.alive_seat_nos
+        latest: dict[tuple[int, int], str] = {}  # (suspecter, target) → latest level
+        for (
+            _day,
+            _phase,
+            suspecter,
+            target,
+            level,
+            _reason,
+            _from_level,
+            _update_reason,
+        ) in past_suspicions:
+            if suspecter not in alive_set or target not in alive_set:
+                continue
+            latest[(suspecter, target)] = level
+        score_weight = {"trust": -1, "low": 1, "medium": 2, "high": 4}
+        per_target: dict[int, dict[str, int]] = {}
+        for (_suspecter, target), level in latest.items():
+            slot = per_target.setdefault(
+                target, {"trust": 0, "low": 0, "medium": 0, "high": 0, "score": 0},
+            )
+            slot[level] = slot.get(level, 0) + 1
+            slot["score"] += score_weight.get(level, 0)
+        if per_target:
+            lines.append("")
+            lines.append("## 疑いスコア集計 (生存者のみ、score 高 → 低)")
+            lines.append(
+                "  weights: trust=-1 / low=+1 / medium=+2 / high=+4 (各 suspecter の最新評価で集計)"
+            )
+            sorted_targets = sorted(
+                per_target.items(),
+                key=lambda kv: (-kv[1]["score"], kv[0]),
+            )
+            for target_seat, breakdown in sorted_targets:
+                tname = _name(target_seat)
+                parts: list[str] = []
+                if breakdown["high"]:
+                    parts.append(f"強疑{breakdown['high']}")
+                if breakdown["medium"]:
+                    parts.append(f"疑{breakdown['medium']}")
+                if breakdown["low"]:
+                    parts.append(f"弱疑{breakdown['low']}")
+                if breakdown["trust"]:
+                    parts.append(f"信頼{breakdown['trust']}")
+                breakdown_text = " / ".join(parts) if parts else "(評価なし)"
+                lines.append(
+                    f"  - {tname}: {breakdown_text}  → 合計 {breakdown['score']} 点"
+                )
+
     return "\n".join(lines)
 
 

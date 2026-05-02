@@ -4176,6 +4176,105 @@ def test_logic_packet_builder_includes_co_claims_in_summary() -> None:
     # falls back to 席N — covered by the next test.
 
 
+def test_logic_packet_wolf_decision_block_fires_for_active_callout() -> None:
+    """When the recipient is a werewolf/madman without an info CO and an
+    info-role callout is active, the LogicPacket's public_state_summary
+    must carry the explicit 「対抗 CO のチャンス」 decision block. This
+    is the wolf-side prompt extension the user requested: instead of
+    leaving the wolf to drift into generic chat, frame the turn as a
+    binary "fake CO or skip" decision with role-specific tactical hints.
+    """
+    from wolfbot.domain.discussion import CoClaim
+    from wolfbot.domain.enums import Role
+
+    state = PublicDiscussionState(
+        game_id="g",
+        phase_id="g::day1::DAY_DISCUSSION::1",
+        day=1,
+        alive_seat_nos=frozenset({1, 2, 3, 4, 5}),
+    )
+    # Real seer at seat 2 has CO'd; pending_role_callouts captures the
+    # counter-CO opportunity for other info roles.
+    state.co_claims = (CoClaim(seat=2, role_claim="seer", declared_at_event_id="e1"),)
+    state.pending_co_response = frozenset({"seer"})
+
+    packet = build_logic_packet(
+        state=state,
+        recipient_npc_id="npc_wolf",
+        recipient_seat_no=4,
+        recipient_role=Role.WEREWOLF,
+        expires_at_ms=2000,
+        now_ms=1500,
+        seat_names={1: "Alice", 2: "Bob", 3: "Carol", 4: "Dave", 5: "Eve"},
+    )
+    summary = packet.public_state_summary
+    assert "対抗 CO のチャンス" in summary, (
+        "wolf-side summary must surface the explicit fake-CO decision block"
+    )
+    assert "占い師" in summary
+    assert "co_declaration" in summary, "must mention the structured field"
+
+
+def test_logic_packet_wolf_decision_block_skipped_when_already_co() -> None:
+    """A wolf that has already CO'd as an info role must NOT see the
+    decision block again — they're already committed."""
+    from wolfbot.domain.discussion import CoClaim
+    from wolfbot.domain.enums import Role
+
+    state = PublicDiscussionState(
+        game_id="g",
+        phase_id="g::day1::DAY_DISCUSSION::1",
+        day=1,
+        alive_seat_nos=frozenset({1, 2, 3, 4}),
+    )
+    state.co_claims = (
+        CoClaim(seat=2, role_claim="seer", declared_at_event_id="e1"),
+        CoClaim(seat=4, role_claim="seer", declared_at_event_id="e2"),
+    )
+    state.pending_co_response = frozenset({"seer"})
+
+    packet = build_logic_packet(
+        state=state,
+        recipient_npc_id="npc_wolf",
+        recipient_seat_no=4,
+        recipient_role=Role.WEREWOLF,
+        expires_at_ms=2000,
+        now_ms=1500,
+        seat_names={1: "Alice", 2: "Bob", 3: "Carol", 4: "Dave"},
+    )
+    assert "対抗 CO のチャンス" not in packet.public_state_summary, (
+        "wolf already CO'd as seer must not be prompted to CO again"
+    )
+
+
+def test_logic_packet_wolf_decision_block_skipped_for_villager() -> None:
+    """Real village-side recipients (villager / seer / medium / knight)
+    must never see the wolf decision block, even when the same callout
+    is active."""
+    from wolfbot.domain.discussion import CoClaim
+    from wolfbot.domain.enums import Role
+
+    state = PublicDiscussionState(
+        game_id="g",
+        phase_id="g::day1::DAY_DISCUSSION::1",
+        day=1,
+        alive_seat_nos=frozenset({1, 2, 3}),
+    )
+    state.co_claims = (CoClaim(seat=2, role_claim="seer", declared_at_event_id="e1"),)
+    state.pending_co_response = frozenset({"seer"})
+
+    packet = build_logic_packet(
+        state=state,
+        recipient_npc_id="npc_villager",
+        recipient_seat_no=3,
+        recipient_role=Role.VILLAGER,
+        expires_at_ms=2000,
+        now_ms=1500,
+        seat_names={1: "Alice", 2: "Bob", 3: "Carol"},
+    )
+    assert "対抗 CO のチャンス" not in packet.public_state_summary
+
+
 def test_logic_packet_summary_falls_back_to_seat_when_no_names_supplied() -> None:
     state = PublicDiscussionState(
         game_id="g",
