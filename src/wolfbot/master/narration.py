@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from wolfbot.domain.durations import current_phase_durations
 from wolfbot.domain.enums import Phase
 from wolfbot.domain.models import LogEntry, Seat
+from wolfbot.llm.template import render_template
 
 
 @dataclass(frozen=True)
@@ -99,10 +100,9 @@ def _seat_label(seats_by_no: dict[int, Seat], seat_no: int | None) -> str:
 
 def _narrate_setup_complete(_entry: LogEntry, ctx: NarrationContext) -> NarrationOutput:
     return NarrationOutput(
-        voice_text=(
-            "本機は進行管理 LEVI でございます。"
-            f"参加者 {ctx.alive_count} 名で、これより人狼ゲームを開始致します。"
-            "役職の通知は各参加者の DM へ送付済みです。ご確認をお願い致します。"
+        voice_text=render_template(
+            "master/narration_setup_complete",
+            alive_count=ctx.alive_count,
         ),
     )
 
@@ -112,91 +112,94 @@ def _narrate_phase_change(entry: LogEntry, ctx: NarrationContext) -> NarrationOu
     target = entry.phase
     if target is Phase.DAY_DISCUSSION:
         secs = durations.discussion_for_day(max(1, ctx.day_number))
-        if ctx.day_number <= 1:
-            voice = (
-                "夜が明けました。1 日目の議論を開始致します。"
-                f"制限時間は {secs} 秒でございます。"
+        return NarrationOutput(
+            voice_text=render_template(
+                "master/narration_phase_change_day_discussion",
+                # Day 2+ skips the dawn line because MORNING already announced
+                # it with casualty info; the template's two if-branches encode
+                # this fork.
+                is_first_day=ctx.day_number <= 1,
+                is_later_day=ctx.day_number > 1,
+                day_number=ctx.day_number,
+                secs=secs,
             )
-        else:
-            # Day 2+: the MORNING entry already announced "夜が明けました" with
-            # day_number + casualty info. Skip the duplicate dawn line here.
-            voice = (
-                f"{ctx.day_number} 日目の議論を開始致します。"
-                f"制限時間は {secs} 秒でございます。"
-            )
-        return NarrationOutput(voice_text=voice)
+        )
     if target is Phase.DAY_VOTE:
-        voice = (
-            "議論時間が終了致しました。"
-            f"投票フェイズへ移行致します。制限時間は {durations.vote} 秒でございます。"
-            "投票は DM の選択 UI からお願い致します。"
+        return NarrationOutput(
+            voice_text=render_template(
+                "master/narration_phase_change_day_vote",
+                secs=durations.vote,
+            )
         )
-        return NarrationOutput(voice_text=voice)
     if target is Phase.DAY_RUNOFF:
-        voice = (
-            f"決選投票へ移行致します。制限時間は {durations.runoff} 秒でございます。"
-            "DM の選択 UI から再度ご投票をお願い致します。"
+        return NarrationOutput(
+            voice_text=render_template(
+                "master/narration_phase_change_day_runoff",
+                secs=durations.runoff,
+            )
         )
-        return NarrationOutput(voice_text=voice)
     if target is Phase.DAY_RUNOFF_SPEECH:
-        voice = (
-            f"決選投票候補者の最終演説に移行致します。"
-            f"演説時間は {durations.runoff_speech_grace} 秒でございます。"
+        return NarrationOutput(
+            voice_text=render_template(
+                "master/narration_phase_change_day_runoff_speech",
+                secs=durations.runoff_speech_grace,
+            )
         )
-        return NarrationOutput(voice_text=voice)
     if target is Phase.NIGHT:
-        voice = (
-            f"夜のフェイズへ移行致します。制限時間は {durations.night} 秒でございます。"
-            "役職を持つ参加者の方は、DM の選択 UI から行動をお願い致します。"
+        return NarrationOutput(
+            voice_text=render_template(
+                "master/narration_phase_change_night",
+                secs=durations.night,
+            )
         )
-        return NarrationOutput(voice_text=voice)
     # Unknown / GAME_OVER fallthrough — voice the raw entry text as-is.
     return NarrationOutput(voice_text=entry.text)
 
 
 def _narrate_morning(entry: LogEntry, ctx: NarrationContext) -> NarrationOutput:
-    # MORNING text has the form e.g. "夜が明けました。席3 Bob が無残な姿で発見された..."
-    # Levi reframes it neutrally with day_number embedded.
-    if entry.actor_seat is None:
-        # No one died.
-        voice = (
-            f"夜が明けました。本日は {ctx.day_number} 日目でございます。"
-            "本日、犠牲者は出ておりません。"
-            f"現在の生存者は {ctx.alive_count} 名でございます。"
+    """MORNING entry → Levi reframing.
+
+    Source text is e.g. "夜が明けました。席3 Bob が無残な姿で発見された..."
+    The template rewrites it neutrally with day_number + casualty info.
+    Two branches gated by has/no_casualty so the same template covers
+    both "犠牲者なし" and "<seat> の停止を確認" without a Python ternary.
+    """
+    has_casualty = entry.actor_seat is not None
+    target = (
+        _seat_label(ctx.seats_by_no, entry.actor_seat) if has_casualty else ""
+    )
+    return NarrationOutput(
+        voice_text=render_template(
+            "master/narration_morning",
+            day_number=ctx.day_number,
+            has_casualty=has_casualty,
+            no_casualty=not has_casualty,
+            target=target,
+            alive_count=ctx.alive_count,
         )
-    else:
-        target = _seat_label(ctx.seats_by_no, entry.actor_seat)
-        voice = (
-            f"夜が明けました。本日は {ctx.day_number} 日目でございます。"
-            f"昨夜、{target} の停止を確認致しました。"
-            f"現在の生存者は {ctx.alive_count} 名でございます。"
-        )
-    return NarrationOutput(voice_text=voice)
+    )
 
 
 def _narrate_execution(entry: LogEntry, ctx: NarrationContext) -> NarrationOutput:
+    """EXECUTION entry → Levi confirmation + (optional) NIGHT cue.
+
+    The state-machine path emits no PHASE_CHANGE log between the
+    EXECUTION row and the NIGHT phase entry, so role-holders would
+    otherwise get silent DMs without any "夜です" cue. The template's
+    ``append_night_intro`` branch is on iff the next phase is actually
+    NIGHT — when execution triggers a victory the game flips to
+    GAME_OVER and the VICTORY narration takes over instead.
+    """
     headline, tally = _split_headline_and_tally(entry.text)
     target = _seat_label(ctx.seats_by_no, entry.actor_seat)
-    voice = f"{target} の処刑が確定致しました。"
-    # The state-machine path emits no PHASE_CHANGE log between the EXECUTION
-    # row and the NIGHT phase entry, so role-holders would otherwise get
-    # silent DMs without any "夜です" cue. Append the same line that
-    # `_narrate_phase_change` would have voiced for Phase.NIGHT — but only
-    # when the next phase is actually NIGHT (when execution triggers a
-    # victory the game flips to GAME_OVER and the VICTORY narration takes
-    # over instead).
-    if ctx.phase is Phase.NIGHT:
-        durations = current_phase_durations()
-        voice += (
-            f"夜のフェイズへ移行致します。制限時間は {durations.night} 秒でございます。"
-            "役職を持つ参加者の方は、DM の選択 UI から行動をお願い致します。"
-        )
-    # Strip the headline from the chat post — we voice it. Keep the tally so
-    # the audit trail of who voted whom stays in the channel.
+    going_to_night = ctx.phase is Phase.NIGHT
+    voice = render_template(
+        "master/narration_execution",
+        target=target,
+        append_night_intro=going_to_night,
+        night_secs=current_phase_durations().night if going_to_night else 0,
+    )
     chat = tally if tally else None
-    # Headline alone is silent in chat (we already said it). If the entry
-    # text contained ONLY the headline (no tally) we still want a chat
-    # record for post-mortem; in practice all execution rows carry a tally.
     if chat is None and headline:
         chat = headline
     return NarrationOutput(voice_text=voice, chat_text=chat)
@@ -204,11 +207,14 @@ def _narrate_execution(entry: LogEntry, ctx: NarrationContext) -> NarrationOutpu
 
 def _narrate_no_execution(entry: LogEntry, ctx: NarrationContext) -> NarrationOutput:
     headline, tally = _split_headline_and_tally(entry.text)
-    voice = "有効な投票が成立致しませんでした。本日は処刑なしで夜のフェイズへ移行致します。"
-    if "決選投票も同票" in headline:
-        voice = "決選投票も同票となりました。本日は処刑なしで夜のフェイズへ移行致します。"
-    elif "投票結果が無効" in headline:
-        voice = "投票結果が無効でございました。本日は処刑なしで夜のフェイズへ移行致します。"
+    is_runoff_tie = "決選投票も同票" in headline
+    is_invalid_vote = "投票結果が無効" in headline
+    voice = render_template(
+        "master/narration_no_execution",
+        is_runoff_tie=is_runoff_tie,
+        is_invalid_vote=is_invalid_vote and not is_runoff_tie,
+        is_default=not is_runoff_tie and not is_invalid_vote,
+    )
     chat = tally if tally else None
     if chat is None and headline:
         chat = headline
@@ -217,9 +223,7 @@ def _narrate_no_execution(entry: LogEntry, ctx: NarrationContext) -> NarrationOu
 
 def _narrate_runoff_start(entry: LogEntry, _ctx: NarrationContext) -> NarrationOutput:
     headline, tally = _split_headline_and_tally(entry.text)
-    voice = (
-        "投票が同数となりました。決選投票へ移行致します。候補者については本機からの追って案内をご確認ください。"
-    )
+    voice = render_template("master/narration_runoff_start")
     # Keep the candidate list + tally as text so players can see who's tied.
     chat_parts: list[str] = []
     if headline:
@@ -231,16 +235,27 @@ def _narrate_runoff_start(entry: LogEntry, _ctx: NarrationContext) -> NarrationO
 
 
 def _narrate_victory(entry: LogEntry, _ctx: NarrationContext) -> NarrationOutput:
-    # state_machine emits VICTORY text like 村人陣営の勝利 or 人狼陣営の勝利
-    # (with a fullwidth exclamation). Reframe it in Levi's tone.
+    """VICTORY entry → Levi end-of-game line.
+
+    state_machine emits text like 村人陣営の勝利 or 人狼陣営の勝利 (with a
+    fullwidth exclamation). Substring-match picks the template branch;
+    anything unrecognised falls into the ``is_other`` branch which
+    quotes the raw text verbatim — keeping a clean fallback for any
+    future faction string the engine adds.
+    """
     text = entry.text.strip()
-    if "村人" in text or "村陣営" in text:
-        voice = "判定致します。村人陣営の勝利でございます。ゲームを終了致します。"
-    elif "人狼" in text or "狼陣営" in text:
-        voice = "判定致します。人狼陣営の勝利でございます。ゲームを終了致します。"
-    else:
-        voice = f"{text}。ゲームを終了致します。"
-    return NarrationOutput(voice_text=voice)
+    is_village = "村人" in text or "村陣営" in text
+    is_wolf = (not is_village) and ("人狼" in text or "狼陣営" in text)
+    is_other = not is_village and not is_wolf
+    return NarrationOutput(
+        voice_text=render_template(
+            "master/narration_victory",
+            is_village=is_village,
+            is_wolf=is_wolf,
+            is_other=is_other,
+            raw_text=text,
+        )
+    )
 
 
 def _narrate_role_reveal(entry: LogEntry, _ctx: NarrationContext) -> NarrationOutput:
@@ -285,13 +300,16 @@ def render_runoff_candidate_intro(seat: Seat) -> str:
     speech is starting (the same way 「占い師の発表」 patterns name the
     speaker out loud). Uses the same emoji-stripping logic as
     ``_seat_label`` so the readout pronounces the persona name cleanly.
+
+    Body: ``master/narration_runoff_candidate_intro.md``.
     """
     name = seat.display_name.lstrip()
     while name and not (name[0].isalnum() or "぀" <= name[0] <= "ヿ"):
         name = name[1:]
     name = name.strip() or seat.display_name
-    return (
-        f"続いて、{name} 様の最終演説でございます。どうぞ。"
+    return render_template(
+        "master/narration_runoff_candidate_intro",
+        name=name,
     )
 
 

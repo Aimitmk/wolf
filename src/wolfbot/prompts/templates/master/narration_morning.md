@@ -1,0 +1,1 @@
+夜が明けました。本日は {{day_number}} 日目でございます。{{#if has_casualty}}昨夜、{{target}} の停止を確認致しました。{{/if}}{{#if no_casualty}}本日、犠牲者は出ておりません。{{/if}}現在の生存者は {{alive_count}} 名でございます。
