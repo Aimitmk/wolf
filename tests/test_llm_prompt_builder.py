@@ -868,6 +868,41 @@ def test_strategy_block_for_each_role_contains_own_tips(role: Role, phrase: str)
 
 
 @pytest.mark.parametrize("role", list(Role))
+def test_strategy_block_loaded_from_per_role_markdown_file(role: Role) -> None:
+    """Each role's bullets are stored in
+    ``src/wolfbot/prompts/templates/strategy/<role>.md`` and pulled in
+    via the template loader. The loader strips the human-only
+    ``# Title`` heading + blank line so the body the LLM sees stays
+    bullet-list-only.
+
+    Locks in the on-disk mapping so a future contributor renaming /
+    moving the strategy files (for editing convenience) immediately
+    sees a failing test rather than a silent prompt drift.
+    """
+    from wolfbot.llm.template import TEMPLATES_ROOT, load_template
+
+    expected_path = TEMPLATES_ROOT / "strategy" / f"{role.value.lower()}.md"
+    assert expected_path.is_file(), f"missing strategy file: {expected_path}"
+
+    raw = load_template(f"strategy/{role.value.lower()}")
+    # Heading line is intentional and must remain in the on-disk file
+    # for human readers, even though the loader strips it.
+    assert raw.startswith("# "), (
+        f"strategy file {expected_path.name} should open with a markdown heading"
+    )
+
+    block = _build_strategy_block(role)
+    # Heading is stripped from what the prompt sees.
+    assert not block.startswith("# "), (
+        f"{role.name} strategy block leaked the markdown heading into the prompt"
+    )
+    # No trailing newline so the block concatenates cleanly with the
+    # surrounding system-prompt template (mirrors the legacy inline
+    # dict that ended without a trailing newline).
+    assert not block.endswith("\n")
+
+
+@pytest.mark.parametrize("role", list(Role))
 def test_strategy_block_no_cross_role_leak(role: Role) -> None:
     """For a given role, none of the OTHER roles' unique phrases may appear."""
     block = _build_strategy_block(role)
