@@ -1801,6 +1801,281 @@ async def test_try_dispatch_next_records_selection_reason_addressed(
     assert reason == "addressed"
 
 
+async def test_try_dispatch_next_speech_count_beats_addressed(
+    repo: SqliteRepo,
+) -> None:
+    """A silent NPC (count=0) wins over an addressed NPC who already
+    spoke (count=1). Regression for the "addressed always wins" bias
+    that caused day-1 灰位置 silence in game c99ecf313f96 — occult-CO
+    seats addressed each other and monopolised the floor while
+    non-addressed greys stayed at 0 turns. New picker promotes
+    speech_count above addressed so the silent grey breaks in first.
+    """
+    g = Game(
+        id="rv-count-vs-addr",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(
+            seat_no=1, display_name="Alice", discord_user_id=None, is_llm=True, persona_key="setsu"
+        ),
+        Seat(
+            seat_no=2, display_name="Bob", discord_user_id=None, is_llm=True, persona_key="gina"
+        ),
+        Seat(
+            seat_no=3, display_name="Carol", discord_user_id=None, is_llm=True, persona_key="raqio"
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in ((1, Role.SEER), (2, Role.WEREWOLF), (3, Role.VILLAGER)):
+        await repo.set_player_role(g.id, sn, role)
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3],
+            created_at_ms=1,
+        )
+    )
+    # seat 2 has already spoken once. seat 1's most recent utterance
+    # addresses seat 2 again. seat 3 is silent (count=0). New picker →
+    # seat 3 wins on count even though seat 2 is the addressed one.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=2,
+            text="意見その1。",
+            created_at_ms=8,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1,
+            text="Bob、もう少し詳しく?",
+            addressed_seat_no=2,
+            created_at_ms=10,
+        )
+    )
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"setsu": [], "gina": [], "raqio": []}
+    for npc_id, persona, seat in (
+        ("npc_setsu", "setsu", 1),
+        ("npc_gina", "gina", 2),
+        ("npc_raqio", "raqio", 3),
+    ):
+        registry.register(
+            npc_id=npc_id,
+            discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(),
+            version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000,
+            persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat, game_id=g.id, phase_id=phase_id)
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion, now_ms=lambda: 2000
+    )
+    await arb.try_dispatch_next(g.id)
+    assert bufs["raqio"], "silent seat 3 should be picked over addressed seat 2"
+    assert not bufs["gina"], "addressed seat 2 must NOT win when count is non-tie"
+    seat_repr, reason = await _fetch_selection_reason(repo, g.id)
+    assert seat_repr == "3"
+    assert reason == "silent_rotation"
+
+
+async def test_try_dispatch_next_pending_seer_result_beats_addressed(
+    repo: SqliteRepo,
+) -> None:
+    """A seer-CO seat with an unpublished day-N divine result is
+    promoted above an addressed seat. Regression for game c99ecf313f96
+    day 2 ラキオ占いCO never spoke — the picker had no way to surface
+    "this CO holder owes a result" so ラキオ stayed silent the entire
+    day while ジョナス + ユリコ + セツ recycled the floor.
+    """
+    g = Game(
+        id="rv-pending-result",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=2,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    seats = [
+        Seat(
+            seat_no=1, display_name="Alice", discord_user_id=None, is_llm=True, persona_key="setsu"
+        ),
+        Seat(
+            seat_no=2, display_name="Bob", discord_user_id=None, is_llm=True, persona_key="gina"
+        ),
+        Seat(
+            seat_no=3, display_name="Carol", discord_user_id=None, is_llm=True, persona_key="raqio"
+        ),
+    ]
+    for s in seats:
+        await repo.insert_seat(g.id, s)
+    for sn, role in ((1, Role.SEER), (2, Role.VILLAGER), (3, Role.MADMAN)):
+        await repo.set_player_role(g.id, sn, role)
+
+    phase_id_d1 = make_phase_id(g.id, 1, Phase.DAY_DISCUSSION)
+    phase_id_d2 = make_phase_id(g.id, 2, Phase.DAY_DISCUSSION)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+
+    # Day-1 ledger: seat 1 (Alice) and seat 3 (Carol) both seer-CO'd.
+    # Seat 1 announced day-1 result (1/1). Seat 3 announced day-1 result.
+    from wolfbot.services.discussion_service import make_npc_generated_event
+
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id_d1,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3],
+            created_at_ms=1,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id_d1,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1,
+            text="占い師。Bob は白。",
+            co_declaration="seer",
+            claimed_seer_target_seat=2,
+            claimed_seer_is_wolf=False,
+            created_at_ms=10,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id_d1,
+            day=1,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=3,
+            text="僕も占い師。Alice は白。",
+            co_declaration="seer",
+            claimed_seer_target_seat=1,
+            claimed_seer_is_wolf=False,
+            created_at_ms=20,
+        )
+    )
+    # Day-2: seat 1 already published the day-2 result (2/2). Seat 3
+    # has spoken on day-2 but NOT yet announced today's divine
+    # (1/2 announced) — expected pending. Seat 2 (no role CO) has
+    # spoken once and addresses seat 1.
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id_d2,
+            day=2,
+            phase=Phase.DAY_DISCUSSION,
+            alive_seat_nos=[1, 2, 3],
+            created_at_ms=100,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id_d2,
+            day=2,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=1,
+            text="昨夜は Carol を占って白。",
+            co_declaration="seer",
+            claimed_seer_target_seat=3,
+            claimed_seer_is_wolf=False,
+            created_at_ms=110,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id_d2,
+            day=2,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=2,
+            text="Alice さんどう?",
+            addressed_seat_no=1,
+            created_at_ms=120,
+        )
+    )
+    await store.insert(
+        make_npc_generated_event(
+            game_id=g.id,
+            phase_id=phase_id_d2,
+            day=2,
+            phase=Phase.DAY_DISCUSSION,
+            speaker_seat=3,
+            text="まだ見定め中だ。",
+            created_at_ms=130,
+        )
+    )
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"setsu": [], "gina": [], "raqio": []}
+    for npc_id, persona, seat in (
+        ("npc_setsu", "setsu", 1),
+        ("npc_gina", "gina", 2),
+        ("npc_raqio", "raqio", 3),
+    ):
+        registry.register(
+            npc_id=npc_id,
+            discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(),
+            version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000,
+            persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat, game_id=g.id, phase_id=phase_id_d2)
+    arb = SpeakArbiter(
+        repo=repo, registry=registry, discussion=discussion, now_ms=lambda: 3000
+    )
+    await arb.try_dispatch_next(g.id)
+    # Carol (raqio, seat 3) is the only seer-CO holder with an unpublished
+    # day-2 result (1 announced, 2 expected). Picker must surface her
+    # ahead of seat 1 (addressed by seat 2's last utterance) even though
+    # both have count=1 on day-2. Without the pending bucket, the picker
+    # would have rotated to seat 1 (addressed) or seat 2 (count=1, lru).
+    assert bufs["raqio"], "pending-seer-result seat 3 must win"
+    seat_repr, reason = await _fetch_selection_reason(repo, g.id)
+    assert seat_repr == "3"
+    assert reason == "pending_role_result"
+
+
 async def test_try_dispatch_next_records_selection_reason_silent_rotation(
     repo: SqliteRepo,
 ) -> None:

@@ -53,7 +53,12 @@ from wolfbot.domain.ws_messages import (
 )
 from wolfbot.llm.prompt_builder import build_strategy_block
 from wolfbot.master.arbiter.logic_service import build_logic_packet
-from wolfbot.master.claim.claim_history import ClaimHistory, collect_claim_history
+from wolfbot.master.claim.claim_history import (
+    ClaimHistory,
+    collect_claim_history,
+    expected_medium_claim_count_for_day,
+    expected_seer_claim_count_for_day,
+)
 from wolfbot.master.claim.claim_validator import (
     CO_CAP_REASONS,
     FABRICATION_REASONS,
@@ -556,6 +561,73 @@ class SpeakArbiter:
                 role_strategy = None
 
         return recent, alive_seats, dead_seats, role_name, role_strategy
+
+    async def _count_execution_days(self, game_id: str) -> int:
+        """Count distinct days that recorded an EXECUTION public log.
+
+        Used by the pending-result picker priority: a medium CO seat is
+        "pending" when their published medium-claim count is short of the
+        executions-so-far. We cap the lookup at the limit hard-coded in
+        ``load_public_logs`` (40 rows is plenty — a 9-player game caps
+        out at 4 ropes ≤ 4 executions plus runoffs). On error we return
+        0 so the priority bucket stays empty and the picker falls back
+        to the count-driven rotation.
+        """
+        try:
+            rows = await self.repo.load_public_logs(game_id, limit=40)
+        except Exception:
+            log.exception("execution_day_count_failed game=%s", game_id)
+            return 0
+        days = {
+            int(r["day"])
+            for r in rows
+            if r.get("kind") == "EXECUTION" and r.get("day") is not None
+        }
+        return len(days)
+
+    def _compute_pending_result_seats(
+        self,
+        *,
+        co_claims: Sequence[Any],
+        claim_history: ClaimHistory | None,
+        day_number: int,
+        execution_days: int,
+    ) -> frozenset[int]:
+        """Seats with an unpublished seer/medium result for the current day.
+
+        A seer CO seat is pending when their announced seer-claim count
+        is strictly less than ``expected_seer_claim_count_for_day`` —
+        i.e. they haven't yet declared today's expected divine result
+        (NIGHT_0 random white on day 1, prior-night result on day 2+).
+
+        A medium CO seat is pending when their announced medium-claim
+        count is strictly less than ``executions_so_far`` — i.e. there
+        was an execution they haven't yet weighed in on. day 1 has no
+        prior execution so the medium can never be pending in day 1.
+
+        Returns an empty set when ``claim_history`` is None (load
+        failure) or no CO matches; the picker treats an empty set as
+        "no priority bucket" and proceeds with the count-driven sort.
+        """
+        if claim_history is None or day_number < 1:
+            return frozenset()
+        expected_seer = expected_seer_claim_count_for_day(day_number)
+        expected_medium = expected_medium_claim_count_for_day(execution_days)
+        pending: set[int] = set()
+        for claim in co_claims:
+            seat = getattr(claim, "seat", None)
+            role = getattr(claim, "role_claim", None)
+            if seat is None or role is None:
+                continue
+            history = claim_history.by_seat.get(seat)
+            if history is None:
+                # CO'd but no claim entries persisted yet — definitely pending.
+                if role in ("seer", "medium"):
+                    pending.add(seat)
+                continue
+            if (role == "seer" and len(history.seer_claims) < expected_seer) or (role == "medium" and len(history.medium_claims) < expected_medium):
+                pending.add(seat)
+        return frozenset(pending)
 
     async def _load_claim_history(
         self,
@@ -1231,32 +1303,53 @@ class SpeakArbiter:
         if state is None:
             return
 
-        # Pick the next NPC. Priority order, applied as a 5-key sort:
-        #   1. NOT demoted — `_compute_demoted_seats` flags seats stuck
+        # Pick the next NPC. Priority order (applied as a 7-key sort):
+        #   1. callout pool member — seer/medium/knight callout in flight
+        #      and this seat is in the priority pool (real role-holder +
+        #      wolf-side fake-CO candidates).
+        #   2. NOT demoted — `_compute_demoted_seats` flags seats stuck
         #      in a low-info pair volley OR exceeding the consecutive
-        #      speaker cap. Demoted seats fall to the bottom regardless
-        #      of being addressed, so a 3rd NPC can break in.
-        #   2. addressed — seat appears in the multi-addressee
-        #      ``last_addressed_seats`` set (e.g. 「セツとジナ、どう?」 puts
-        #      both 2 and 3 in the set). Both win over non-addressed
-        #      seats; randomization on the last axis decides which of the
-        #      two goes first.
-        #   3. lowest speech_count this phase — generalises the old
-        #      binary silent_seats: a 0-count seat is still preferred,
-        #      but a 1-count seat now also wins over a 5-count one. Stops
-        #      the lowest-seat NPC monopolising once everyone has spoken
-        #      once and gives wolf-side seats at higher seat numbers a
-        #      fair chance to fake-CO.
-        #   4. NOT the immediate previous speaker (LRU rotation).
-        #   5. random — replaces the old seat-number tiebreak. Without
-        #      randomization the lowest-seat NPC won every tie, so
-        #      higher-seat NPCs (e.g. 席8 SQ, 席9 ユリコ) effectively
-        #      never spoke. Each call gets a fresh roll so the rotation
-        #      is fair across phases.
+        #      speaker cap. Demoted seats fall to the bottom so a 3rd
+        #      NPC can break in.
+        #   3. **pending role result** — a seer/medium CO seat that
+        #      hasn't yet published today's expected ability result.
+        #      Promoted above addressed/count so a CO holder always gets
+        #      a turn before anyone else when they owe a published
+        #      result (real seer day-2 silence is the case this fixes —
+        #      see game c99ecf313f96 day 2 ラキオ占いCO never spoke).
+        #   4. lowest speech_count this phase — primary rotation key
+        #      across all days (not just day 1). Was previously below
+        #      ``addressed`` which let role-CO seats addressing each
+        #      other monopolise the floor while non-CO greys stayed at
+        #      0 turns; promoting count to before addressed guarantees
+        #      everyone speaks before anyone speaks twice (same-day).
+        #   5. addressed — seat appears in ``last_addressed_seats``.
+        #      Now a tiebreaker: an addressed seat with count=N wins
+        #      over a non-addressed seat with the same count, but a
+        #      non-addressed seat with count<N wins regardless of
+        #      addressing. Weakens the previous "addressed dominates"
+        #      behaviour that caused CO-vs-CO ping-pong.
+        #   6. NOT the immediate previous speaker (LRU rotation).
+        #   7. random — fair tiebreak across personas.
         addressed_set = state.last_addressed_seats
         last_speaker = state.last_speaker_seat
         demoted = _compute_demoted_seats(state.recent_speech_summary)
         online = self.registry.all_online()
+        # Load the data needed to compute the pending-result priority
+        # bucket. Failures degrade gracefully: claim_history=None /
+        # execution_days=0 → empty pending_set → picker falls through
+        # to the count-driven sort exactly as before.
+        seat_names_for_claim = {
+            entry.assigned_seat: "" for entry in online if entry.assigned_seat is not None
+        }
+        claim_history = await self._load_claim_history(game_id, seat_names_for_claim)
+        execution_days = await self._count_execution_days(game_id)
+        pending_results = self._compute_pending_result_seats(
+            co_claims=state.co_claims,
+            claim_history=claim_history,
+            day_number=state.day,
+            execution_days=execution_days,
+        )
 
         # Role-callout priority pool: when someone publicly asks for a
         # seer/medium CO and that role hasn't been claimed yet, prioritize
@@ -1282,18 +1375,20 @@ class SpeakArbiter:
             asked = set()
         effective_pool = callout_pool - asked
 
-        def _pick_key(e: object) -> tuple[int, int, int, int, int, float]:
+        def _pick_key(e: object) -> tuple[int, int, int, int, int, int, float]:
             seat = getattr(e, "assigned_seat", None) or 99
             is_in_pool = 0 if seat in effective_pool else 1
             is_demoted = 1 if seat in demoted else 0
-            is_addressed = 0 if seat in addressed_set else 1
+            is_pending = 0 if seat in pending_results else 1
             count = state.speech_counts.get(seat, 0)
+            is_addressed = 0 if seat in addressed_set else 1
             is_just_spoke = 1 if (last_speaker is not None and seat == last_speaker) else 0
             return (
                 is_in_pool,
                 is_demoted,
-                is_addressed,
+                is_pending,
                 count,
+                is_addressed,
                 is_just_spoke,
                 self._rng.random(),
             )
@@ -1322,6 +1417,7 @@ class SpeakArbiter:
             "alive_seat_nos": sorted(state.alive_seat_nos),
             "online_npc_seats": online_npc_seats,
             "demoted_seats": sorted(demoted),
+            "pending_result_seats": sorted(pending_results),
             "speech_counts": sorted(candidate_counts.items()),
         }
 
@@ -1350,23 +1446,29 @@ class SpeakArbiter:
                 # candidate was filtered out (offline / dead / not in
                 # this game). Falling back is preferable to silence.
                 reason = "all_demoted_fallback"
-            elif seat in addressed_set:
-                reason = "addressed"
-            elif seat in state.silent_seats:
-                reason = "silent_rotation"
+            elif seat in pending_results:
+                # Seer/medium CO seat owing today's published ability
+                # result — promoted above count + addressed so the floor
+                # is held until the result lands.
+                reason = "pending_role_result"
             elif demoted:
                 # The pair-volley gate fired and a non-demoted third
-                # party won — labelled distinctly from low_count_rotation
-                # so the viewer keeps showing "stuck volley → diverted to
-                # seat N" even though the speech_count axis happens to
-                # favour the same seat.
+                # party won. Labelled before the count-based labels so
+                # the viewer keeps showing "stuck volley → diverted to
+                # seat N" even when the count axis also discriminates
+                # (the demotion is the *cause* of the diversion; count
+                # would only be the rationale absent the volley).
                 reason = "low_info_diversion"
             elif picked_count < max_candidate_count:
-                # Already spoke this phase, but strictly less than some
-                # other online candidate — the speech_count axis is what
-                # broke the tie. Distinct from silent_rotation (count==0)
-                # and from lru_rotation (counts equal, LRU won).
-                reason = "low_count_rotation"
+                # Lower count than the top of the field — this is now the
+                # primary rotation lever. silent_rotation (count==0) is
+                # a special case of low_count_rotation worth labelling
+                # so the viewer can still show "first speech of the
+                # phase".
+                reason = "silent_rotation" if picked_count == 0 else "low_count_rotation"
+            elif seat in addressed_set:
+                # Counts tied at the top — addressing wins the tiebreak.
+                reason = "addressed"
             elif last_speaker is not None and seat != last_speaker:
                 reason = "lru_rotation"
             else:
