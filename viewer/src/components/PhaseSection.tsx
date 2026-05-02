@@ -17,7 +17,7 @@ import {
   formatTokens,
   nightActionJa,
   phaseJa,
-  roleFaction,
+  roleChipStyle,
   roleJa,
   seatLabel,
   sourceJa,
@@ -427,16 +427,16 @@ function EventRow({
               {speaker ? seatLabel(speaker) : "(不明)"}
             </Typography>
             {speaker && (
-              // Real-role chip on every speech row so post-game review
-              // sees at a glance whether the speaker is wolf-side or
-              // village-side. Wolf/madman are tinted red to make the
-              // fake-CO contrast (e.g. wolf claiming SEER) visually
-              // obvious without scanning the seat panel for each line.
+              // Real-role chip on every speech row, hue-coded per role
+              // (village power roles get distinct blue/purple/green;
+              // wolf-side red/orange) so post-game review reads the
+              // fake-CO contrast — e.g. a 人狼-tinted seat carrying a
+              // "占い師 CO" chip — without scanning the seat panel.
+              // See `roleChipStyle` in lib/format.ts.
               <Chip
                 label={roleJa(speaker.role)}
                 size="small"
-                color={roleFaction(speaker.role) === "wolf" ? "error" : "default"}
-                variant={roleFaction(speaker.role) === "wolf" ? "filled" : "outlined"}
+                {...roleChipStyle(speaker.role)}
                 sx={{ height: 18, fontSize: 10 }}
               />
             )}

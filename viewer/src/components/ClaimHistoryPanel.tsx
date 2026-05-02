@@ -36,6 +36,7 @@ import Chip from "@mui/material/Chip";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
+import { roleChipStyle, roleJa } from "@/lib/format";
 import type {
   ClaimHistoryEntry,
   ClaimedMediumHistoryEntry,
@@ -158,10 +159,9 @@ function ClaimerRow({
         </Typography>
         {claimer && (
           <Chip
-            label={roleLabel(claimer.role)}
+            label={roleJa(claimer.role)}
             size="small"
-            color={isWolfSide(claimer.role) ? "error" : "default"}
-            variant={isWolfSide(claimer.role) ? "filled" : "outlined"}
+            {...roleChipStyle(claimer.role)}
             sx={{ height: 20, fontSize: 11 }}
           />
         )}
@@ -328,19 +328,3 @@ function computeDayCount(data: GameSample): number {
   return max;
 }
 
-function isWolfSide(role: string): boolean {
-  return role === "WEREWOLF" || role === "MADMAN";
-}
-
-const ROLE_LABEL: Record<string, string> = {
-  VILLAGER: "村人",
-  WEREWOLF: "人狼",
-  MADMAN: "狂人",
-  SEER: "占い師",
-  MEDIUM: "霊媒師",
-  KNIGHT: "騎士",
-};
-
-function roleLabel(role: string): string {
-  return ROLE_LABEL[role] ?? role;
-}

@@ -4,7 +4,7 @@ import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
-import { roleFaction, roleJa } from "@/lib/format";
+import { roleChipStyle, roleJa, roleTint } from "@/lib/format";
 import type { Seat } from "@/lib/types";
 
 export default function SeatGrid({ seats }: { seats: Seat[] }) {
@@ -25,19 +25,20 @@ export default function SeatGrid({ seats }: { seats: Seat[] }) {
 }
 
 function SeatCard({ seat }: { seat: Seat }) {
-  const faction = roleFaction(seat.role);
-  const factionBg =
-    faction === "wolf" ? "rgba(244, 67, 54, 0.08)" : "rgba(63, 81, 181, 0.04)";
-  const factionBorder =
-    faction === "wolf" ? "rgba(244, 67, 54, 0.4)" : "rgba(63, 81, 181, 0.2)";
+  // Per-role tinting: each of seer / medium / knight gets its own
+  // colour (alongside the existing wolf-red and madman-orange) so
+  // the seat panel scans visually the same way as the timeline's
+  // role chip. Helpers in lib/format.ts keep the hue palette in one
+  // place across PhaseSection, ClaimHistoryPanel, and this card.
+  const tint = roleTint(seat.role);
   const dim = !seat.alive;
 
   return (
     <Card
       variant="outlined"
       sx={{
-        background: factionBg,
-        borderColor: factionBorder,
+        background: tint.bg,
+        borderColor: tint.border,
         opacity: dim ? 0.55 : 1,
       }}
     >
@@ -60,7 +61,7 @@ function SeatCard({ seat }: { seat: Seat }) {
           <Chip
             label={roleJa(seat.role)}
             size="small"
-            color={faction === "wolf" ? "error" : "default"}
+            {...roleChipStyle(seat.role)}
             sx={{ height: 20 }}
           />
           {seat.persona_key && (
