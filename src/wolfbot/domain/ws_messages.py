@@ -527,6 +527,17 @@ class VoteDecision(BaseEnvelope):
     seat_no: int
     target_seat: int | None
     reason_summary: str = ""
+    suspicions: tuple[Suspicion, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Structured suspicion records the NPC asserts as part of "
+            "this vote decision. Master persists them to the immutable "
+            "suspicion timeline so vote-time reasoning is part of the "
+            "captured public history. The vote target is implicitly a "
+            "high suspicion; Master auto-promotes target_seat to "
+            "level=high if no explicit suspicion entry exists for it."
+        ),
+    )
 
 
 class DecideNightActionRequest(BaseEnvelope):
@@ -560,6 +571,21 @@ class NightActionDecision(BaseEnvelope):
     action_kind: Literal["wolf_attack", "seer_divine", "knight_guard"]
     target_seat: int | None
     reason_summary: str = ""
+    suspicions: tuple[Suspicion, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Structured suspicion records. Surfaced primarily for "
+            "``seer_divine`` (the chosen target IS the seat the seer "
+            "most wants to verify, which maps cleanly to a suspicion "
+            "entry). Master persists these to the timeline and "
+            "auto-promotes the divine target to level=medium if not "
+            "explicitly listed (seer divine is information-seeking, "
+            "not a lynch declaration). Wolf-attack and knight-guard "
+            "decisions do not produce suspicion entries by default — "
+            "wolves know their targets and guards declare protection, "
+            "not suspicion."
+        ),
+    )
 
 
 class WolfChatRequest(BaseEnvelope):

@@ -23,6 +23,7 @@ import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from wolfbot.domain.suspicion import Suspicion
 from wolfbot.domain.ws_messages import (
     DecideNightActionRequest,
     DecideVoteRequest,
@@ -526,7 +527,7 @@ class NpcClient:
         """
         if req.npc_id != self.config.npc_id:
             return
-        target, reason = await self._decide_vote_target(req)
+        target, reason, suspicions = await self._decide_vote_target(req)
         decision = VoteDecision(
             ts=self.now_ms(),
             trace_id=req.trace_id,
@@ -535,12 +536,13 @@ class NpcClient:
             seat_no=req.seat_no,
             target_seat=target,
             reason_summary=reason,
+            suspicions=suspicions,
         )
         await self.send(decision.model_dump_json())
 
     async def _decide_vote_target(
         self, req: DecideVoteRequest
-    ) -> tuple[int | None, str]:
+    ) -> tuple[int | None, str, tuple[Suspicion, ...]]:
         from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 
         state = self.game_states.get(req.game_id)
@@ -548,15 +550,15 @@ class NpcClient:
             log.warning(
                 "npc_vote_no_state game=%s seat=%d", req.game_id, req.seat_no,
             )
-            return None, "no_state"
+            return None, "no_state", ()
         if self.decision_llm is None:
-            return None, "no_decision_llm"
+            return None, "no_decision_llm", ()
         persona = NPC_PERSONAS_BY_KEY.get(state.persona_key)
         if persona is None:
             log.warning(
                 "npc_vote_unknown_persona persona=%s", state.persona_key,
             )
-            return None, "unknown_persona"
+            return None, "unknown_persona", ()
         legal = frozenset(seat for seat, _name in req.candidate_seats)
         system, user = build_vote_prompt(state=state, persona=persona, request=req)
         # Mirror `_decide_night_target`: track the LLM call's success
@@ -567,6 +569,7 @@ class NpcClient:
         # village's ability to lynch a wolf when one round-trip flakes.
         result_target_seat: int | None = None
         reason_summary = "llm_error"
+        result_suspicions: tuple[Suspicion, ...] = ()
         actor = (
             f"seat={req.seat_no} persona={state.persona_key} "
             f"role={state.role} npc_id={self.config.npc_id}"
@@ -589,6 +592,7 @@ class NpcClient:
             result = parse_decision(raw, legal_seats=legal)
             result_target_seat = result.target_seat
             reason_summary = result.reason_summary
+            result_suspicions = result.suspicions
         except Exception:
             log.exception(
                 "npc_vote_llm_failed game=%s seat=%d", req.game_id, req.seat_no,
@@ -608,8 +612,8 @@ class NpcClient:
                 req.game_id, req.seat_no, fallback,
                 reason_summary or "(none)",
             )
-            return fallback, f"abstain_fallback:{reason_summary or ''}"
-        return result_target_seat, reason_summary
+            return fallback, f"abstain_fallback:{reason_summary or ''}", result_suspicions
+        return result_target_seat, reason_summary, result_suspicions
 
     async def _on_decide_night_action_request(
         self, req: DecideNightActionRequest
@@ -621,7 +625,7 @@ class NpcClient:
         """
         if req.npc_id != self.config.npc_id:
             return
-        target, reason = await self._decide_night_target(req)
+        target, reason, suspicions = await self._decide_night_target(req)
         decision = NightActionDecision(
             ts=self.now_ms(),
             trace_id=req.trace_id,
@@ -631,6 +635,7 @@ class NpcClient:
             action_kind=req.action_kind,
             target_seat=target,
             reason_summary=reason,
+            suspicions=suspicions,
         )
         await self.send(decision.model_dump_json())
 
@@ -711,7 +716,7 @@ class NpcClient:
 
     async def _decide_night_target(
         self, req: DecideNightActionRequest
-    ) -> tuple[int | None, str]:
+    ) -> tuple[int | None, str, tuple[Suspicion, ...]]:
         from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 
         state = self.game_states.get(req.game_id)
@@ -719,12 +724,12 @@ class NpcClient:
             log.warning(
                 "npc_night_no_state game=%s seat=%d", req.game_id, req.seat_no,
             )
-            return None, "no_state"
+            return None, "no_state", ()
         if self.decision_llm is None:
-            return None, "no_decision_llm"
+            return None, "no_decision_llm", ()
         persona = NPC_PERSONAS_BY_KEY.get(state.persona_key)
         if persona is None:
-            return None, "unknown_persona"
+            return None, "unknown_persona", ()
         legal = frozenset(seat for seat, _name in req.candidate_seats)
         system, user = build_night_prompt(state=state, persona=persona, request=req)
         # Track parse + transport errors uniformly so the abstain
@@ -738,6 +743,7 @@ class NpcClient:
         # WAITING_HOST_DECISION.
         result_target_seat: int | None = None
         reason_summary = "llm_error"
+        result_suspicions: tuple[Suspicion, ...] = ()
         actor = (
             f"seat={req.seat_no} persona={state.persona_key} "
             f"role={state.role} npc_id={self.config.npc_id}"
@@ -760,6 +766,7 @@ class NpcClient:
             result = parse_decision(raw, legal_seats=legal)
             result_target_seat = result.target_seat
             reason_summary = result.reason_summary
+            result_suspicions = result.suspicions
         except Exception:
             log.exception(
                 "npc_night_llm_failed game=%s seat=%d kind=%s",
@@ -783,8 +790,8 @@ class NpcClient:
                 req.game_id, req.seat_no, req.action_kind, fallback,
                 reason_summary or "(none)",
             )
-            return fallback, f"abstain_fallback:{reason_summary or ''}"
-        return result_target_seat, reason_summary
+            return fallback, f"abstain_fallback:{reason_summary or ''}", result_suspicions
+        return result_target_seat, reason_summary, result_suspicions
 
 
 __all__ = ["NpcClient", "NpcClientConfig"]

@@ -767,6 +767,7 @@ async def _run() -> None:
         decision_dispatcher = NpcDecisionDispatcher(
             registry=npc_registry,
             now_ms=lambda: int(time.time() * 1000),
+            repo=repo,
         )
         llm_adapter._npc_decision_dispatcher = decision_dispatcher
 

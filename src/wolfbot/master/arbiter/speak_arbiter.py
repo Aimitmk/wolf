@@ -679,7 +679,7 @@ class SpeakArbiter:
         suspicions-table read failure cannot stall a SpeakRequest.
         """
         try:
-            rows = await self.repo.load_speech_suspicions_for_game(game_id)
+            rows = await self.repo.load_suspicions_for_game(game_id)
         except Exception:
             log.exception("past_suspicions_load_failed game=%s", game_id)
             return ()

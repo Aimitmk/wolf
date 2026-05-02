@@ -81,6 +81,13 @@ class _PendingDecision:
     npc_id: str
     request_id: str
     game_id: str
+    # Vote-specific context — populated only on vote dispatches so the
+    # `on_vote_decision` handler can persist the structured suspicions
+    # to the timeline without an extra DB lookup. ``None`` for night /
+    # wolf-chat dispatches that share this dataclass.
+    vote_day: int | None = None
+    vote_round: int | None = None
+    vote_phase: Phase | None = None
 
 
 @dataclass
@@ -109,10 +116,15 @@ class NpcDecisionDispatcher:
         *,
         config: DecisionDispatcherConfig | None = None,
         now_ms: Callable[[], int] = lambda: 0,
+        repo: object | None = None,
     ) -> None:
         self.registry = registry
         self.config = config or DecisionDispatcherConfig()
         self._now_ms = now_ms
+        # Optional repo handle for persisting structured suspicions on
+        # vote-decision arrival. ``None`` is allowed for tests / older
+        # wirings; the persistence path silently no-ops when absent.
+        self._repo = repo
         # request_id → pending future. Cleaned up on resolution / timeout.
         self._pending: dict[str, _PendingDecision] = {}
         # request_id → pending wolf-chat future (kept separate from
@@ -164,6 +176,8 @@ class NpcDecisionDispatcher:
                 round_=round_,
                 expires_at_ms=expires_at_ms,
                 public_state_summary=public_state_summary,
+                day=day,
+                phase=phase,
             )
             return voter.seat_no, target
 
@@ -289,6 +303,76 @@ class NpcDecisionDispatcher:
             msg.request_id, msg.npc_id, msg.seat_no, msg.target_seat,
             msg.reason_summary or "(none)",
         )
+        # Persist structured suspicions to the immutable timeline. Skip
+        # when repo is unavailable (test wiring) or when vote context is
+        # missing (would be a coding bug — we always populate it for
+        # vote dispatches). Auto-promote the chosen target to level=high
+        # if the LLM didn't explicitly include it (= the vote target IS
+        # the strongest suspicion, by definition).
+        if (
+            self._repo is None
+            or pending.vote_day is None
+            or pending.vote_round is None
+            or pending.vote_phase is None
+        ):
+            return
+        await self._persist_vote_suspicions(
+            msg=msg,
+            game_id=pending.game_id,
+            day=pending.vote_day,
+            round_=pending.vote_round,
+            phase=pending.vote_phase,
+        )
+
+    async def _persist_vote_suspicions(
+        self,
+        *,
+        msg: VoteDecision,
+        game_id: str,
+        day: int,
+        round_: int,
+        phase: Phase,
+    ) -> None:
+        """Persist VoteDecision-attached suspicions, auto-promoting the
+        vote target to level=high if it isn't already in the explicit list.
+
+        Best-effort: any DB error is logged but does not propagate, so a
+        suspicion-write failure can never stall the vote-resolution path.
+        """
+        from wolfbot.domain.suspicion import Suspicion as _Suspicion
+        from wolfbot.domain.suspicion import SuspicionLevel
+
+        suspicions = list(msg.suspicions)
+        # Auto-promote: ensure the vote target appears at level=high.
+        if msg.target_seat is not None and not any(
+            s.target_seat == msg.target_seat for s in suspicions
+        ):
+            suspicions.append(
+                _Suspicion(
+                    target_seat=msg.target_seat,
+                    level=SuspicionLevel.HIGH,
+                    reason=msg.reason_summary or "vote_target_auto_promoted",
+                )
+            )
+        if not suspicions:
+            return
+        try:
+            await self._repo.insert_vote_suspicions(  # type: ignore[union-attr]
+                game_id=game_id,
+                day=day,
+                phase=phase,
+                vote_round=round_,
+                suspecter_seat=msg.seat_no,
+                created_at_ms=self._now_ms(),
+                suspicions=suspicions,
+            )
+        except Exception:
+            log.exception(
+                "vote_suspicions_persist_failed game=%s seat=%d round=%d",
+                game_id,
+                msg.seat_no,
+                round_,
+            )
 
     async def on_wolf_chat_send(self, msg: WolfChatSend) -> None:
         """Resolve any pending wolf-chat future for ``msg.request_id``.
@@ -322,6 +406,79 @@ class NpcDecisionDispatcher:
             msg.request_id, msg.npc_id, msg.seat_no, msg.action_kind,
             msg.target_seat, msg.reason_summary or "(none)",
         )
+        # Persist seer-divine suspicions to the timeline. The divine
+        # target IS implicitly a "seat the seer wants to verify =
+        # suspicion-curious" — auto-promote target_seat to medium if not
+        # explicitly listed. Wolf-attack and knight-guard are deliberately
+        # not persisted here: wolves know their targets via private
+        # state, knights protect rather than declare suspicion.
+        if (
+            self._repo is None
+            or pending.vote_phase is None  # reused for night phase
+            or msg.action_kind != "seer_divine"
+        ):
+            return
+        await self._persist_seer_suspicions(
+            msg=msg,
+            game_id=pending.game_id,
+            phase=pending.vote_phase,
+        )
+
+    async def _persist_seer_suspicions(
+        self,
+        *,
+        msg: NightActionDecision,
+        game_id: str,
+        phase: Phase,
+    ) -> None:
+        """Persist seer-divine suspicions, auto-promoting target_seat to
+        medium if not explicitly listed.
+
+        Day is derived from the live `games.day_number` (loaded fresh
+        per call) so we don't need to thread phase_id through
+        `_PendingDecision`. The night-action dispatch happens at the
+        seer's NIGHT phase, so the read-current-day approximation is
+        always correct in practice.
+        """
+        from wolfbot.domain.suspicion import Suspicion as _Suspicion
+        from wolfbot.domain.suspicion import SuspicionLevel
+
+        try:
+            game = await self._repo.load_game(game_id)  # type: ignore[union-attr]
+        except Exception:
+            log.exception("seer_suspicions_load_game_failed game=%s", game_id)
+            return
+        if game is None:
+            return
+        day = game.day_number
+        suspicions = list(msg.suspicions)
+        if msg.target_seat is not None and not any(
+            s.target_seat == msg.target_seat for s in suspicions
+        ):
+            suspicions.append(
+                _Suspicion(
+                    target_seat=msg.target_seat,
+                    level=SuspicionLevel.MEDIUM,
+                    reason=msg.reason_summary or "seer_divine_target_auto",
+                )
+            )
+        if not suspicions:
+            return
+        try:
+            await self._repo.insert_vote_suspicions(  # type: ignore[union-attr]
+                game_id=game_id,
+                day=day,
+                phase=phase,
+                vote_round=-1,  # sentinel for night-action-derived rows
+                suspecter_seat=msg.seat_no,
+                created_at_ms=self._now_ms(),
+                suspicions=suspicions,
+            )
+        except Exception:
+            log.exception(
+                "seer_suspicions_persist_failed game=%s seat=%d",
+                game_id, msg.seat_no,
+            )
 
     # ------------------------------------------------- internals
 
@@ -336,6 +493,8 @@ class NpcDecisionDispatcher:
         round_: int,
         expires_at_ms: int,
         public_state_summary: str,
+        day: int,
+        phase: Phase,
     ) -> int | None:
         seat = seats_by_no.get(voter.seat_no)
         if seat is None or not seat.is_llm:
@@ -368,6 +527,9 @@ class NpcDecisionDispatcher:
             send=entry.send,
             payload_json=req.model_dump_json(),
             label="vote",
+            vote_day=day,
+            vote_round=round_,
+            vote_phase=phase,
         )
 
     async def _dispatch_one_wolf_chat(
@@ -476,6 +638,10 @@ class NpcDecisionDispatcher:
             public_state_summary=public_state_summary,
             expires_at_ms=expires_at_ms,
         )
+        # Pass NIGHT phase through `vote_phase` (reused; the field name
+        # predates this overload) so `on_night_action_decision` can
+        # persist seer-divine suspicions to the timeline.
+        night_phase = Phase.NIGHT_0 if "::day0::" in phase_id else Phase.NIGHT
         return await self._send_and_wait(
             request_id=request_id,
             seat_no=actor.seat_no,
@@ -484,6 +650,7 @@ class NpcDecisionDispatcher:
             send=entry.send,
             payload_json=req.model_dump_json(),
             label=f"night-{action_kind}",
+            vote_phase=night_phase,
         )
 
     async def _run_staggered(
@@ -522,6 +689,9 @@ class NpcDecisionDispatcher:
         send: Callable[[str], Awaitable[None]],
         payload_json: str,
         label: str,
+        vote_day: int | None = None,
+        vote_round: int | None = None,
+        vote_phase: Phase | None = None,
     ) -> int | None:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[int | None] = loop.create_future()
@@ -531,6 +701,9 @@ class NpcDecisionDispatcher:
             npc_id=npc_id,
             request_id=request_id,
             game_id=game_id,
+            vote_day=vote_day,
+            vote_round=vote_round,
+            vote_phase=vote_phase,
         )
         try:
             await send(payload_json)

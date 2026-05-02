@@ -1207,12 +1207,14 @@ class LLMAdapter:
             if state is None:
                 return ""
             past_votes = await self._load_past_votes(game.id, day)
+            past_suspicions = await self._load_past_suspicions(game.id)
             seat_names = {s.seat_no: s.display_name for s in seats}
             return build_public_digest(
                 state=state,
                 recent_events=events,
                 seat_names=seat_names,
                 past_votes=past_votes,
+                past_suspicions=past_suspicions,
             )
         except Exception:
             log.exception(
@@ -1221,6 +1223,30 @@ class LLMAdapter:
                 game.day_number,
             )
             return ""
+
+    async def _load_past_suspicions(
+        self, game_id: str,
+    ) -> tuple[tuple[int, str, int, int, str, str, str | None, str | None], ...]:
+        """Load the public suspicion timeline for the rounds-mode /
+        night-decision digest. Mirrors SpeakArbiter._load_past_suspicions."""
+        try:
+            rows = await self.repo.load_suspicions_for_game(game_id)
+        except Exception:
+            log.exception("digest_past_suspicions_load_failed game=%s", game_id)
+            return ()
+        return tuple(
+            (
+                int(r["day"]),
+                str(r["phase"]),
+                int(r["suspecter_seat"]),
+                int(r["target_seat"]),
+                str(r["level"]),
+                str(r["reason"]),
+                r["update_from_level"] if r["update_from_level"] is not None else None,
+                r["update_reason"] if r["update_reason"] is not None else None,
+            )
+            for r in rows
+        )
 
     async def _load_past_votes(
         self,

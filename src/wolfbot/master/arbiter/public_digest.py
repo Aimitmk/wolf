@@ -48,6 +48,9 @@ def build_public_digest(
     recent_events: Sequence[SpeechEvent],
     seat_names: dict[int, str],
     past_votes: Sequence[tuple[int, int, Sequence[tuple[int, int | None]]]] = (),
+    past_suspicions: Sequence[
+        tuple[int, str, int, int, str, str, str | None, str | None]
+    ] = (),
 ) -> str:
     """Compose the Japanese digest block.
 
@@ -134,6 +137,33 @@ def build_public_digest(
                 voter_label = _name(voter)
                 target_label = "棄権" if target is None else _name(target)
                 lines.append(f"    {voter_label} → {target_label}")
+
+    if past_suspicions:
+        lines.append("## 公開された疑い履歴 (古い順、不変記録)")
+        level_label = {
+            "trust": "信頼",
+            "low": "弱疑",
+            "medium": "疑",
+            "high": "強疑",
+        }
+        for (
+            day,
+            _phase,
+            suspecter,
+            target,
+            level,
+            reason,
+            from_level,
+            update_reason,
+        ) in past_suspicions:
+            sname = _name(suspecter)
+            tname = _name(target)
+            level_text = level_label.get(level, level)
+            row = f"- day{day} {sname} → {tname} ({level_text}): {reason}"
+            if from_level is not None:
+                from_text = level_label.get(from_level, from_level)
+                row += f"  [{from_text}→{level_text} 更新理由: {update_reason or '(未記入)'}]"
+            lines.append(row)
 
     return "\n".join(lines)
 

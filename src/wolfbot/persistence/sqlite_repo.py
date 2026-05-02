@@ -147,6 +147,17 @@ def _row_to_pending(row: aiosqlite.Row) -> PendingDecision:
     )
 
 
+def _susp_str(value: Any) -> str:
+    """Coerce a SuspicionLevel enum (or already-string) to its wire string.
+
+    The Suspicion model's `.level` is a `SuspicionLevel` enum but DB
+    insertion needs the underlying string. Defensive against either
+    enum-or-string inputs so the repo doesn't care which form callers
+    use.
+    """
+    return value.value if hasattr(value, "value") else str(value)
+
+
 def _submissions_json(pending: PendingDecision) -> str:
     """Serialize submissions to JSON, synthesizing from primary when empty."""
     items = pending.effective_submissions()
@@ -1114,36 +1125,30 @@ class SqliteRepo:
         created_at_ms: int,
         suspicions: Sequence[Any],
     ) -> None:
-        """Persist a batch of `Suspicion` records attached to one SpeechEvent.
+        """Persist a batch of speech-derived `Suspicion` records.
 
-        Uses ``INSERT OR IGNORE`` so a duplicate ``(event_id, seq)`` write
-        (e.g. on retry of the same speech result) is a silent no-op rather
-        than a constraint violation that aborts the whole batch.
-        Empty `suspicions` is a fast-path no-op.
+        Empty `suspicions` is a fast-path no-op. Re-running with the
+        same (event_id, seq) is a silent no-op via the partial UNIQUE
+        index `idx_susp_event_seq`.
         """
         if not suspicions:
             return
         rows = [
             (
+                "speech",
                 event_id,
                 seq,
                 game_id,
                 day,
                 phase.value,
+                None,  # vote_round
                 suspecter_seat,
                 int(s.target_seat),
-                str(s.level.value if hasattr(s.level, "value") else s.level),
+                _susp_str(s.level),
                 str(s.reason),
-                (
-                    s.update_from_level.value
-                    if s.update_from_level is not None
-                    and hasattr(s.update_from_level, "value")
-                    else (
-                        str(s.update_from_level)
-                        if s.update_from_level is not None
-                        else None
-                    )
-                ),
+                _susp_str(s.update_from_level)
+                if s.update_from_level is not None
+                else None,
                 s.update_reason,
                 created_at_ms,
             )
@@ -1152,19 +1157,72 @@ class SqliteRepo:
         async with self._tx() as db:
             await db.executemany(
                 """
-                INSERT OR IGNORE INTO speech_suspicions (
-                    event_id, seq, game_id, day, phase,
+                INSERT OR IGNORE INTO suspicions (
+                    source, event_id, seq, game_id, day, phase, vote_round,
                     suspecter_seat, target_seat, level, reason,
                     update_from_level, update_reason, created_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
 
-    async def load_speech_suspicions_for_game(
+    async def insert_vote_suspicions(
+        self,
+        *,
+        game_id: str,
+        day: int,
+        phase: Phase,
+        vote_round: int,
+        suspecter_seat: int,
+        created_at_ms: int,
+        suspicions: Sequence[Any],
+    ) -> None:
+        """Persist vote-derived `Suspicion` records.
+
+        Vote-derived rows have `event_id=NULL` (no SpeechEvent backs the
+        vote). Uniqueness is enforced per (game_id, day, vote_round,
+        suspecter_seat, target_seat) via `idx_susp_vote_unique`, so a
+        retry of the same vote-decision dispatch is a silent no-op.
+        """
+        if not suspicions:
+            return
+        rows = [
+            (
+                "vote",
+                None,  # event_id
+                seq,
+                game_id,
+                day,
+                phase.value,
+                int(vote_round),
+                suspecter_seat,
+                int(s.target_seat),
+                _susp_str(s.level),
+                str(s.reason),
+                _susp_str(s.update_from_level)
+                if s.update_from_level is not None
+                else None,
+                s.update_reason,
+                created_at_ms,
+            )
+            for seq, s in enumerate(suspicions)
+        ]
+        async with self._tx() as db:
+            await db.executemany(
+                """
+                INSERT OR IGNORE INTO suspicions (
+                    source, event_id, seq, game_id, day, phase, vote_round,
+                    suspecter_seat, target_seat, level, reason,
+                    update_from_level, update_reason, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    async def load_suspicions_for_game(
         self, game_id: str
     ) -> list[dict[str, Any]]:
-        """All suspicions for a game in chronological order.
+        """All suspicions (speech + vote) for a game in chronological order.
 
         Returned as a list of plain dicts so the caller can decide
         whether to project into a Pydantic model. Used by prompt
@@ -1173,29 +1231,32 @@ class SqliteRepo:
         """
         async with self._db.execute(
             """
-            SELECT event_id, seq, day, phase, suspecter_seat, target_seat,
+            SELECT source, event_id, seq, day, phase, vote_round,
+                   suspecter_seat, target_seat,
                    level, reason, update_from_level, update_reason,
                    created_at_ms
-              FROM speech_suspicions
+              FROM suspicions
              WHERE game_id=?
-             ORDER BY created_at_ms ASC, event_id ASC, seq ASC
+             ORDER BY created_at_ms ASC, id ASC
             """,
             (game_id,),
         ) as cur:
             rows = await cur.fetchall()
         return [
             {
-                "event_id": row[0],
-                "seq": int(row[1]),
-                "day": int(row[2]),
-                "phase": str(row[3]),
-                "suspecter_seat": int(row[4]),
-                "target_seat": int(row[5]),
-                "level": str(row[6]),
-                "reason": str(row[7]),
-                "update_from_level": row[8],
-                "update_reason": row[9],
-                "created_at_ms": int(row[10]),
+                "source": str(row[0]),
+                "event_id": row[1],
+                "seq": int(row[2]),
+                "day": int(row[3]),
+                "phase": str(row[4]),
+                "vote_round": row[5],
+                "suspecter_seat": int(row[6]),
+                "target_seat": int(row[7]),
+                "level": str(row[8]),
+                "reason": str(row[9]),
+                "update_from_level": row[10],
+                "update_reason": row[11],
+                "created_at_ms": int(row[12]),
             }
             for row in rows
         ]

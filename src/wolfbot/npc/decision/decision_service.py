@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from wolfbot.domain.enums import Role
+from wolfbot.domain.suspicion import Suspicion
 from wolfbot.domain.ws_messages import (
     DecideNightActionRequest,
     DecideVoteRequest,
@@ -48,6 +49,13 @@ class DecisionResult:
 
     target_seat: int | None
     reason_summary: str = ""
+    # Structured suspicion records the decision LLM emitted (vote path
+    # only — night actions don't carry a public-facing suspicion). The
+    # vote target is implicitly a high suspicion and SHOULD appear in
+    # this list, but the LLM may also register secondary trust/low/
+    # medium entries for other seats. Persisted to the suspicions
+    # timeline by the dispatcher.
+    suspicions: tuple[Suspicion, ...] = ()
 
 
 @runtime_checkable
@@ -71,7 +79,7 @@ class DecisionLLM(Protocol):
 _VOTE_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["target_seat", "reason"],
+    "required": ["target_seat", "reason", "suspicions"],
     "properties": {
         "target_seat": {
             "type": "integer",
@@ -85,6 +93,51 @@ _VOTE_SCHEMA: dict[str, object] = {
             "type": "string",
             "description": "Short internal note explaining the choice.",
         },
+        "suspicions": {
+            "type": "array",
+            "description": (
+                "Structured suspicion records this vote decision asserts. "
+                "MUST include one entry naming `target_seat` (your vote "
+                "target) at level=high with reason matching the public "
+                "vote rationale — voting someone implies the strongest "
+                "lynch suspicion. Optionally include trust/low/medium "
+                "entries for other seats whose evaluation you want to "
+                "register on the timeline. Master persists every entry "
+                "to the immutable suspicion timeline so silent reversals "
+                "between speech and vote are detectable."
+            ),
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "target_seat",
+                    "level",
+                    "reason",
+                    "update_from_level",
+                    "update_reason",
+                ],
+                "properties": {
+                    "target_seat": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9,
+                    },
+                    "level": {
+                        "type": "string",
+                        "enum": ["trust", "low", "medium", "high"],
+                    },
+                    "reason": {"type": "string", "maxLength": 500},
+                    "update_from_level": {
+                        "type": ["string", "null"],
+                        "enum": ["trust", "low", "medium", "high", None],
+                    },
+                    "update_reason": {
+                        "type": ["string", "null"],
+                        "maxLength": 500,
+                    },
+                },
+            },
+        },
     },
 }
 
@@ -92,7 +145,7 @@ _VOTE_SCHEMA: dict[str, object] = {
 _NIGHT_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["target_seat", "reason"],
+    "required": ["target_seat", "reason", "suspicions"],
     "properties": {
         "target_seat": {
             "type": "integer",
@@ -108,6 +161,52 @@ _NIGHT_SCHEMA: dict[str, object] = {
         "reason": {
             "type": "string",
             "description": "Short internal note explaining the choice.",
+        },
+        "suspicions": {
+            "type": "array",
+            "description": (
+                "Structured suspicion records. **For seer_divine**: "
+                "MUST include one entry naming `target_seat` (your "
+                "divine target) at level=medium or high — picking a "
+                "seat to divine is implicitly suspecting them. Use the "
+                "reason field to explain why this seat was chosen "
+                "(e.g. 「議論を急いでいたので確認したい」). Optional "
+                "trust/low entries for other seats can also register. "
+                "**For wolf_attack and knight_guard**: empty array is "
+                "acceptable — wolves attack their target with private "
+                "knowledge, guards protect rather than declare suspicion."
+            ),
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "target_seat",
+                    "level",
+                    "reason",
+                    "update_from_level",
+                    "update_reason",
+                ],
+                "properties": {
+                    "target_seat": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9,
+                    },
+                    "level": {
+                        "type": "string",
+                        "enum": ["trust", "low", "medium", "high"],
+                    },
+                    "reason": {"type": "string", "maxLength": 500},
+                    "update_from_level": {
+                        "type": ["string", "null"],
+                        "enum": ["trust", "low", "medium", "high", None],
+                    },
+                    "update_reason": {
+                        "type": ["string", "null"],
+                        "maxLength": 500,
+                    },
+                },
+            },
         },
     },
 }
@@ -403,13 +502,42 @@ def parse_decision(
         return DecisionResult(target_seat=None, reason_summary="not_object")
     raw_target = data.get("target_seat")
     if raw_target is None:
-        return DecisionResult(target_seat=None, reason_summary=str(data.get("reason", "")))
+        return DecisionResult(
+            target_seat=None,
+            reason_summary=str(data.get("reason", "")),
+            suspicions=_parse_decision_suspicions(data.get("suspicions")),
+        )
     if not isinstance(raw_target, int) or isinstance(raw_target, bool):
         return DecisionResult(target_seat=None, reason_summary="non_int_target")
     if raw_target not in legal_seats:
         log.info("decision_target_out_of_set target=%s legal=%s", raw_target, legal_seats)
         return DecisionResult(target_seat=None, reason_summary="illegal_target")
-    return DecisionResult(target_seat=raw_target, reason_summary=str(data.get("reason", "")))
+    return DecisionResult(
+        target_seat=raw_target,
+        reason_summary=str(data.get("reason", "")),
+        suspicions=_parse_decision_suspicions(data.get("suspicions")),
+    )
+
+
+def _parse_decision_suspicions(raw: object) -> tuple[Suspicion, ...]:
+    """Coerce a raw `suspicions` array from a vote decision JSON into
+    a tuple of validated `Suspicion` models.
+
+    Drops malformed entries silently (mirrors speech-side parsing) so
+    one bad row doesn't fail the whole decision.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[Suspicion] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            out.append(Suspicion.model_validate(entry))
+        except Exception:
+            log.debug("decision_suspicion_dropped %r", entry)
+            continue
+    return tuple(out)
 
 
 __all__ = [
