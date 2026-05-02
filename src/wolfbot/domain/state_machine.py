@@ -111,13 +111,22 @@ def _public_log(
     now_epoch: int,
     phase: Phase | None = None,
     actor_seat: int | None = None,
+    day: int | None = None,
 ) -> LogEntry:
     # `actor_seat` is forwarded so EXECUTION (target) and MORNING (victim)
     # carry the affected seat. Master Levi narration reads this field to
     # voice the actual seat label instead of "対象不明".
+    #
+    # ``day`` overrides the default ``game.day_number`` for transitions
+    # that cross a day boundary in the same Transition (e.g. the NIGHT
+    # resolver emits the next day's MORNING + "N 日目の議論を開始"
+    # PHASE_CHANGE before bumping day_number). Without the override
+    # those logs land in the *prior* day's bucket, and the viewer's
+    # per-(day, phase) timeline reads "DAY_VOTE → NIGHT → DAY_DISCUSSION"
+    # — the discussion section ends up dated AFTER its own speeches.
     return LogEntry(
         game_id=game.id,
-        day=game.day_number,
+        day=game.day_number if day is None else day,
         phase=phase or game.phase,
         kind=kind,
         actor_seat=actor_seat,
@@ -134,10 +143,11 @@ def _private_log(
     text: str,
     now_epoch: int,
     phase: Phase | None = None,
+    day: int | None = None,
 ) -> LogEntry:
     return LogEntry(
         game_id=game.id,
-        day=game.day_number,
+        day=game.day_number if day is None else day,
         phase=phase or game.phase,
         kind=kind,
         actor_seat=None,
@@ -313,6 +323,7 @@ def plan_night0(
         ),
         now_epoch=now_epoch,
         phase=Phase.DAY_DISCUSSION,
+        day=1,
     )
 
     return Transition(
@@ -808,6 +819,7 @@ def plan_night_resolve(
     if knight_seat is not None and guard_target is not None:
         record_guard = (knight_seat, guard_target)
 
+    next_day = game.day_number + 1
     public_logs: tuple[LogEntry, ...] = (
         _public_log(
             game,
@@ -816,6 +828,7 @@ def plan_night_resolve(
             now_epoch=now_epoch,
             phase=Phase.DAY_DISCUSSION,
             actor_seat=killed_seat,
+            day=next_day,
         ),
     )
 
@@ -838,7 +851,6 @@ def plan_night_resolve(
             clear_force_skip=True,
         )
 
-    next_day = game.day_number + 1
     day_start = _public_log(
         game,
         kind="PHASE_CHANGE",
@@ -848,6 +860,7 @@ def plan_night_resolve(
         ),
         now_epoch=now_epoch,
         phase=Phase.DAY_DISCUSSION,
+        day=next_day,
     )
     return Transition(
         next_phase=Phase.DAY_DISCUSSION,

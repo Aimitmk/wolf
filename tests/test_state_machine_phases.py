@@ -87,6 +87,18 @@ def test_plan_night0_transitions_to_day1_with_deadline() -> None:
     assert "ROLE_NOTICE" in kinds
     assert "SEER_RESULT_NIGHT0" in kinds
     assert "WOLF_PARTNER" in kinds
+    # The day-1-start PHASE_CHANGE log must be tagged day=1, not the
+    # game's current day_number (=0 at NIGHT_0). Same bug class as
+    # plan_night_resolve's MORNING/PHASE_CHANGE — without this tag the
+    # viewer puts day-1's discussion-open in the day-0 SETUP bucket
+    # and day-1 DAY_DISCUSSION starts off without its phase-boundary
+    # log.
+    day1_start = next(
+        log
+        for log in t.public_logs
+        if log.kind == "PHASE_CHANGE" and "1 日目の議論を開始" in log.text
+    )
+    assert day1_start.day == 1
 
 
 def test_plan_night0_random_white_is_non_wolf_non_self() -> None:

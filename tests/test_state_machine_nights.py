@@ -158,6 +158,51 @@ def test_plan_night_resolve_skips_dead_attack_target() -> None:
     assert "平和" in t.morning_text
 
 
+def test_morning_and_day_start_logs_carry_next_day_number() -> None:
+    """The MORNING + "{N} 日目の議論を開始" PHASE_CHANGE logs are emitted
+    by ``plan_night_resolve`` *before* day_number is bumped, so they
+    must explicitly carry ``day=next_day`` (= game.day_number + 1)
+    rather than the default ``game.day_number``. Otherwise the viewer's
+    per-(day, phase) bucketing puts day-N+1's morning in day-N's
+    DAY_DISCUSSION section, where it appears AFTER the day-N speeches
+    and produces the misleading "DAY_VOTE → NIGHT → DAY_DISCUSSION"
+    timeline observed in game cbfc32400ee2.
+    """
+    game = _game(day=1)
+    players = _players()
+    seats = _seats()
+    actions = [
+        _act(1, SubmissionType.WOLF_ATTACK, 7),
+        _act(2, SubmissionType.WOLF_ATTACK, 7),
+        _act(4, SubmissionType.SEER_DIVINE, 8),
+        _act(6, SubmissionType.KNIGHT_GUARD, 8),
+    ]
+    t = plan_night_resolve(
+        game,
+        players,
+        seats,
+        actions,
+        previous_guard_seat=None,
+        force_skip=False,
+        now_epoch=1000,
+    )
+    assert t.next_day == 2
+
+    morning = next(log for log in t.public_logs if log.kind == "MORNING")
+    assert morning.day == 2, (
+        f"MORNING tagged day={morning.day}, expected 2 (next day after night N)"
+    )
+
+    day_start = next(
+        log
+        for log in t.public_logs
+        if log.kind == "PHASE_CHANGE" and "議論を開始" in log.text
+    )
+    assert day_start.day == 2, (
+        f"day-start PHASE_CHANGE tagged day={day_start.day}, expected 2"
+    )
+
+
 def test_morning_announce_does_not_reveal_role() -> None:
     game = _game(day=1)
     players = _players()
