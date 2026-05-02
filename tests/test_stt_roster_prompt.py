@@ -43,7 +43,11 @@ def test_format_roster_block_lists_seats_and_variant_rules() -> None:
 
 
 def test_gemini_build_system_prompt_appends_roster_block() -> None:
-    base = GeminiAudioAnalyzer._SYSTEM_PROMPT_BASE
+    """``_build_system_prompt(roster)`` must equal the template-only
+    body (= ``_build_system_prompt(None)``) followed by the roster
+    block — so the LLM sees the static instructions first and the
+    per-game seat list at the bottom."""
+    base = GeminiAudioAnalyzer._build_system_prompt(None)
     with_roster = GeminiAudioAnalyzer._build_system_prompt(
         [(3, "🦋ラキオ")]
     )
@@ -51,15 +55,18 @@ def test_gemini_build_system_prompt_appends_roster_block() -> None:
     assert "席3: 🦋ラキオ" in with_roster
 
 
-def test_gemini_build_system_prompt_no_roster_equals_base() -> None:
-    assert (
-        GeminiAudioAnalyzer._build_system_prompt(None)
-        == GeminiAudioAnalyzer._SYSTEM_PROMPT_BASE
-    )
+def test_gemini_build_system_prompt_no_roster_returns_template_only() -> None:
+    """No-roster case is the template body alone — the roster block
+    contributes only when at least one seat is supplied."""
+    base = GeminiAudioAnalyzer._build_system_prompt(None)
+    assert "あなたは人狼ゲームの音声ログ分析エンジン" in base
+    # No roster section markers when roster is empty.
+    assert "席1:" not in base
+    assert "席2:" not in base
 
 
 def test_groq_build_analyzer_prompt_appends_roster_block() -> None:
-    base = GroqWhisperAudioAnalyzer._ANALYZER_PROMPT_BASE
+    base = GroqWhisperAudioAnalyzer._build_analyzer_prompt(None)
     with_roster = GroqWhisperAudioAnalyzer._build_analyzer_prompt(
         [(5, "🌙セツ")]
     )
@@ -67,8 +74,8 @@ def test_groq_build_analyzer_prompt_appends_roster_block() -> None:
     assert "席5: 🌙セツ" in with_roster
 
 
-def test_groq_build_analyzer_prompt_no_roster_equals_base() -> None:
-    assert (
-        GroqWhisperAudioAnalyzer._build_analyzer_prompt(None)
-        == GroqWhisperAudioAnalyzer._ANALYZER_PROMPT_BASE
-    )
+def test_groq_build_analyzer_prompt_no_roster_returns_template_only() -> None:
+    base = GroqWhisperAudioAnalyzer._build_analyzer_prompt(None)
+    assert "あなたは人狼ゲームの発話内容を分析するエンジン" in base
+    assert "席1:" not in base
+    assert "席2:" not in base

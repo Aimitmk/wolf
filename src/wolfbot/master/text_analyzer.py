@@ -37,6 +37,7 @@ from wolfbot.domain.enums import (
     ROLE_CALLOUT_VALUES,
     format_co_claim_options,
 )
+from wolfbot.llm.template import render_template
 
 log = logging.getLogger(__name__)
 
@@ -107,32 +108,11 @@ class GeminiTextAnalyzer:
     flash-lite used for audio so cost stays bounded.
     """
 
-    _SYSTEM_PROMPT: str = (
-        "あなたは人狼ゲームのチャット発言分析エンジンです。\n"
-        "渡された発言テキスト(日本語)を読み、以下のJSON形式で返してください。\n"
-        "JSONのみ返答し、他のテキストは含めないでください。\n\n"
-        "```json\n"
-        "{\n"
-        '  "co_claim": null,\n'
-        '  "addressed_name": null,\n'
-        '  "role_callout": null\n'
-        "}\n"
-        "```\n\n"
-        "フィールド説明:\n"
-        f"- co_claim: 役職CO(自称)があれば {format_co_claim_options()}、なければ null\n"
-        "- addressed_name: 特定のプレイヤーへの呼びかけがあればその名前(例 \"セツ\"、\"ジーナさん\"、\"席3\"、\"3番\")、なければ null。"
-        "「みんな」「全員」など全体への呼びかけは null。さん/くん/ちゃん 等の敬称は付けたままでも構わない。"
-        "発言内で他プレイヤーに言及するだけ(例: 『セツの判定が気になる』)は呼びかけではないので null。"
-        "明確な宛先のある呼びかけ(例: 『セツさん、どう思う』)のみ設定。\n"
-        "- role_callout: 役職への名乗り出を求める呼びかけ、または一般的な情報請求があれば "
-        "\"seer\"/\"medium\"/\"knight\"/\"info_request\" のいずれか、なければ null。"
-        "特定役職を名指しした呼びかけ (例「占い師の方は名乗り出てください」「霊媒師いますか?」「騎士は誰?」) → 該当役職。"
-        "役職を限定しない一般的な情報請求 (例「誰か怪しい人いる?」「みんな意見を聞かせて」「気になる人を挙げて」"
-        "「誰か役職持ち出てきて」「みんなどう思う?」「初日だけど何か情報ない?」) → \"info_request\"。"
-        "ただし役職名を単に話題にしただけ (例「占い師の判定が気になる」「シゲミチが霊媒主張した」) は null。"
-        "個人への質問 (例「セツさん、どう思う?」) は addressed_name 側で扱い、role_callout は null。"
-        "全員/全体への問いかけで意見・情報・怪しい相手を求めているときに \"info_request\" を立てる。"
+    _SYSTEM_PROMPT: str = render_template(
+        "master/text_message_analyzer",
+        co_claim_options=format_co_claim_options(),
     )
+    """System prompt body — see prompts/templates/master/text_message_analyzer.md."""
 
     def __init__(
         self,
