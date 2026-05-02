@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -117,9 +118,7 @@ async def export_game(
     return out_path.resolve()
 
 
-async def _build_payload(
-    game_id: str, db_path: Path, trace_root: Path
-) -> GameExport:
+async def _build_payload(game_id: str, db_path: Path, trace_root: Path) -> GameExport:
     async with aiosqlite.connect(str(db_path)) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA foreign_keys = ON")
@@ -132,11 +131,14 @@ async def _build_payload(
         if game_row is None:
             raise ValueError(f"game not found: {game_id}")
 
-        seat_rows = [dict(r) for r in await _fetch_all(
-            db,
-            "SELECT * FROM seats WHERE game_id = ? ORDER BY seat_no",
-            (game_id,),
-        )]
+        seat_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                "SELECT * FROM seats WHERE game_id = ? ORDER BY seat_no",
+                (game_id,),
+            )
+        ]
         # PLAYER_SPEECH log rows duplicate the canonical speech_events rows
         # (DiscussionService.record() inserts both at write time so live LLM
         # context-builder prompts can keep reading from logs_public). For
@@ -144,27 +146,36 @@ async def _build_payload(
         # speaker_seat + summary, which the viewer attributes to the player.
         # Excluding the duplicates here keeps the timeline clean and avoids
         # the "NPC text shown twice (PLAYER_SPEECH log + speech_event)" issue.
-        public_log_rows = [dict(r) for r in await _fetch_all(
-            db,
-            "SELECT day, phase, kind, actor_seat, text, created_at "
-            "FROM logs_public WHERE game_id = ? AND kind != 'PLAYER_SPEECH' "
-            "ORDER BY id ASC",
-            (game_id,),
-        )]
-        vote_rows = [dict(r) for r in await _fetch_all(
-            db,
-            "SELECT day, round, voter_seat, target_seat, submitted_at "
-            "FROM votes WHERE game_id = ? "
-            "ORDER BY day, round, submitted_at",
-            (game_id,),
-        )]
-        night_action_rows = [dict(r) for r in await _fetch_all(
-            db,
-            "SELECT day, actor_seat, kind, target_seat, submitted_at "
-            "FROM night_actions WHERE game_id = ? "
-            "ORDER BY day, submitted_at",
-            (game_id,),
-        )]
+        public_log_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                "SELECT day, phase, kind, actor_seat, text, created_at "
+                "FROM logs_public WHERE game_id = ? AND kind != 'PLAYER_SPEECH' "
+                "ORDER BY id ASC",
+                (game_id,),
+            )
+        ]
+        vote_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                "SELECT day, round, voter_seat, target_seat, submitted_at "
+                "FROM votes WHERE game_id = ? "
+                "ORDER BY day, round, submitted_at",
+                (game_id,),
+            )
+        ]
+        night_action_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                "SELECT day, actor_seat, kind, target_seat, submitted_at "
+                "FROM night_actions WHERE game_id = ? "
+                "ORDER BY day, submitted_at",
+                (game_id,),
+            )
+        ]
         # Wolf chat is fan-out-stored in `logs_private` (one row per
         # audience seat) so the same utterance shows up N times where N
         # = alive wolves at the moment. Dedupe on
@@ -173,37 +184,45 @@ async def _build_payload(
         # always 'NIGHT' (or 'NIGHT_0' on day 0) by construction; we
         # carry it through so the per-phase grouping in `_build_phases`
         # picks it up without extra logic.
-        wolf_chat_rows = [dict(r) for r in await _fetch_all(
-            db,
-            "SELECT DISTINCT day, phase, actor_seat, text, created_at "
-            "FROM logs_private "
-            "WHERE game_id = ? AND kind = 'WOLF_CHAT' AND actor_seat IS NOT NULL "
-            "ORDER BY created_at ASC",
-            (game_id,),
-        )]
+        wolf_chat_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                "SELECT DISTINCT day, phase, actor_seat, text, created_at "
+                "FROM logs_private "
+                "WHERE game_id = ? AND kind = 'WOLF_CHAT' AND actor_seat IS NOT NULL "
+                "ORDER BY created_at ASC",
+                (game_id,),
+            )
+        ]
         # `phase_baseline` rows are an internal sentinel used by
         # PublicDiscussionState to seed alive-seat baselines; they have
         # empty text and are explicitly excluded from public-log emission
         # in the live system. Filter at the SQL level so the viewer never
         # sees them.
-        speech_event_rows = [dict(r) for r in await _fetch_all(
-            db,
-            "SELECT event_id, day, phase, source, speaker_seat, text, "
-            "stt_confidence, summary, co_declaration, addressed_seat_no, "
-            "claimed_seer_target_seat, claimed_seer_is_wolf, "
-            "claimed_medium_target_seat, claimed_medium_is_wolf, "
-            "created_at_ms "
-            "FROM speech_events WHERE game_id = ? "
-            "AND source != 'phase_baseline' "
-            "ORDER BY created_at_ms ASC",
-            (game_id,),
-        )]
+        speech_event_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                "SELECT event_id, day, phase, source, speaker_seat, text, "
+                "stt_confidence, summary, co_declaration, addressed_seat_no, "
+                "claimed_seer_target_seat, claimed_seer_is_wolf, "
+                "claimed_medium_target_seat, claimed_medium_is_wolf, "
+                "created_at_ms "
+                "FROM speech_events WHERE game_id = ? "
+                "AND source != 'phase_baseline' "
+                "ORDER BY created_at_ms ASC",
+                (game_id,),
+            )
+        ]
         # Arbiter decision timeline — joined LEFT-OUTER from requests so
         # in-flight or rejected dispatches still appear (results /
         # playback may legitimately be missing).
-        arbiter_rows = [dict(r) for r in await _fetch_all(
-            db,
-            """
+        arbiter_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                """
             SELECT
                 req.request_id, req.phase_id, req.npc_id, req.seat_no,
                 req.suggested_intent, req.selection_reason,
@@ -225,15 +244,16 @@ async def _build_payload(
             WHERE req.game_id = ?
             ORDER BY req.created_at_ms ASC
             """,
-            (game_id,),
-        )]
+                (game_id,),
+            )
+        ]
 
     seat_lookup = {s["seat_no"]: s["display_name"] for s in seat_rows}
     return GameExport(
         game=_build_game_meta(game_row, public_log_rows),
         seats=[_build_seat(s) for s in seat_rows],
         phases=_build_phases(
-            _rebucket_morning_logs(public_log_rows),
+            _retag_morning_logs_from_text(public_log_rows),
             speech_event_rows,
             vote_rows,
             night_action_rows,
@@ -261,9 +281,7 @@ async def _fetch_all(
 
 
 # ---------------------------------------------------------------- shape builders
-def _build_game_meta(
-    row: aiosqlite.Row, public_logs: list[dict[str, Any]]
-) -> GameMeta:
+def _build_game_meta(row: aiosqlite.Row, public_logs: list[dict[str, Any]]) -> GameMeta:
     discussion_mode = cast(DiscussionMode, row["discussion_mode"])
     return GameMeta(
         id=row["id"],
@@ -341,52 +359,83 @@ def _build_seat(row: dict[str, Any]) -> SeatExport:
     )
 
 
-_DAY_START_TEXT_PREFIX = ("夜が明けました。1 日目の議論を開始", "日目の議論を開始")
+_DAY_START_TEXT_PATTERN = re.compile(r"^(?:夜が明けました。)?(\d+) 日目の議論を開始")
 
 
-def _rebucket_morning_logs(
+def _retag_morning_logs_from_text(
     public_logs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Defensive rebucketing for legacy games whose MORNING + day-start
-    PHASE_CHANGE logs were written with the *prior* day_number.
+    """Use the day number embedded in PHASE_CHANGE / MORNING text as the
+    source of truth for those logs' ``day`` field.
 
-    Pre-fix (state_machine.py before 2026-05-02), ``plan_night_resolve``
-    and ``plan_night0`` emitted these logs through the ``_public_log``
-    helper which defaulted ``day=game.day_number`` — and that's the
-    OLD day at the moment the transition is computed. So a NIGHT 1
-    resolution wrote "朝になりました" / "2 日目の議論を開始" with
-    ``day=1`` instead of ``day=2``, and the viewer's per-(day, phase)
-    bucketing put day-2's morning into day-1's DAY_DISCUSSION section.
-    The visible symptom: timeline reads
-    "DAY_DISCUSSION → DAY_VOTE → NIGHT → DAY_DISCUSSION" with the
-    second discussion's started_at_ms timestamped *after* its own
-    speeches.
+    Pre-2026-05-02 (commit ``cab2b92``), ``plan_night_resolve`` and
+    ``plan_night0`` emitted the next-day MORNING + "N 日目の議論を開始"
+    PHASE_CHANGE through ``_public_log`` which defaulted ``day =
+    game.day_number`` — i.e. the *prior* day at the moment of the
+    transition. So a NIGHT 1 → DAY 2 resolve wrote those logs with
+    ``day=1``. The viewer then bucketed day-2's morning into day-1's
+    DAY_DISCUSSION section, and the timeline read out of order.
 
-    The state machine now tags these logs explicitly with
-    ``day=next_day`` (commit ``state_machine.py``). Existing games
-    re-exported through this path still need the fix without a DB
-    rewrite — hence this normalisation step. Returns a *new* list
-    with day-fields adjusted; the input is not mutated so other
-    consumers (e.g. ``_build_game_meta``) keep their original view.
+    State machine now tags these logs explicitly with the next day, so
+    new games store correct values. But ~80 already-played games carry
+    the old offset in their DB rows. Reading the day number out of the
+    PHASE_CHANGE text ("2 日目の議論を開始") gives us a deterministic
+    fix that works for both eras: post-fix games are already aligned
+    (no-op), pre-fix games get rewritten on the fly without a DB
+    migration.
+
+    MORNING rows ("朝になりました。犠牲者: 〜" / "平和な朝です") have
+    no day in their text. They are emitted in the same Transition as
+    the day-start PHASE_CHANGE and share its ``created_at`` epoch
+    second; we look up the sibling PHASE_CHANGE within the same
+    second and copy its corrected day. If no sibling is found (game
+    aborted mid-resolution before PHASE_CHANGE landed) the row is
+    passed through unchanged.
+
+    The earlier ``_rebucket_morning_logs`` helper indiscriminately did
+    ``day += 1`` on every MORNING/PHASE_CHANGE row — that broke
+    post-fix games where the day was already correct. Trust the text,
+    not a blanket offset.
     """
+    # First pass: build a map of (created_at_epoch_s) → corrected_day,
+    # populated from PHASE_CHANGE rows whose text encodes the day.
+    corrected_day_by_ts: dict[int, int] = {}
+    for row in public_logs:
+        if row.get("phase") != "DAY_DISCUSSION" or row.get("kind") != "PHASE_CHANGE":
+            continue
+        text = row.get("text")
+        if not isinstance(text, str):
+            continue
+        m = _DAY_START_TEXT_PATTERN.match(text)
+        if m is None:
+            continue
+        corrected_day_by_ts[int(row["created_at"])] = int(m.group(1))
+
     fixed: list[dict[str, Any]] = []
     for row in public_logs:
-        if (
-            row.get("phase") == "DAY_DISCUSSION"
-            and (
-                row.get("kind") == "MORNING"
-                or (
-                    row.get("kind") == "PHASE_CHANGE"
-                    and isinstance(row.get("text"), str)
-                    and "日目の議論を開始" in row["text"]
-                )
-            )
-        ):
-            patched = dict(row)
-            patched["day"] = (row.get("day") or 0) + 1
-            fixed.append(patched)
-        else:
+        if row.get("phase") != "DAY_DISCUSSION":
             fixed.append(row)
+            continue
+        kind = row.get("kind")
+        if kind == "PHASE_CHANGE":
+            text = row.get("text")
+            if isinstance(text, str):
+                m = _DAY_START_TEXT_PATTERN.match(text)
+                if m is not None:
+                    expected = int(m.group(1))
+                    if row.get("day") != expected:
+                        patched = dict(row)
+                        patched["day"] = expected
+                        fixed.append(patched)
+                        continue
+        elif kind == "MORNING":
+            sibling_day = corrected_day_by_ts.get(int(row["created_at"]))
+            if sibling_day is not None and row.get("day") != sibling_day:
+                patched = dict(row)
+                patched["day"] = sibling_day
+                fixed.append(patched)
+                continue
+        fixed.append(row)
     return fixed
 
 
@@ -617,9 +666,7 @@ def _build_claim_history(
         medium_target = ev.get("claimed_medium_target_seat")
         if medium_target is not None:
             raw_verdict = ev.get("claimed_medium_is_wolf")
-            verdict = (
-                bool(raw_verdict) if raw_verdict is not None else None
-            )
+            verdict = bool(raw_verdict) if raw_verdict is not None else None
             medium_by_seat.setdefault(speaker_seat, []).append(
                 ClaimedMediumHistoryEntry(
                     day=int(ev["day"]),
@@ -686,9 +733,7 @@ def _load_trace(trace_root: Path, game_id: str) -> list[TraceEntry]:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
-                    log.warning(
-                        "skipping malformed trace line in %s", jsonl_path
-                    )
+                    log.warning("skipping malformed trace line in %s", jsonl_path)
                     continue
                 obj.setdefault("file_stem", stem)
                 if obj.get("day") is None:

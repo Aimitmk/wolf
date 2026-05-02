@@ -58,10 +58,8 @@ async def _seed_minimal_game(repo: SqliteRepo) -> None:
     )
     await repo.create_game(game)
     seats = [
-        Seat(seat_no=1, display_name="Alice", is_llm=False, persona_key=None,
-             discord_user_id="u1"),
-        Seat(seat_no=2, display_name="Bot", is_llm=True, persona_key="setsu",
-             discord_user_id="u2"),
+        Seat(seat_no=1, display_name="Alice", is_llm=False, persona_key=None, discord_user_id="u1"),
+        Seat(seat_no=2, display_name="Bot", is_llm=True, persona_key="setsu", discord_user_id="u2"),
     ]
     for seat in seats:
         await repo.insert_seat(GAME_ID, seat)
@@ -71,8 +69,7 @@ async def _seed_minimal_game(repo: SqliteRepo) -> None:
     await repo.set_player_role(GAME_ID, 2, Role.WEREWOLF)
     async with repo._tx() as db:
         await db.execute(
-            "UPDATE seats SET alive=0, death_cause=?, death_day=? "
-            "WHERE game_id=? AND seat_no=2",
+            "UPDATE seats SET alive=0, death_cause=?, death_day=? WHERE game_id=? AND seat_no=2",
             (DeathCause.EXECUTION.value, 1, GAME_ID),
         )
 
@@ -220,7 +217,10 @@ async def test_export_game_emits_wolf_chat_logs_per_phase(
     # Add a second wolf so the fan-out (one row per audience) is
     # exercised — the exporter must collapse N audience rows back to 1.
     seat3 = Seat(
-        seat_no=3, display_name="Wolf2", is_llm=True, persona_key="raqio",
+        seat_no=3,
+        display_name="Wolf2",
+        is_llm=True,
+        persona_key="raqio",
         discord_user_id="u3",
     )
     await repo.insert_seat(GAME_ID, seat3)
@@ -267,9 +267,7 @@ async def test_export_game_emits_wolf_chat_logs_per_phase(
 
     # NIGHT phase appears in the timeline because of the wolf chat
     # rows (no NIGHT_1 actions or public logs were seeded for day 1).
-    night1 = next(
-        p for p in payload["phases"] if p["day"] == 1 and p["phase"] == "NIGHT"
-    )
+    night1 = next(p for p in payload["phases"] if p["day"] == 1 and p["phase"] == "NIGHT")
     assert len(night1["wolf_chat_logs"]) == 2  # deduped from 4 rows
     first, second = night1["wolf_chat_logs"]
     assert first["actor_seat"] == 2
@@ -294,22 +292,45 @@ async def test_export_game_inlines_jsonl_trace(
     game_trace = trace_root / GAME_ID
     game_trace.mkdir(parents=True)
     (game_trace / "gameplay.jsonl").write_text(
-        json.dumps({"ts": "2026-04-28T08:00:01+00:00", "role": "gameplay",
-                    "model": "grok-4-1-fast", "system_prompt": "s",
-                    "user_prompt": "u", "response": "r", "latency_ms": 100,
-                    "tokens": {"prompt": 5, "completion": 1, "total": 6},
-                    "phase": "DAY_DISCUSSION", "day": 1,
-                    "actor": "seat=2 persona=setsu",
-                    "provider": "xai", "error": None}) + "\n",
+        json.dumps(
+            {
+                "ts": "2026-04-28T08:00:01+00:00",
+                "role": "gameplay",
+                "model": "grok-4-1-fast",
+                "system_prompt": "s",
+                "user_prompt": "u",
+                "response": "r",
+                "latency_ms": 100,
+                "tokens": {"prompt": 5, "completion": 1, "total": 6},
+                "phase": "DAY_DISCUSSION",
+                "day": 1,
+                "actor": "seat=2 persona=setsu",
+                "provider": "xai",
+                "error": None,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     (game_trace / "voice_stt.jsonl").write_text(
-        json.dumps({"ts": "2026-04-28T08:00:00+00:00", "role": "voice_stt",
-                    "provider": "gemini", "model": "gemini-2.0-flash-lite",
-                    "system_prompt": "s", "user_prompt": "[audio]",
-                    "response": "{}", "latency_ms": 800, "tokens": None,
-                    "phase": None, "day": None, "actor": None,
-                    "error": None}) + "\n",
+        json.dumps(
+            {
+                "ts": "2026-04-28T08:00:00+00:00",
+                "role": "voice_stt",
+                "provider": "gemini",
+                "model": "gemini-2.0-flash-lite",
+                "system_prompt": "s",
+                "user_prompt": "[audio]",
+                "response": "{}",
+                "latency_ms": 800,
+                "tokens": None,
+                "phase": None,
+                "day": None,
+                "actor": None,
+                "error": None,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -363,11 +384,7 @@ async def test_export_game_filters_player_speech_logs(
         output_dir=tmp_path / "out",
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
-    all_log_kinds = {
-        log["kind"]
-        for phase in payload["phases"]
-        for log in phase["public_logs"]
-    }
+    all_log_kinds = {log["kind"] for phase in payload["phases"] for log in phase["public_logs"]}
     assert "PLAYER_SPEECH" not in all_log_kinds
 
 
@@ -529,6 +546,7 @@ async def test_export_game_filename_uses_timestamp_prefix(
     # 2023-11-15 in UTC. Local-time conversion may shift the date but the
     # YYYY-MM-DD_HH-MM-SS shape is invariant.
     import re
+
     assert re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:_\d+)?\.json$", out.name), (
         f"unexpected filename shape: {out.name}"
     )
@@ -574,3 +592,218 @@ async def test_export_game_filename_disambiguates_same_second_collision(
     )
     assert third != first
     assert third.name.endswith("_1.json")
+
+
+async def test_export_game_phases_chronological_with_correctly_tagged_logs(
+    fixture_repo: tuple[SqliteRepo, Path],
+    tmp_path: Path,
+) -> None:
+    """A post-fix game whose MORNING + day-start PHASE_CHANGE logs are
+    already tagged with the right ``day`` must export phases in
+    chronological order and not duplicate buckets one day off.
+
+    Reproduces the bug fixed by replacing ``_rebucket_morning_logs``
+    with ``_retag_morning_logs_from_text``: the old helper bumped every
+    matching row's day by +1 unconditionally, so a correctly-tagged
+    game emitted phantom (day+1, DAY_DISCUSSION) buckets containing
+    only the morning logs while the actual same-day speeches stayed in
+    the original bucket.
+    """
+    repo, db_path = fixture_repo
+    base = 1_777_700_000  # epoch s, arbitrary
+    game = Game(
+        id="g_phase_order",
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.GAME_OVER,
+        day_number=2,
+        deadline_epoch=None,
+        main_text_channel_id="c",
+        main_vc_channel_id="v",
+        heaven_channel_id=None,
+        wolves_channel_id=None,
+        created_at=base,
+        ended_at=base + 1000,
+        force_skip_pending=False,
+        discussion_mode="rounds",
+    )
+    await repo.create_game(game)
+    await repo.insert_seat(
+        game.id,
+        Seat(
+            seat_no=1,
+            display_name="A",
+            discord_user_id="u1",
+            is_llm=False,
+            persona_key=None,
+        ),
+    )
+
+    async def _log(*, day: int, phase: Phase, kind: str, text: str, t: int) -> None:
+        await repo.insert_log_public(
+            LogEntry(
+                game_id=game.id,
+                day=day,
+                phase=phase,
+                kind=kind,
+                actor_seat=None,
+                visibility="PUBLIC",
+                text=text,
+                created_at=t,
+            )
+        )
+
+    # day-1 morning + first speech, vote, then day-2 morning + speech.
+    await _log(
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        kind="PHASE_CHANGE",
+        text="夜が明けました。1 日目の議論を開始します。",
+        t=base + 10,
+    )
+    await _log(
+        day=1,
+        phase=Phase.DAY_VOTE,
+        kind="PHASE_CHANGE",
+        text="議論時間終了。投票フェイズを開始します。",
+        t=base + 100,
+    )
+    await _log(
+        day=2, phase=Phase.DAY_DISCUSSION, kind="MORNING", text="平和な朝です。", t=base + 200
+    )
+    await _log(
+        day=2,
+        phase=Phase.DAY_DISCUSSION,
+        kind="PHASE_CHANGE",
+        text="2 日目の議論を開始します。",
+        t=base + 200,
+    )
+    await _log(
+        day=2,
+        phase=Phase.DAY_VOTE,
+        kind="PHASE_CHANGE",
+        text="議論時間終了。投票フェイズを開始します。",
+        t=base + 300,
+    )
+
+    out_path = await export_game(
+        game_id=game.id,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=tmp_path / "out",
+    )
+    payload = json.loads(out_path.read_text())
+    # No phantom day-3 bucket from morning rebumping.
+    assert {(p["day"], p["phase"]) for p in payload["phases"]} == {
+        (1, "DAY_DISCUSSION"),
+        (1, "DAY_VOTE"),
+        (2, "DAY_DISCUSSION"),
+        (2, "DAY_VOTE"),
+    }
+    # And they appear in chronological order.
+    starts = [p["started_at_ms"] for p in payload["phases"]]
+    assert starts == sorted(starts)
+
+
+async def test_export_game_retags_legacy_morning_logs_from_text(
+    fixture_repo: tuple[SqliteRepo, Path],
+    tmp_path: Path,
+) -> None:
+    """A pre-fix game whose MORNING + day-start PHASE_CHANGE logs are
+    tagged with the *prior* day must still produce a correctly-ordered
+    timeline. The retagger reads the day number out of the PHASE_CHANGE
+    text ("2 日目の議論を開始") and uses it as the source of truth.
+    """
+    repo, db_path = fixture_repo
+    base = 1_777_700_000
+    game = Game(
+        id="g_phase_order_legacy",
+        guild_id="g2",
+        host_user_id="h",
+        phase=Phase.GAME_OVER,
+        day_number=2,
+        deadline_epoch=None,
+        main_text_channel_id="c",
+        main_vc_channel_id="v",
+        heaven_channel_id=None,
+        wolves_channel_id=None,
+        created_at=base,
+        ended_at=base + 1000,
+        force_skip_pending=False,
+        discussion_mode="rounds",
+    )
+    await repo.create_game(game)
+    await repo.insert_seat(
+        game.id,
+        Seat(
+            seat_no=1,
+            display_name="A",
+            discord_user_id="u1",
+            is_llm=False,
+            persona_key=None,
+        ),
+    )
+
+    async def _log(*, day: int, phase: Phase, kind: str, text: str, t: int) -> None:
+        await repo.insert_log_public(
+            LogEntry(
+                game_id=game.id,
+                day=day,
+                phase=phase,
+                kind=kind,
+                actor_seat=None,
+                visibility="PUBLIC",
+                text=text,
+                created_at=t,
+            )
+        )
+
+    # Legacy tagging: NIGHT_0 → DAY_1 morning was emitted with day=0,
+    # NIGHT_1 → DAY_2 morning was emitted with day=1. Text carries the
+    # correct N (1, 2) so the retagger can fix it on read.
+    await _log(
+        day=0,
+        phase=Phase.DAY_DISCUSSION,
+        kind="PHASE_CHANGE",
+        text="夜が明けました。1 日目の議論を開始します。",
+        t=base + 10,
+    )
+    await _log(
+        day=1,
+        phase=Phase.DAY_VOTE,
+        kind="PHASE_CHANGE",
+        text="議論時間終了。投票フェイズを開始します。",
+        t=base + 100,
+    )
+    await _log(
+        day=1, phase=Phase.DAY_DISCUSSION, kind="MORNING", text="平和な朝です。", t=base + 200
+    )
+    await _log(
+        day=1,
+        phase=Phase.DAY_DISCUSSION,
+        kind="PHASE_CHANGE",
+        text="2 日目の議論を開始します。",
+        t=base + 200,
+    )
+
+    out_path = await export_game(
+        game_id=game.id,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=tmp_path / "out",
+    )
+    payload = json.loads(out_path.read_text())
+    pairs = {(p["day"], p["phase"]) for p in payload["phases"]}
+    # The 2 日目 PHASE_CHANGE + MORNING were tagged day=1 in DB but
+    # belong to day=2. After retagging they land in (2, DAY_DISCUSSION),
+    # not (1, DAY_DISCUSSION).
+    assert (2, "DAY_DISCUSSION") in pairs
+    # And no leftover-from-misbucket (1, DAY_DISCUSSION) with only the
+    # PHASE_CHANGE row from day-1's start logs.
+    day1_disc = next(
+        p for p in payload["phases"] if p["day"] == 1 and p["phase"] == "DAY_DISCUSSION"
+    )
+    # day-1's discussion only contains the "1 日目の議論を開始" row,
+    # which the retagger leaves as day=1 (its text says so).
+    assert len(day1_disc["public_logs"]) == 1
+    assert "1 日目の議論を開始" in day1_disc["public_logs"][0]["text"]
