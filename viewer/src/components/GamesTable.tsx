@@ -1,10 +1,12 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
 import Paper from "@mui/material/Paper";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
+import type { TableCellProps } from "@mui/material/TableCell";
 import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Typography from "@mui/material/Typography";
@@ -50,47 +52,82 @@ export default function GamesTable({ games }: { games: GameSummary[] }) {
 /**
  * One row of the games-list table.
  *
- * Wraps the entire row in a Next ``<Link>`` styled to fill the row so the
- * whole strip is clickable AND retains link semantics — right-click ▶
- * "新しいタブで開く" works, screen readers see it as a link, no JS needed.
- *
- * Implementation: render ``Link`` as the ``<tr>`` via MUI's ``component``
- * prop. ``LinkProps`` carries ``href``; the ``component`` cast satisfies
- * MUI's generic without an ``as any``.
+ * Each cell wraps its content in a Next ``<Link>`` rendered as a block-level
+ * element so the entire cell area is clickable, while the ``<tr>``/``<td>``
+ * structure remains valid HTML. Wrapping the whole ``<TableRow>`` in an
+ * ``<a>`` would put the anchor between ``<tbody>`` and ``<td>`` — the parser
+ * foster-parents it out and the cells collapse into one column.
  */
 function GameRow({ game }: { game: GameSummary }) {
+  const href = `/games/${game.id}`;
   return (
-    <TableRow
-      component={Link}
-      href={`/games/${game.id}`}
-      hover
-      sx={{
-        cursor: "pointer",
-        textDecoration: "none",
-        "& > td": { borderBottom: "1px solid", borderColor: "divider" },
-      }}
-    >
-      <TableCell sx={{ fontFamily: "monospace" }}>{game.id}</TableCell>
-      <TableCell>
+    <TableRow hover sx={{ "& > td": { p: 0 } }}>
+      <LinkCell href={href} sx={{ fontFamily: "monospace" }}>
+        {game.id}
+      </LinkCell>
+      <LinkCell href={href}>
         <VictoryChip victory={game.victory} />
-      </TableCell>
-      <TableCell>
+      </LinkCell>
+      <LinkCell href={href}>
         <Chip
           size="small"
           label={game.discussion_mode}
           variant="outlined"
           sx={{ height: 22, fontFamily: "monospace" }}
         />
-      </TableCell>
-      <TableCell sx={{ fontFamily: "monospace" }}>
+      </LinkCell>
+      <LinkCell href={href} sx={{ fontFamily: "monospace" }}>
         {formatJstDate(game.created_at_ms)}
-      </TableCell>
-      <TableCell align="right">{formatDuration(game.duration_ms)}</TableCell>
-      <TableCell align="center">{game.seat_count}</TableCell>
-      <TableCell align="right">{game.llm_call_count}</TableCell>
-      <TableCell align="right">{formatTokens(game.total_tokens)}</TableCell>
-      <TableCell align="right">{formatLatency(game.total_latency_ms)}</TableCell>
+      </LinkCell>
+      <LinkCell href={href} align="right">
+        {formatDuration(game.duration_ms)}
+      </LinkCell>
+      <LinkCell href={href} align="center">
+        {game.seat_count}
+      </LinkCell>
+      <LinkCell href={href} align="right">
+        {game.llm_call_count}
+      </LinkCell>
+      <LinkCell href={href} align="right">
+        {formatTokens(game.total_tokens)}
+      </LinkCell>
+      <LinkCell href={href} align="right">
+        {formatLatency(game.total_latency_ms)}
+      </LinkCell>
     </TableRow>
+  );
+}
+
+function LinkCell({
+  href,
+  children,
+  align,
+  sx,
+}: {
+  href: string;
+  children: ReactNode;
+  align?: TableCellProps["align"];
+  sx?: TableCellProps["sx"];
+}) {
+  return (
+    <TableCell align={align}>
+      <Box
+        component={Link}
+        href={href}
+        sx={{
+          display: "block",
+          width: "100%",
+          color: "inherit",
+          textDecoration: "none",
+          px: 2,
+          py: 1,
+          textAlign: align ?? "inherit",
+          ...sx,
+        }}
+      >
+        {children}
+      </Box>
+    </TableCell>
   );
 }
 

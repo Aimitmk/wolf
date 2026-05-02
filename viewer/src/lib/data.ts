@@ -60,20 +60,53 @@ export async function listGames(): Promise<GameSummary[]> {
     .sort((a, b) => b.file_mtime_ms - a.file_mtime_ms);
 }
 
-/** Load one exported game by id, or ``null`` if the file is missing. */
+/**
+ * Load one exported game by id, or ``null`` if the file is missing.
+ *
+ * The bot writes files as ``YYYY-MM-DD_HH-MM-SS.json`` (sortable by play
+ * time, see ``services/game_export.py``) — the file name does **not**
+ * encode the internal ``game.id``. To resolve a link, fast-path on
+ * ``{gameId}.json`` (legacy / forward-compat) and otherwise scan the
+ * directory for a JSON whose ``game.id`` matches.
+ */
 export async function loadGameById(
   gameId: string,
 ): Promise<GameSample | null> {
   // Defensive — never resolve outside the games dir even if a path-traversal
   // id slips in.
   if (gameId.includes("/") || gameId.includes("..")) return null;
-  const target = path.resolve(process.cwd(), GAMES_DIR, `${gameId}.json`);
+  const exportsDir = path.resolve(process.cwd(), GAMES_DIR);
+
+  // Fast path — legacy ``{id}.json`` layout.
+  const legacy = path.join(exportsDir, `${gameId}.json`);
   try {
-    const raw = await readFile(target, "utf-8");
+    const raw = await readFile(legacy, "utf-8");
     return JSON.parse(raw) as GameSample;
+  } catch {
+    // fall through to directory scan
+  }
+
+  // Directory scan — match ``game.id`` inside each JSON.
+  let names: string[];
+  try {
+    names = await readdir(exportsDir);
   } catch {
     return null;
   }
+  const candidates = names.filter((n) => n.endsWith(".json"));
+  for (const name of candidates) {
+    const fullPath = path.join(exportsDir, name);
+    try {
+      const raw = await readFile(fullPath, "utf-8");
+      const data = JSON.parse(raw) as GameSample;
+      if (data.game.id === gameId) {
+        return data;
+      }
+    } catch {
+      // skip unreadable / malformed files
+    }
+  }
+  return null;
 }
 
 /** Load the bundled sample game (opt-in via the ``/sample`` route). */
