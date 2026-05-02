@@ -657,46 +657,23 @@ async def _run() -> None:
         if _reactive_phase_cb:
             await _reactive_phase_cb[0].try_dispatch_next(game_id)
 
-    # Mirror the voice path's structured analysis on the text channel:
-    # one Gemini call per typed message yields the same `addressed_name`
-    # / `co_claim` signal so SpeakArbiter can route a text address to
-    # the right NPC seat. Wired only when reactive_voice is enabled and a
-    # Voice LLM key is present; absent → WolfCog falls back to plain raw
-    # capture (the historical behavior).
-    text_analyzer: Any = None
-    if (
-        settings.LLM_DISCUSSION_MODE == "reactive_voice"
+    # Text channel structured analysis: one TextAnalyzer call per typed
+    # message extracts ``addressed_name`` / ``co_claim`` /
+    # ``role_callout`` so SpeakArbiter can route a text address to the
+    # right NPC seat. ``build_text_analyzer`` returns ``None`` when
+    # ``TEXT_PIPELINE=passthrough`` (or when the voice path doesn't need
+    # an analyzer either), in which case ``WolfCog`` falls back to plain
+    # raw capture. The component is the same instance used by the
+    # voice path's split pipeline below — single credential pool,
+    # decoupled from ``GAMEPLAY_LLM_*``.
+    from wolfbot.master.ingest_factory import build_text_analyzer
+
+    text_analyzer: Any = (
+        build_text_analyzer(settings)
+        if settings.LLM_DISCUSSION_MODE == "reactive_voice"
         and settings.MASTER_NPC_PSK is not None
-    ):
-        # Pick the analyzer that matches the voice path. When the user has
-        # ``VOICE_STT_PROVIDER=groq`` the voice ingest already splits STT
-        # (Groq Whisper) from the analyzer step (xAI Grok via the
-        # gameplay LLM key), and the text path should follow the same
-        # split — otherwise typed messages keep round-tripping through
-        # Gemini and 429 the moment that key gets rate-limited (the bug
-        # observed in game 58a3243a9fb8 where every ``role_callout`` came
-        # back NULL because Gemini was throttled).
-        if (
-            settings.VOICE_STT_PROVIDER == "groq"
-            and settings.GAMEPLAY_LLM_API_KEY is not None
-        ):
-            from wolfbot.master.state.text_analyzer import OpenAICompatibleTextAnalyzer
-
-            analyzer_base_url = (
-                settings.GAMEPLAY_LLM_BASE_URL or "https://api.x.ai/v1"
-            )
-            text_analyzer = OpenAICompatibleTextAnalyzer(
-                api_key=settings.GAMEPLAY_LLM_API_KEY.get_secret_value(),
-                model=settings.GAMEPLAY_LLM_MODEL,
-                base_url=analyzer_base_url,
-            )
-        elif settings.VOICE_LLM_API_KEY is not None:
-            from wolfbot.master.state.text_analyzer import GeminiTextAnalyzer
-
-            text_analyzer = GeminiTextAnalyzer(
-                api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
-                model=settings.VOICE_LLM_MODEL,
-            )
+        else None
+    )
 
     cog = WolfCog(
         bot=bot,
@@ -1201,23 +1178,16 @@ async def _run() -> None:
         # Instead of a separate voice-ingest process, Master joins VC itself
         # and pipes audio through VoiceIngestService → DirectMasterIngestionClient
         # → arbiter/ingest_service, all in-process.
-        # Voice STT is wired iff a credential exists for the chosen
-        # provider. Gemini path needs ``VOICE_LLM_API_KEY``; Groq path
-        # needs ``GROQ_STT_API_KEY`` plus an OpenAI-compatible analyzer
-        # (gameplay key reused).
-        _voice_stt_credentialed = (
-            (settings.VOICE_STT_PROVIDER == "gemini" and settings.VOICE_LLM_API_KEY is not None)
-            or (
-                settings.VOICE_STT_PROVIDER == "groq"
-                and settings.GROQ_STT_API_KEY is not None
-                and settings.GAMEPLAY_LLM_API_KEY is not None
-            )
+        # The pipeline shape (audio_analyzer vs stt_then_text_analyzer)
+        # and component credentials live on MasterSettings; the factory
+        # returns ``None`` when ``VOICE_PIPELINE=disabled``.
+        from wolfbot.master.ingest_factory import (
+            build_voice_ingest_provider,
+            voice_ingest_summary,
         )
-        if _voice_stt_credentialed:
-            from wolfbot.master.voice.stt_service import (
-                GeminiAudioAnalyzer,
-                GroqWhisperAudioAnalyzer,
-            )
+
+        voice_llm: Any = build_voice_ingest_provider(settings)
+        if voice_llm is not None:
             from wolfbot.master.voice.voice_ingest_client import DirectMasterIngestionClient
             from wolfbot.master.voice.voice_ingest_service import (
                 VoiceIngestConfig,
@@ -1256,30 +1226,6 @@ async def _run() -> None:
                 on_stt_failed=_direct_stt_failed,
             )
 
-            voice_llm: Any
-            if settings.VOICE_STT_PROVIDER == "groq":
-                # Reuse gameplay key for the analyzer step. Validator
-                # already guarantees both keys are present.
-                assert settings.GROQ_STT_API_KEY is not None
-                assert settings.GAMEPLAY_LLM_API_KEY is not None
-                analyzer_base_url = (
-                    settings.GAMEPLAY_LLM_BASE_URL or "https://api.x.ai/v1"
-                )
-                voice_llm = GroqWhisperAudioAnalyzer(
-                    groq_api_key=settings.GROQ_STT_API_KEY.get_secret_value(),
-                    groq_model=settings.GROQ_STT_MODEL,
-                    groq_base_url=settings.GROQ_STT_BASE_URL,
-                    analyzer_api_key=settings.GAMEPLAY_LLM_API_KEY.get_secret_value(),
-                    analyzer_model=settings.GAMEPLAY_LLM_MODEL,
-                    analyzer_base_url=analyzer_base_url,
-                )
-            else:
-                assert settings.VOICE_LLM_API_KEY is not None
-                voice_llm = GeminiAudioAnalyzer(
-                    api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
-                    model=settings.VOICE_LLM_MODEL,
-                )
-
             # NpcRegistryView adapter: InMemoryNpcRegistry → NpcRegistryView
             class _RegistryViewAdapter:
                 def is_npc(self, discord_user_id: str) -> bool:
@@ -1316,17 +1262,7 @@ async def _run() -> None:
                 ),
                 roster_lookup=_roster_lookup,
             )
-            if settings.VOICE_STT_PROVIDER == "groq":
-                log.info(
-                    "integrated voice-ingest wired (provider=groq stt_model=%s analyzer=%s)",
-                    settings.GROQ_STT_MODEL,
-                    settings.GAMEPLAY_LLM_MODEL,
-                )
-            else:
-                log.info(
-                    "integrated voice-ingest wired (provider=gemini voice_llm_model=%s)",
-                    settings.VOICE_LLM_MODEL,
-                )
+            log.info("integrated voice-ingest wired (%s)", voice_ingest_summary(settings))
 
     @bot.event
     async def on_ready() -> None:

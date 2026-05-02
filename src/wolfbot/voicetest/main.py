@@ -81,28 +81,29 @@ class VoicetestSettings(BaseSettings):
     # syllables triggered by the silence-padding playback). Real
     # utterances are almost always ≥300ms.
     VOICETEST_MIN_DURATION_MS: int = 300
-    # When true, run kept segments through the same STT stack the
-    # production master uses (selected by ``VOICE_STT_PROVIDER`` -
-    # gemini multimodal *or* Groq Whisper + xAI analyzer). When false
-    # (default), STT is stubbed and only the WAV is dumped.
+    # When true, run kept segments through the same voice-ingest stack
+    # the production master uses (the pipeline shape is selected by
+    # ``VOICE_PIPELINE`` on .env.master). When false (default), STT is
+    # stubbed and only the WAV is dumped.
     VOICETEST_USE_STT: bool = False
     LOG_LEVEL: str = "INFO"
 
-    # ----- production-equivalent STT credentials -----
-    # These are the same keys the master process reads from
-    # ``.env.master``. ``_run`` loads ``.env.master`` first and the
-    # voicetest env file second (with override), so voicetest
-    # transparently reuses whatever STT provider production is set up
-    # for - no duplication of API keys in the voicetest env.
-    VOICE_STT_PROVIDER: str = "gemini"
-    VOICE_LLM_API_KEY: SecretStr | None = None
-    VOICE_LLM_MODEL: str = "gemini-2.0-flash-lite"
-    GROQ_STT_API_KEY: SecretStr | None = None
-    GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
-    GROQ_STT_BASE_URL: str = "https://api.groq.com/openai/v1"
-    GAMEPLAY_LLM_API_KEY: SecretStr | None = None
-    GAMEPLAY_LLM_MODEL: str = "grok-4-1-fast"
-    GAMEPLAY_LLM_BASE_URL: str | None = None
+    # ----- production-equivalent ingest credentials -----
+    # These mirror the new structural settings on ``MasterSettings``.
+    # ``_run`` loads ``.env.master`` first and the voicetest env file
+    # second (with override), so voicetest transparently reuses whatever
+    # voice / text pipeline production is configured for — no
+    # duplication of API keys in the voicetest env.
+    VOICE_PIPELINE: str = "disabled"
+    AUDIO_ANALYZER_API_KEY: SecretStr | None = None
+    AUDIO_ANALYZER_MODEL: str = "gemini-2.0-flash-lite"
+    STT_API_KEY: SecretStr | None = None
+    STT_MODEL: str = "whisper-large-v3-turbo"
+    STT_BASE_URL: str = "https://api.groq.com/openai/v1"
+    TEXT_ANALYZER_PROVIDER: str = "xai"
+    TEXT_ANALYZER_API_KEY: SecretStr | None = None
+    TEXT_ANALYZER_MODEL: str = "grok-4-1-fast"
+    TEXT_ANALYZER_BASE_URL: str | None = None
     # Pre-STT silence gate, mirrored from MasterSettings so the voice
     # path uses the same threshold as production. ``0`` disables.
     VOICE_PRE_STT_MIN_RMS: int = 0
@@ -223,65 +224,74 @@ def _make_live_vc_roster_lookup(
 
 
 def _build_production_stt(settings: VoicetestSettings):  # type: ignore[no-untyped-def]
-    """Construct the same STT instance the production master uses.
+    """Construct the same voice-ingest provider the production master uses.
 
-    Selected by ``VOICE_STT_PROVIDER`` (gemini / groq) loaded from
-    ``.env.master``. Raises ``SystemExit`` with a precise hint when
-    the chosen provider's credentials are missing - the operator
-    should fix the production env, not duplicate keys here.
+    The pipeline shape is selected by ``VOICE_PIPELINE`` on .env.master
+    (``audio_analyzer`` or ``stt_then_text_analyzer``). Raises
+    ``SystemExit`` with a precise hint when the chosen pipeline's
+    credentials are missing — the operator should fix the production
+    env, not duplicate keys here.
     """
-    provider = (settings.VOICE_STT_PROVIDER or "gemini").lower()
-    if provider == "groq":
-        if settings.GROQ_STT_API_KEY is None:
+    pipeline = (settings.VOICE_PIPELINE or "disabled").lower()
+    if pipeline == "stt_then_text_analyzer":
+        if settings.STT_API_KEY is None:
             raise SystemExit(
-                "VOICETEST_USE_STT=true with VOICE_STT_PROVIDER=groq "
-                "requires GROQ_STT_API_KEY (set in .env.master)."
+                "VOICETEST_USE_STT=true with "
+                "VOICE_PIPELINE=stt_then_text_analyzer requires "
+                "STT_API_KEY (set in .env.master)."
             )
-        if settings.GAMEPLAY_LLM_API_KEY is None:
+        if settings.TEXT_ANALYZER_API_KEY is None:
             raise SystemExit(
-                "VOICETEST_USE_STT=true with VOICE_STT_PROVIDER=groq "
-                "requires GAMEPLAY_LLM_API_KEY for the analyzer step "
+                "VOICETEST_USE_STT=true with "
+                "VOICE_PIPELINE=stt_then_text_analyzer requires "
+                "TEXT_ANALYZER_API_KEY for the analyzer step "
                 "(set in .env.master)."
             )
+        from wolfbot.master.ingest_factory import (
+            _openai_compat_default_base_url,
+        )
         from wolfbot.master.voice.stt_service import GroqWhisperAudioAnalyzer
 
         analyzer_base_url = (
-            settings.GAMEPLAY_LLM_BASE_URL or "https://api.x.ai/v1"
+            settings.TEXT_ANALYZER_BASE_URL
+            or _openai_compat_default_base_url(settings.TEXT_ANALYZER_PROVIDER)
         )
         log.info(
-            "voicetest_stt=ON provider=groq whisper=%s analyzer=%s @ %s",
-            settings.GROQ_STT_MODEL,
-            settings.GAMEPLAY_LLM_MODEL,
+            "voicetest_stt=ON pipeline=stt_then_text_analyzer stt=%s analyzer=%s @ %s",
+            settings.STT_MODEL,
+            settings.TEXT_ANALYZER_MODEL,
             analyzer_base_url,
         )
         return GroqWhisperAudioAnalyzer(
-            groq_api_key=settings.GROQ_STT_API_KEY.get_secret_value(),
-            groq_model=settings.GROQ_STT_MODEL,
-            groq_base_url=settings.GROQ_STT_BASE_URL,
-            analyzer_api_key=settings.GAMEPLAY_LLM_API_KEY.get_secret_value(),
-            analyzer_model=settings.GAMEPLAY_LLM_MODEL,
+            groq_api_key=settings.STT_API_KEY.get_secret_value(),
+            groq_model=settings.STT_MODEL,
+            groq_base_url=settings.STT_BASE_URL,
+            analyzer_api_key=settings.TEXT_ANALYZER_API_KEY.get_secret_value(),
+            analyzer_model=settings.TEXT_ANALYZER_MODEL,
             analyzer_base_url=analyzer_base_url,
         )
 
-    if provider == "gemini":
-        if settings.VOICE_LLM_API_KEY is None:
+    if pipeline == "audio_analyzer":
+        if settings.AUDIO_ANALYZER_API_KEY is None:
             raise SystemExit(
-                "VOICETEST_USE_STT=true with VOICE_STT_PROVIDER=gemini "
-                "requires VOICE_LLM_API_KEY (set in .env.master)."
+                "VOICETEST_USE_STT=true with VOICE_PIPELINE=audio_analyzer "
+                "requires AUDIO_ANALYZER_API_KEY (set in .env.master)."
             )
         from wolfbot.master.voice.stt_service import GeminiAudioAnalyzer
 
         log.info(
-            "voicetest_stt=ON provider=gemini model=%s",
-            settings.VOICE_LLM_MODEL,
+            "voicetest_stt=ON pipeline=audio_analyzer model=%s",
+            settings.AUDIO_ANALYZER_MODEL,
         )
         return GeminiAudioAnalyzer(
-            api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
-            model=settings.VOICE_LLM_MODEL,
+            api_key=settings.AUDIO_ANALYZER_API_KEY.get_secret_value(),
+            model=settings.AUDIO_ANALYZER_MODEL,
         )
 
     raise SystemExit(
-        f"Unknown VOICE_STT_PROVIDER={provider!r} - expected 'gemini' or 'groq'"
+        f"VOICETEST_USE_STT=true requires VOICE_PIPELINE in "
+        f"{{audio_analyzer, stt_then_text_analyzer}} (got {pipeline!r}). "
+        "Set VOICE_PIPELINE in .env.master and re-run."
     )
 
 
@@ -380,8 +390,9 @@ def _install_silence_gate(
 
 
 async def _run() -> None:
-    # Load production credentials first so STT keys (VOICE_LLM_API_KEY,
-    # GROQ_STT_API_KEY, GAMEPLAY_LLM_API_KEY, etc.) come through without
+    # Load production credentials first so ingest keys
+    # (AUDIO_ANALYZER_API_KEY, STT_API_KEY, TEXT_ANALYZER_API_KEY,
+    # GAMEPLAY_LLM_API_KEY, etc.) come through without
     # duplication. The voicetest-specific file is loaded second with
     # ``override=True`` so any voicetest-only setting wins - including
     # the discord token, which is intentionally a different bot from

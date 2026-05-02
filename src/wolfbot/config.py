@@ -14,6 +14,49 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from wolfbot.llm.decider_config import LLMDeciderConfig, LLMProvider
 
+# Pipeline-shape literals ────────────────────────────────────────────────
+# Kept at module scope because they participate in cross-field validators
+# and the test suite imports them directly when constructing minimal
+# Settings instances.
+
+VoicePipeline = Literal["audio_analyzer", "stt_then_text_analyzer", "disabled"]
+"""How human voice is converted into a structured ``SpeechEvent``:
+
+* ``audio_analyzer`` — single multimodal call (audio → transcript +
+  structured fields). Currently only Gemini Flash supports this shape.
+* ``stt_then_text_analyzer`` — two-step pipeline. ``Stt`` transcribes
+  audio (Groq Whisper). ``TextAnalyzer`` extracts structured fields from
+  the transcript. The same ``TextAnalyzer`` instance is shared with the
+  text channel path so they hit one credential pool.
+* ``disabled`` — Master does not join VC, no voice ingest. Used by
+  ``rounds`` mode and by reactive_voice setups that only have NPCs
+  speaking (no human voice).
+"""
+
+TextPipeline = Literal["text_analyzer", "passthrough"]
+"""How a typed text-channel utterance becomes a ``SpeechEvent``:
+
+* ``text_analyzer`` — one ``TextAnalyzer`` call per typed message
+  extracts ``addressed_name`` / ``co_claim`` / ``role_callout`` so
+  ``SpeakArbiter`` can route NPC responses to the addressed seat.
+* ``passthrough`` — typed messages produce ``SpeechEvent`` rows with
+  all structured fields ``None``. ``SpeakArbiter`` falls back to LRU
+  rotation only.
+"""
+
+AudioAnalyzerProvider = Literal["gemini"]
+"""Backends that accept audio input and return transcript + structured
+analysis in one hop. Only Gemini Flash for now (xAI / Groq don't expose
+audio-in chat-completion endpoints)."""
+
+SttProvider = Literal["groq"]
+"""Backends that transcribe audio to text only. Groq Whisper for now."""
+
+TextAnalyzerProvider = Literal["xai", "deepseek", "openai", "gemini"]
+"""Backends that accept text input and return structured analysis JSON.
+``xai``/``deepseek``/``openai`` use the shared OpenAI Chat Completions
+schema; ``gemini`` uses the AI Studio REST API."""
+
 
 class MasterSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -42,12 +85,6 @@ class MasterSettings(BaseSettings):
     #     the discussion turns are produced by NPC bot processes via
     #     `wolfbot.npc.*` and use NPC_LLM_* there — but votes / night
     #     actions still flow through this Gameplay LLM.
-    #
-    # The provider switch is shared with NPC bots (same three providers,
-    # same field semantics, just a different env-var prefix).  The two
-    # roles can target completely different providers / models — e.g.
-    # Gameplay on Vertex Gemini for deeper reasoning, NPC on xAI Grok
-    # for cheap fast utterances.
     GAMEPLAY_LLM_PROVIDER: LLMProvider = "xai"
 
     # xAI / DeepSeek / any OpenAI-compatible endpoint.
@@ -72,46 +109,62 @@ class MasterSettings(BaseSettings):
     MASTER_WS_LISTEN: str = "127.0.0.1:8800"
     MASTER_NPC_PSK: SecretStr | None = None
 
-    # ── Voice STT provider switch ─────────────────────────────────────
-    # ``gemini`` (default, legacy) — single multimodal call to Gemini
-    # Flash that does transcription + structured analysis in one hop.
-    # AI Studio's free-tier RPM is tight enough that a typical game
-    # exhausts it almost immediately (observed 2026-04-28: every
-    # segment 429'd).
-    #
-    # ``groq`` — two-step pipeline: Groq Whisper transcribes audio;
-    # the analyzer LLM (xAI Grok by default, reusing
-    # ``GAMEPLAY_LLM_*``) extracts CO claim, vote target,
-    # ``addressed_name``, summary from the transcript. Whisper-large-v3
-    # on Groq is ~$0.04-0.111/audio-hour with much higher RPM headroom.
-    VOICE_STT_PROVIDER: Literal["gemini", "groq"] = "gemini"
+    # ── Voice / Text ingest pipeline shapes ────────────────────────────
+    # Two orthogonal switches define the structural shape of human-input
+    # ingestion. Each pipeline is composed from independent components
+    # (AudioAnalyzer / Stt / TextAnalyzer) configured below. Defaults are
+    # ``disabled``/``passthrough`` so a fresh checkout boots without
+    # touching VC or burning analyzer tokens; reactive_voice operators
+    # opt in explicitly.
+    VOICE_PIPELINE: VoicePipeline = "disabled"
+    TEXT_PIPELINE: TextPipeline = "passthrough"
 
-    # ── Voice LLM (Gemini path) ───────────────────────────────────────
-    # The multimodal LLM that *understands human voice* in VC — single
-    # API call returns transcription + summary + CO detection + vote
-    # target extraction.  This is a separate role from the Gameplay LLM
-    # because it needs audio input (Gemini Flash via the AI Studio REST
-    # API; not the OpenAI-compatible chat-completions surface).
-    VOICE_LLM_API_KEY: SecretStr | None = None
-    VOICE_LLM_MODEL: str = "gemini-2.0-flash-lite"
+    # ── AudioAnalyzer (audio → transcript + structured) ───────────────
+    # Used only when ``VOICE_PIPELINE=audio_analyzer``.  Single multimodal
+    # call: cheap and lowest-latency, but each game segment shares the
+    # same RPM bucket as any text-channel call that piggy-backs on the
+    # same key — keep the credential isolated unless you intentionally
+    # want shared throttling.
+    AUDIO_ANALYZER_PROVIDER: AudioAnalyzerProvider = "gemini"
+    AUDIO_ANALYZER_API_KEY: SecretStr | None = None
+    AUDIO_ANALYZER_MODEL: str = "gemini-2.0-flash-lite"
 
-    # ── Groq Whisper STT (groq path) ──────────────────────────────────
-    # Required when ``VOICE_STT_PROVIDER=groq``. The analyzer step
-    # piggy-backs on ``GAMEPLAY_LLM_*`` (same xAI key + model), so no
-    # separate analyzer config is needed in the typical setup.
+    # ── Stt (audio → transcript) ──────────────────────────────────────
+    # Used only when ``VOICE_PIPELINE=stt_then_text_analyzer``.  Pairs
+    # with the ``TEXT_ANALYZER_*`` block to form a two-step voice path.
+    # ``whisper-large-v3-turbo`` is the cheapest multilingual Whisper
+    # variant on Groq that still handles Japanese well; switch to
+    # ``whisper-large-v3`` for max accuracy at ~3x the cost.
+    STT_PROVIDER: SttProvider = "groq"
+    STT_API_KEY: SecretStr | None = None
+    STT_MODEL: str = "whisper-large-v3-turbo"
+    STT_BASE_URL: str = "https://api.groq.com/openai/v1"
+
+    # ── TextAnalyzer (text → structured) ──────────────────────────────
+    # Used by ``TEXT_PIPELINE=text_analyzer`` (per typed message) AND by
+    # ``VOICE_PIPELINE=stt_then_text_analyzer`` (per voice segment, after
+    # STT). Same component, single credential pool, deliberately
+    # decoupled from ``GAMEPLAY_LLM_*`` so Gameplay can target a
+    # heavyweight reasoning model while text analysis hits a cheap one.
     #
-    # ``GROQ_STT_MODEL`` defaults to ``whisper-large-v3-turbo`` — the
-    # cheapest multilingual Whisper variant on Groq that still handles
-    # Japanese well; switch to ``whisper-large-v3`` for max accuracy at
-    # ~3x the cost.
-    GROQ_STT_API_KEY: SecretStr | None = None
-    GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
-    GROQ_STT_BASE_URL: str = "https://api.groq.com/openai/v1"
+    # Provider gating:
+    #   * ``xai`` / ``deepseek`` / ``openai`` use the shared OpenAI Chat
+    #     Completions schema and require ``TEXT_ANALYZER_API_KEY``.
+    #   * ``gemini`` uses the AI Studio REST API and requires
+    #     ``TEXT_ANALYZER_API_KEY`` (an AIza-format key). Vertex auth is
+    #     not supported on this path because the analyzer uses the
+    #     ``v1beta/models/{m}:generateContent?key=...`` shape.
+    TEXT_ANALYZER_PROVIDER: TextAnalyzerProvider = "xai"
+    TEXT_ANALYZER_API_KEY: SecretStr | None = None
+    TEXT_ANALYZER_MODEL: str = "grok-4-1-fast"
+    # Optional override for OpenAI-compatible endpoints (vLLM, Ollama,
+    # etc.). Empty / None → provider default base URL.
+    TEXT_ANALYZER_BASE_URL: str | None = None
 
     # ── Pre-STT silence gate ──────────────────────────────────────────
     # Discord's speaking-start fires on any audio above a low threshold
     # (breathing, keyboard, room hum). With ``SilenceGeneratorSink``
-    # padding, this would burn one Groq + one xAI analyzer call for
+    # padding, this would burn one Stt + one TextAnalyzer call for
     # every such non-speech burst. The gate suppresses the STT call
     # (and emits ``stt_failed reason=pre_stt_silence_gate`` so the
     # arbiter still finalises the segment) when the buffer is too
@@ -158,21 +211,65 @@ class MasterSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _require_voice_stt_provider_key(self) -> MasterSettings:
-        if self.VOICE_STT_PROVIDER == "groq" and self.GROQ_STT_API_KEY is None:
-            raise ValueError("VOICE_STT_PROVIDER=groq requires GROQ_STT_API_KEY to be set")
-        # The Groq path's analyzer step reuses GAMEPLAY_LLM_*. The xAI/DeepSeek
-        # case is already covered above; the Gemini case isn't fit for the
-        # OpenAI-compatible analyzer call shape, so block that combo loud and
-        # early rather than failing per-segment at runtime.
-        if self.VOICE_STT_PROVIDER == "groq" and self.GAMEPLAY_LLM_PROVIDER == "gemini":
+    def _require_pipeline_components(self) -> MasterSettings:
+        """Enforce credential presence given the chosen pipeline shape.
+
+        Each component check fires only when the pipeline actually
+        instantiates that component. Operators with
+        ``VOICE_PIPELINE=disabled`` and ``TEXT_PIPELINE=passthrough``
+        boot without any analyzer credential at all (rounds-mode
+        default).
+        """
+        # AudioAnalyzer is required only by the multimodal voice path.
+        if (
+            self.VOICE_PIPELINE == "audio_analyzer"
+            and self.AUDIO_ANALYZER_API_KEY is None
+        ):
             raise ValueError(
-                "VOICE_STT_PROVIDER=groq's analyzer step reuses GAMEPLAY_LLM_* "
-                "but requires an OpenAI-compatible provider (xai or deepseek), "
-                f"not {self.GAMEPLAY_LLM_PROVIDER}. "
-                "Set VOICE_STT_PROVIDER=gemini (uses VOICE_LLM_API_KEY) when "
-                "switching gameplay to Gemini."
+                "VOICE_PIPELINE=audio_analyzer requires "
+                "AUDIO_ANALYZER_API_KEY to be set"
             )
+
+        # Stt is required only by the split voice path.
+        if (
+            self.VOICE_PIPELINE == "stt_then_text_analyzer"
+            and self.STT_API_KEY is None
+        ):
+            raise ValueError(
+                "VOICE_PIPELINE=stt_then_text_analyzer requires "
+                "STT_API_KEY to be set"
+            )
+
+        # TextAnalyzer is required by EITHER the text path OR the split
+        # voice path (which composes Stt + TextAnalyzer).
+        text_analyzer_required = (
+            self.TEXT_PIPELINE == "text_analyzer"
+            or self.VOICE_PIPELINE == "stt_then_text_analyzer"
+        )
+        if text_analyzer_required and self.TEXT_ANALYZER_API_KEY is None:
+            raise ValueError(
+                "TEXT_ANALYZER_API_KEY must be set when "
+                "TEXT_PIPELINE=text_analyzer or "
+                "VOICE_PIPELINE=stt_then_text_analyzer"
+            )
+
+        # The split voice path's analyzer step calls an OpenAI-compatible
+        # /chat/completions endpoint (see GroqWhisperAudioAnalyzer). The
+        # AI Studio REST shape used by the gemini text analyzer doesn't
+        # fit, so block the combo at boot rather than failing per
+        # segment.
+        if (
+            self.VOICE_PIPELINE == "stt_then_text_analyzer"
+            and self.TEXT_ANALYZER_PROVIDER == "gemini"
+        ):
+            raise ValueError(
+                "VOICE_PIPELINE=stt_then_text_analyzer composes Stt with "
+                "an OpenAI-compatible TextAnalyzer; TEXT_ANALYZER_PROVIDER="
+                "gemini is not supported on that path. Either set "
+                "TEXT_ANALYZER_PROVIDER to xai/deepseek/openai or switch "
+                "VOICE_PIPELINE to audio_analyzer."
+            )
+
         return self
 
     def apply_phase_durations(self) -> None:

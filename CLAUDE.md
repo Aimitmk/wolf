@@ -54,9 +54,25 @@ Two env files, one per process. The Gameplay LLM (Master) and the NPC speech LLM
   - `GAMEPLAY_LLM_VERTEX_PROJECT` — GCP project ID. **Required when provider is `gemini`**. Credentials come from ADC, not from this var. Empty string is rejected at boot.
   - `GAMEPLAY_LLM_VERTEX_LOCATION` — default `global`. **Gemini-only.**
   - `GAMEPLAY_LLM_THINKING_LEVEL` — `minimal` / `low` / `medium` / `high` (default `high`). **Gemini-only.**
-- **Voice LLM** — separate role. The multimodal LLM that *understands human voice* — transcription + summary + CO detection + vote target extraction in one call. Default targets Google Gemini Flash via the AI Studio REST API; needed only in reactive_voice mode when voice-ingest is active.
-  - `VOICE_LLM_API_KEY` — required when `MASTER_NPC_PSK` is set and you want voice-ingest active. (SecretStr)
-  - `VOICE_LLM_MODEL` — default `gemini-2.0-flash-lite`.
+- **Voice / Text ingest pipelines** — two orthogonal switches define how human speech (voice in VC, typed in main text channel) becomes a structured `SpeechEvent` with `addressed_seat_no` / `co_declaration` / `role_callout`. The pipelines are composed from three independent components — **AudioAnalyzer** (audio → transcript + structured), **Stt** (audio → transcript), **TextAnalyzer** (text → structured) — each configured with its own credential block so changing the voice backend can never accidentally drag the text path along (the bug fixed in commit pre-2026-05-02 where `VOICE_STT_PROVIDER=gemini` silently routed all typed messages through the Gemini key and 429-throttled them). Validators on `MasterSettings` only require credentials for components the chosen pipeline actually instantiates, so a rounds-mode boot needs none of these set.
+  - `VOICE_PIPELINE` — `audio_analyzer` (one multimodal call) / `stt_then_text_analyzer` (Stt + TextAnalyzer composed) / `disabled` (default; Master does not join VC). Only the multimodal path is currently implemented for `AUDIO_ANALYZER_PROVIDER=gemini`; the split path requires an OpenAI-compatible TextAnalyzer.
+  - `TEXT_PIPELINE` — `text_analyzer` (one TextAnalyzer call per typed message) / `passthrough` (default; structured fields stay null, SpeakArbiter falls back to LRU rotation).
+  - **AudioAnalyzer block** (used iff `VOICE_PIPELINE=audio_analyzer`):
+    - `AUDIO_ANALYZER_PROVIDER` — `gemini` (only supported value today; xAI/Groq lack audio-in chat-completion endpoints).
+    - `AUDIO_ANALYZER_API_KEY` (SecretStr) — AI Studio key.
+    - `AUDIO_ANALYZER_MODEL` — default `gemini-2.0-flash-lite`.
+  - **Stt block** (used iff `VOICE_PIPELINE=stt_then_text_analyzer`):
+    - `STT_PROVIDER` — `groq` (only supported value today).
+    - `STT_API_KEY` (SecretStr).
+    - `STT_MODEL` — default `whisper-large-v3-turbo`.
+    - `STT_BASE_URL` — default `https://api.groq.com/openai/v1`.
+  - **TextAnalyzer block** (used iff `TEXT_PIPELINE=text_analyzer` OR `VOICE_PIPELINE=stt_then_text_analyzer`; one instance shared across both paths):
+    - `TEXT_ANALYZER_PROVIDER` — `xai` (default) / `deepseek` / `openai` / `gemini`. The first three share the OpenAI Chat Completions surface; `gemini` uses the AI Studio REST API. The split voice path rejects `TEXT_ANALYZER_PROVIDER=gemini` at boot because `GroqWhisperAudioAnalyzer` only composes with the OpenAI-compatible analyzer shape.
+    - `TEXT_ANALYZER_API_KEY` (SecretStr).
+    - `TEXT_ANALYZER_MODEL` — default `grok-4-1-fast`.
+    - `TEXT_ANALYZER_BASE_URL` — optional override for vLLM / Ollama / etc.; empty = provider default.
+
+  Component construction lives in `src/wolfbot/master/ingest_factory.py` (`build_text_analyzer` / `build_voice_ingest_provider`); `main.py` calls each helper exactly once and the returned instances are wired into `WolfCog.text_analyzer` and `VoiceIngestService.stt` respectively. Decoupling from `GAMEPLAY_LLM_*` is intentional — it lets Gameplay target a heavyweight reasoning model while text/audio analysis hits a cheap high-RPM one.
 
 **NPC bot** (`envs/npc/.env.<persona>`, one file per persona — see committed `envs/npc/.env.<persona>.example` templates plus [envs/npc/README.md](envs/npc/README.md)) — loaded by `src/wolfbot/npc/config.py::NpcSettings`, instantiated once per worker in `wolfbot.npc.main`. **Each NPC bot process is bound to exactly one persona at startup** (`NPC_PERSONA_KEY`); NPC bots are not interchangeable. Required fields:
 
