@@ -139,6 +139,9 @@ _RESPONSE_SCHEMA: dict[str, object] = {
 }
 
 
+_NPC_SPEECH_SYSTEM_TEMPLATE = "npc/speech_system"
+
+
 def _build_system(
     persona: Persona,
     max_chars: int,
@@ -148,108 +151,44 @@ def _build_system(
 ) -> str:
     """Build the NPC's system prompt.
 
-    Mirrors rounds-mode `build_system_prompt` for the persona-shaping blocks
-    (`build_speech_profile_block`, `build_judgment_profile_block`) so the
-    reactive_voice NPC carries the same character data — `narration_mode`,
-    `address_style`, `forbidden_overuse`, the 5 judgment axes, etc. —
-    instead of the small subset the historical NPC prompt sent.
+    Body lives in `prompts/templates/npc/speech_system.md`. This wrapper
+    fills the dynamic placeholders:
 
-    `role` + `role_strategy` are optional: when Master sends them on the
-    SpeakRequest, the NPC sees its role and the role-specific strategy
-    block. Older Master builds that don't send them produce a prompt that
-    silently omits the role section (back-compat).
+    - `display_name`, `style_guide` (persona literals)
+    - `speech_profile_block`, `judgment_profile_block` (rendered Python
+      blocks — kept programmatic because they iterate persona axes)
+    - `game_rules_block` (also a template, see
+      :func:`wolfbot.llm.prompt_builder._build_game_rules_block`)
+    - `role` + `role_strategy` (optional; the template's `{{#if}}`
+      conditionals omit those sections cleanly when Master doesn't
+      send them)
+    - `max_chars` (length cap injected twice in the output rules)
 
-    Game-rules block: rounds-mode injects ``_build_game_rules_block()``
-    via the markdown template (``{game_rules_block}`` placeholder) so
-    the gameplay LLM sees the canonical 30+ rule list (NIGHT_0 has no
-    attack/guard, day-1 single-target seer rule, 黒/白 binary, count
-    integrity, single-CO trust, etc.). The reactive_voice NPC builds
-    its prompt programmatically here, and historically *omitted* the
-    block entirely — meaning every prompt rule edit to
-    ``prompt_builder._build_game_rules_block`` since reactive_voice
-    landed has only affected the gameplay LLM (votes/night actions),
-    never the persona LLM that actually speaks. Game ``8ccc86215e97``
-    surfaced the bug: Rakio (knight) day-1 falsely claimed "I guarded
-    someone last night" (NIGHT_0 has no guard), Yuriko (wolf) day-1
-    fake-CO'd seer with **two** results in one morning ("シゲミチ村人
-    確定" + "ステラ人狼確定") — both forbidden by rules that simply
-    weren't in the prompt. Injecting the block here closes the gap so
-    every NPC sees the same canonical ruleset.
+    Mirrors rounds-mode `build_system_prompt` for the persona-shaping
+    blocks so the reactive_voice NPC carries the same character data —
+    `narration_mode`, `address_style`, `forbidden_overuse`, the 5
+    judgment axes, etc. — instead of the small subset the historical
+    NPC prompt sent.
+
+    Game-rules block: was historically *omitted* from this NPC prompt
+    (only the gameplay LLM saw it), so prompt-rule edits silently
+    only affected votes/night actions. Game ``8ccc86215e97`` surfaced
+    the bug: Rakio (knight) day-1 falsely claimed "I guarded someone
+    last night" (NIGHT_0 has no guard), Yuriko (wolf) day-1 fake-CO'd
+    seer with **two** results in one morning — both forbidden by
+    rules that simply weren't in the prompt. Injecting the block
+    closes the gap so every NPC sees the same canonical ruleset.
     """
-    role_block = ""
-    if role:
-        role_block = f"## あなたの役職\nあなたの役職は『{role}』です。役職に見える情報だけを根拠にしてください。\n\n"
-    strategy_block = ""
-    if role_strategy:
-        strategy_block = f"## 役職別の戦術ヒント\n{role_strategy}\n\n"
-    return (
-        "あなたは人狼ゲームに参加中のプレイヤーです。\n"
-        f"キャラクター名: {persona.display_name}\n"
-        f"性格: {persona.style_guide}\n\n"
-        f"## 話法\n{build_speech_profile_block(persona)}\n\n"
-        f"## 判断のクセ\n{build_judgment_profile_block(persona)}\n\n"
-        f"## ゲームルール\n{_build_game_rules_block()}\n\n"
-        f"{role_block}"
-        f"{strategy_block}"
-        "## 出力ルール\n"
-        "- 日本語のみ。メタ発言禁止。AIであることに言及しない。\n"
-        f"- `text` は {max_chars} 文字以内の短い発言。"
-        f"上限ぎりぎりまで埋めようとせず、必ず文を最後まで言い切ること。"
-        f"句読点や用言の途中で終わらないようにし、{max_chars} 文字に収めるためなら"
-        "内容を削ってでも完結した文にする。\n"
-        "- 発言しない場合は intent を `skip`、text を空文字にする。\n"
-        "- `used_logic_ids` には参考にした logic candidate の id を入れる。\n"
-        "- **`text` 内で人狼用語(メタ語彙)を使わない。** 内部の思考では使ってよいが、"
-        "実際に喋る発話は素朴な日本語にする。\n"
-        "  禁止例: 「CO」「占いCO」「霊媒CO」「騎士CO」「黒判定」「白判定」"
-        "「ライン」「グレー」「グレラン」「縄」「PP」「ローラー」「破綻」「確白」「確黒」"
-        "「鉄板護衛」「噛み筋」「票筋」「視点漏れ」「身内切り」「囲い」「相方」「2 人狼セット」など。\n"
-        "  代わりに状況描写や感情で言う: "
-        "「あの白判定、無理に庇ってる気がする」「昨夜守ったのは◯◯」"
-        "「もう 1 人組んでそうな人」「あと処刑できる回数を考えると…」 のように。\n"
-        "- **`text` 内で席番号 (席1, 席2, ..., 席9 や Seat3 等) を絶対に書かない。**"
-        "プロンプトの `## 参加者` ブロックで席番号 → 名前のマッピングが冒頭に提示されており、"
-        "それ以外のブロックは display_name のみで人物を参照している。"
-        "あなたも他者を呼ぶときは必ず display_name (キャラ名) を使う。"
-        "data 層 (`addressed_seat_nos` 等) には正しい席番号を入れて構わないが、"
-        "発話そのものは「ジナさん」「ラキオ」のような自然な呼び方にする。"
-        "状況整理を発話で行うときも『占いCO は ジョナスとsakura、霊媒CO はユリコとセツ』のように"
-        "名前で並べる。`席4` `席1` のような数字並列は禁止。\n"
-        "  禁止例: 「席3はどう思う?」「席4のラキオが…」「Seat 9、答えて」"
-        "「席4と席1の占い主張、席9と席7の霊媒主張」\n"
-        "  推奨例: 「ジョナスさんはどう思う?」「ラキオが…」「ユリコ、答えて」"
-        "「ジョナスとsakuraの占い主張、ユリコとセツの霊媒主張」\n"
-        "- 役職 CO (占い師・霊媒師・騎士として名乗る) をするときは、"
-        '`co_declaration` を `"seer" / "medium" / "knight"` のいずれかに設定し、'
-        "`text` は「実は私、占い師なんだ」など自然な名乗りにする。"
-        "CO しないなら `co_declaration=null`。"
-        "「占いCO」のような語そのものは `text` に書かない。\n"
-        "- **占い/霊媒結果は構造化フィールドにも必ず反映する。**"
-        "発話 `text` で占い結果を述べる場合 (本物でも騙りでも同じ): "
-        '`claimed_seer_result` に `{"target_seat": 対象席, "is_wolf": true/false}` を設定し、'
-        "述べた席・結果と完全一致させる。霊媒も同様に `claimed_medium_result` を使う"
-        "(処刑なし/結果なしを明言する場合は `is_wolf=null` を設定し、`target_seat` は処刑対象の席)。"
-        "新しい結果を発表しない発話 (前回までの結果に言及するだけ・一般議論・他人への質問) では "
-        "両フィールドとも `null` にする。"
-        "プロンプト中の `## 公開された占い/霊媒CO結果` ブロックが過去の発表履歴 (公式記録) であり、"
-        "そこに矛盾する/重複する/数が合わない結果を出すと **破綻判定** され狼/騙り側は即吊られる。"
-        "占いCO した seat は day N の朝までに通算 N 個の結果を発表できる "
-        "(day1 朝で NIGHT_0 ランダム白 1 件、day N 朝までに各夜分が +1 件ずつ加算; "
-        "day1 朝なら通算 1 個、day2 朝なら 2 個…)。"
-        "**同じ day に 2 件目の占い結果は出せない (本物の占い師は一夜 1 件まで)**。"
-        "決選演説 (DAY_RUNOFF_SPEECH) もその day 内なので、新しい占い結果は出さない。"
-        "1 回の発話で複数 seat を占ったと言う「すべて白」「全員白」は破綻なので絶対に出さない。\n"
-        "- 特定の席に向けて話す場合は `addressed_seat_nos` にその席番号の配列を入れる。"
-        "1人だけなら `[3]`、複数人に同時に問いかけるなら `[2, 3]` (例「セツとジナはどう?」)。"
-        "誰宛でもない一般的な発言や全体への呼びかけは空配列 `[]`。"
-        "自分の席を指定しても無効化されるので、相手の席を必ず入れること。"
-        "`text` 中で名前を呼んだ全員ぶんを `addressed_seat_nos` に列挙する。"
-        "Master は配列の全員を次に発話する優先候補として扱うので、"
-        "問いかけた人数に応じて漏れなく入れる。\n"
-        "- 死亡者リストには (処刑) または (襲撃) の死因タグが付く。"
-        "前日の処刑死を「昨夜の犠牲者」と混同しない。逆も同様。"
-        "発言で死を語るときはタグに合わせた表現を使う"
-        "(例: 処刑死は「昨日処刑された」、襲撃死は「昨夜襲われた」)。\n"
+    return render_template(
+        _NPC_SPEECH_SYSTEM_TEMPLATE,
+        display_name=persona.display_name,
+        style_guide=persona.style_guide,
+        speech_profile_block=build_speech_profile_block(persona),
+        judgment_profile_block=build_judgment_profile_block(persona),
+        game_rules_block=_build_game_rules_block(),
+        role=role or "",
+        role_strategy=role_strategy or "",
+        max_chars=max_chars,
     )
 
 
