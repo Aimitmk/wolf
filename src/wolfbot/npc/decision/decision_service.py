@@ -33,7 +33,6 @@ from wolfbot.domain.ws_messages import (
 from wolfbot.llm.persona_base import Persona
 from wolfbot.llm.prompt_builder import (
     build_judgment_profile_block,
-    build_speech_profile_block,
     build_strategy_block,
 )
 from wolfbot.llm.template import render_template
@@ -125,9 +124,7 @@ def _build_state_block(state: NpcGameState) -> str:
         if s == state.seat_no:
             own_name = n
             break
-    own_label = (
-        f"{own_name} (席{state.seat_no})" if own_name else f"席{state.seat_no}"
-    )
+    own_label = f"{own_name} (席{state.seat_no})" if own_name else f"席{state.seat_no}"
     lines: list[str] = [
         f"あなた: {own_label}",
         f"あなたの役職: {state.role}",
@@ -171,19 +168,17 @@ def _build_state_block(state: NpcGameState) -> str:
         lines.append("## 自分の護衛履歴 (非公開)")
         for g in state.guard_history:
             outcome = (
-                "(平和な朝)" if g.peaceful_morning
-                else "(襲撃発生)" if g.peaceful_morning is False
+                "(平和な朝)"
+                if g.peaceful_morning
+                else "(襲撃発生)"
+                if g.peaceful_morning is False
                 else "(結果未確定)"
             )
-            lines.append(
-                f"  day{g.day}: {g.target_name} を護衛 {outcome}"
-            )
+            lines.append(f"  day{g.day}: {g.target_name} を護衛 {outcome}")
     if state.wolf_chat_history:
         lines.append("## 人狼チャット履歴 (狼/狂人にのみ見える)")
         for line in state.wolf_chat_history[-20:]:
-            lines.append(
-                f"  day{line.day} {line.speaker_name}: {line.text}"
-            )
+            lines.append(f"  day{line.day} {line.speaker_name}: {line.text}")
     if state.wolf_attack_history:
         lines.append("## 自分達の襲撃履歴 (非公開)")
         for atk in state.wolf_attack_history:
@@ -193,18 +188,22 @@ def _build_state_block(state: NpcGameState) -> str:
                 outcome = "(襲撃成功)"
             else:
                 outcome = "(結果未確定)"
-            lines.append(
-                f"  day{atk.day}: {atk.target_name} を襲撃 {outcome}"
-            )
+            lines.append(f"  day{atk.day}: {atk.target_name} を襲撃 {outcome}")
     return "\n".join(lines)
 
 
 def _build_persona_block(persona: Persona) -> str:
+    """Decision-side persona block — name + judgment axes only.
+
+    The decision LLM picks ``target_seat``; speech_profile (一人称・文体・
+    間の取り方) does not influence that pick, so we drop it here. Saves
+    ~600 chars per vote/night/wolf-chat user prompt versus the speech
+    LLM's full persona block.
+    """
     return (
         f"## キャラクター\n"
         f"名前: {persona.display_name}\n"
         f"性格指針: {persona.style_guide}\n\n"
-        f"## 話法\n{build_speech_profile_block(persona)}\n\n"
         f"## 判断のクセ\n{build_judgment_profile_block(persona)}"
     )
 
@@ -250,9 +249,7 @@ def build_vote_prompt(
         render_template(_DECISION_VOTE_SYSTEM_TEMPLATE),
         render_template(
             _DECISION_VOTE_USER_TEMPLATE,
-            round_label=_VOTE_ACT_TEXT_BY_ROUND.get(
-                request.round_, f"round={request.round_}"
-            ),
+            round_label=_VOTE_ACT_TEXT_BY_ROUND.get(request.round_, f"round={request.round_}"),
             day_number=state.day_number,
             persona_block=_build_persona_block(persona),
             role_block=_build_role_block(state.role),
@@ -319,10 +316,7 @@ def build_wolf_chat_prompt(
     follows already carries the chat history as commitment, biasing
     both wolves to follow through.
     """
-    candidates_str = (
-        "、".join(f"席{seat_no} {name}" for seat_no, name in candidates)
-        or "(なし)"
-    )
+    candidates_str = "、".join(f"席{seat_no} {name}" for seat_no, name in candidates) or "(なし)"
     return (
         render_template(_DECISION_WOLF_CHAT_SYSTEM_TEMPLATE),
         render_template(
@@ -373,9 +367,7 @@ def build_night_prompt(
         render_template(_DECISION_NIGHT_SYSTEM_TEMPLATE),
         render_template(
             _DECISION_NIGHT_USER_TEMPLATE,
-            action_label=_NIGHT_ACT_TEXT.get(
-                request.action_kind, request.action_kind
-            ),
+            action_label=_NIGHT_ACT_TEXT.get(request.action_kind, request.action_kind),
             day_number=state.day_number,
             persona_block=_build_persona_block(persona),
             role_block=_build_role_block(state.role),

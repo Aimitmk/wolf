@@ -26,7 +26,10 @@ from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 
 def _state(role: str = "WEREWOLF") -> NpcGameState:
     return NpcGameState(
-        game_id="g1", seat_no=3, persona_key="setsu", role=role,
+        game_id="g1",
+        seat_no=3,
+        persona_key="setsu",
+        role=role,
         day_number=1,
         alive_seats=[(1, "Alice"), (3, "セツ"), (5, "Bob")],
         partner_wolves=[(5, "Bob")] if role == "WEREWOLF" else [],
@@ -36,9 +39,14 @@ def _state(role: str = "WEREWOLF") -> NpcGameState:
 def test_build_vote_prompt_includes_state_and_candidates() -> None:
     persona = NPC_PERSONAS_BY_KEY["setsu"]
     req = DecideVoteRequest(
-        ts=1, trace_id="t", request_id="rv1",
-        npc_id="npc_setsu", seat_no=3, game_id="g1",
-        phase_id="g1::day1::DAY_VOTE::1", round_=0,
+        ts=1,
+        trace_id="t",
+        request_id="rv1",
+        npc_id="npc_setsu",
+        seat_no=3,
+        game_id="g1",
+        phase_id="g1::day1::DAY_VOTE::1",
+        round_=0,
         candidate_seats=((1, "Alice"), (5, "Bob")),
         public_state_summary="phase=DAY_VOTE day=1 co_claims=[(none)]",
         expires_at_ms=10_000,
@@ -64,9 +72,14 @@ def test_build_vote_prompt_includes_state_and_candidates() -> None:
 def test_build_vote_prompt_runoff_label() -> None:
     persona = NPC_PERSONAS_BY_KEY["jonas"]
     req = DecideVoteRequest(
-        ts=1, trace_id="t", request_id="rv2",
-        npc_id="npc_jonas", seat_no=4, game_id="g1",
-        phase_id="g1::day1::DAY_RUNOFF::1", round_=1,
+        ts=1,
+        trace_id="t",
+        request_id="rv2",
+        npc_id="npc_jonas",
+        seat_no=4,
+        game_id="g1",
+        phase_id="g1::day1::DAY_RUNOFF::1",
+        round_=1,
         candidate_seats=((1, "Alice"),),
         expires_at_ms=10_000,
     )
@@ -77,8 +90,12 @@ def test_build_vote_prompt_runoff_label() -> None:
 def test_build_night_prompt_per_action_label() -> None:
     persona = NPC_PERSONAS_BY_KEY["setsu"]
     base_kwargs: dict = dict(  # type: ignore[type-arg]
-        ts=1, trace_id="t", request_id="rn",
-        npc_id="npc_setsu", seat_no=3, game_id="g1",
+        ts=1,
+        trace_id="t",
+        request_id="rn",
+        npc_id="npc_setsu",
+        seat_no=3,
+        game_id="g1",
         phase_id="g1::day1::NIGHT::1",
         candidate_seats=((1, "Alice"),),
         expires_at_ms=10_000,
@@ -159,6 +176,6 @@ def test_build_wolf_chat_prompt_includes_role_strategy_block() -> None:
     assert "## 役職別の戦術ヒント" in user
     # Spot-check that the multi-CO attack-avoidance line from
     # `_ROLE_STRATEGIES[WEREWOLF]` made it through.
-    assert "対抗 CO が出ている役職" in user
+    assert "対抗 CO ありの役職" in user
     # And the no-4th-seer-CO rule too (same block).
-    assert "4 件目を出してはならない" in user
+    assert "占 3 / 霊 2 / 騎 2 の上限を超える追加 CO は出さない" in user

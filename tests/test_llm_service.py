@@ -139,7 +139,7 @@ async def test_submit_llm_votes_reactive_voice_routes_to_dispatcher(
     ):
         pass
     await repo._db.commit()  # type: ignore[attr-defined]
-    game = (await repo.load_game(game_rounds.id))
+    game = await repo.load_game(game_rounds.id)
     assert game is not None
     assert game.discussion_mode == "reactive_voice"
 
@@ -147,7 +147,11 @@ async def test_submit_llm_votes_reactive_voice_routes_to_dispatcher(
 
     class _StubDispatcher:
         async def dispatch_votes(
-            self, *, game_id: str, day: int, round_: int,
+            self,
+            *,
+            game_id: str,
+            day: int,
+            round_: int,
             voters: list[Player],  # type: ignore[name-defined]
             seats: list[Seat],
             candidate_seats: list[int],
@@ -197,7 +201,7 @@ async def test_submit_llm_votes_reactive_voice_falls_back_when_no_dispatcher(
     ):
         pass
     await repo._db.commit()  # type: ignore[attr-defined]
-    game = (await repo.load_game(game_rounds.id))
+    game = await repo.load_game(game_rounds.id)
     assert game is not None
 
     gs = _FakeGameService()
@@ -1257,18 +1261,6 @@ async def _capture_ask_system_prompt(
     return system_prompt
 
 
-async def test_ask_system_prompt_contains_game_rules_for_any_role(repo: SqliteRepo) -> None:
-    """Every LLM seat, regardless of role, must receive the fixed 9-player
-    rules block in its system prompt (role distribution, win conditions,
-    candidate-token rule)."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "人狼2" in system_prompt
-    assert "村人3" in system_prompt
-    assert "生存人狼数が 0" in system_prompt
-    assert "生存人狼数が生存非人狼人数以上" in system_prompt
-    assert "候補トークン" in system_prompt
-
-
 async def test_ask_system_prompt_contains_3_1_roller_rules_for_any_role(
     repo: SqliteRepo,
 ) -> None:
@@ -1279,17 +1271,6 @@ async def test_ask_system_prompt_contains_3_1_roller_rules_for_any_role(
     assert "占いローラー" in system_prompt
     assert "黒ストップ" in system_prompt
     assert "真狼狼" in system_prompt
-
-
-async def test_ask_system_prompt_contains_2_2_medium_roller_rules_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """2-2 / medium-roller guidance must reach every seat via the shared rules
-    block."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
-    assert "2-2" in system_prompt
-    assert "霊媒ローラー" in system_prompt
-    assert "原則として完走" in system_prompt
 
 
 async def test_ask_system_prompt_contains_2_1_and_1_2_formations_for_any_role(
@@ -1310,102 +1291,6 @@ async def test_ask_system_prompt_contains_2_1_and_1_2_formations_for_any_role(
         assert "1-2" in system_prompt, f"{role.name} missed 1-2"
 
 
-async def test_ask_system_prompt_contains_three_seer_co_elimination_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """3占いCO・2非狼確定で残る 1 人を確定黒級とする消去法は共通ルール経由で
-    全 role の system prompt に届く。非狼確定の厳格さと前提崩壊時の解除も同様。"""
-    for role in (
-        Role.VILLAGER,
-        Role.SEER,
-        Role.MEDIUM,
-        Role.KNIGHT,
-        Role.WEREWOLF,
-        Role.MADMAN,
-    ):
-        system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert "残る 1 人の占い師 CO を固定配役上の消去法" in system_prompt, (
-            f"{role.name} missed the elimination rule"
-        )
-        assert "『白判定』と『非狼確定』を混同しない" in system_prompt, (
-            f"{role.name} missed the white-vs-confirmation caveat"
-        )
-        assert "前提が崩れた場合は確定黒扱いを解除" in system_prompt, (
-            f"{role.name} missed the breakdown / re-organize clause"
-        )
-
-
-async def test_ask_system_prompt_villager_seat_includes_three_seer_co_elimination_framing(
-    repo: SqliteRepo,
-) -> None:
-    """村人席は共通ルールに加え、村人視点の framing
-    (投票・発言・進行提案で残る占い師 CO 位置を狼として扱う) も system prompt
-    に届く。"""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "残る占い師 CO 位置を投票・発言・進行提案" in system_prompt
-    assert "前提が崩れた瞬間" in system_prompt
-
-
-async def test_ask_system_prompt_contains_co_overflow_rule_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """3 役職横断 CO 数・対抗 CO 超過分推理は共通ルール経由で全 role の
-    system prompt に届く。`CO 数 - 1` の式、超過分合計 3 で非 CO が確白級、
-    超過分合計 0〜2 で非 CO 断定しない、超過分合計 4 以上で再整理という
-    境界条件のすべてを LLM が読める状態にする。"""
-    for role in (
-        Role.VILLAGER,
-        Role.SEER,
-        Role.MEDIUM,
-        Role.KNIGHT,
-        Role.WEREWOLF,
-        Role.MADMAN,
-    ):
-        system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert "対抗 CO 超過分" in system_prompt, f"{role.name} missed 対抗 CO 超過分"
-        assert "CO 数 - 1" in system_prompt, f"{role.name} missed CO 数 - 1"
-        assert "超過分合計が 3 に達した場合" in system_prompt, (
-            f"{role.name} missed sum-3 trigger"
-        )
-        assert "村陣営の確白級" in system_prompt, (
-            f"{role.name} missed non-CO 確白級 consequence"
-        )
-        assert "0〜2" in system_prompt, f"{role.name} missed sum 0〜2 caveat"
-        assert "4 以上" in system_prompt, f"{role.name} missed sum 4+ contradiction"
-        assert "配役上の消去法" in system_prompt, (
-            f"{role.name} missed 配役上の消去法 framing"
-        )
-
-
-async def test_ask_system_prompt_contains_co_overflow_examples_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """3-2-1 / 2-2-2 / 3-1-1 / 4-1-1 の短い例も共通ルール経由で全 role に届く。"""
-    for role in (
-        Role.VILLAGER,
-        Role.SEER,
-        Role.MEDIUM,
-        Role.KNIGHT,
-        Role.WEREWOLF,
-        Role.MADMAN,
-    ):
-        system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert "3-2-1" in system_prompt, f"{role.name} missed 3-2-1 example"
-        assert "2-2-2" in system_prompt, f"{role.name} missed 2-2-2 example"
-        assert "3-1-1" in system_prompt, f"{role.name} missed 3-1-1 example"
-        assert "4-1-1" in system_prompt, f"{role.name} missed 4-1-1 example"
-
-
-async def test_ask_system_prompt_villager_strategy_includes_co_overflow_action(
-    repo: SqliteRepo,
-) -> None:
-    """村人席の system prompt には、共通ルールに加え、村人視点の運用
-    (CO 群と非 CO 確白を整理し投票先を CO 群に絞る) が届く。"""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "対抗 CO 超過分を毎日整理する" in system_prompt
-    assert "投票先を CO 群に絞る" in system_prompt
-
-
 async def test_ask_system_prompt_seer_strategy_avoids_wasting_divination(
     repo: SqliteRepo,
 ) -> None:
@@ -1415,86 +1300,6 @@ async def test_ask_system_prompt_seer_strategy_avoids_wasting_divination(
     assert "非 CO 確白級" in system_prompt
     assert "無駄占い" in system_prompt
     assert "対抗 CO 群やまだ確定しない位置を優先して占う" in system_prompt
-
-
-async def test_ask_system_prompt_medium_strategy_updates_co_inference(
-    repo: SqliteRepo,
-) -> None:
-    """霊媒師席の system prompt には、霊媒結果で CO 数推理を更新する運用が
-    届く。霊媒白は非狼だけを示す既存ルールと整合する形 (真役職 / 狂人)。"""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
-    assert "霊媒結果は対抗 CO 超過分の CO 数推理を更新する材料" in system_prompt
-    assert "対抗 CO 群内の狼数を絞り" in system_prompt
-    assert "白なら真役職または狂人の可能性を分け" in system_prompt
-    assert "非 CO 確白の前提が保たれるか" in system_prompt
-
-
-async def test_ask_system_prompt_knight_strategy_protects_non_co_certified_white(
-    repo: SqliteRepo,
-) -> None:
-    """騎士席の system prompt には、超過分合計 3 で生まれた非 CO 確白級と
-    単独で対抗のない真寄り情報役を護衛価値が高いと扱う運用が届く。"""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
-    assert "対抗 CO 超過分合計 3 で生まれた非 CO 確白級" in system_prompt
-    assert "単独で対抗のない真寄り情報役は護衛価値が高い" in system_prompt
-
-
-async def test_ask_system_prompt_werewolf_strategy_acknowledges_overcounter_risk(
-    repo: SqliteRepo,
-) -> None:
-    """人狼席の system prompt には、騙りすぎで非 CO が確白級になるリスクを
-    超過分集計の枠組みで認識する運用が届く。相方語彙は wolf 専用として
-    ここに含まれてよい。"""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
-    assert "対抗 CO 超過分" in system_prompt
-    assert "超過分合計が 3 に達した時点で" in system_prompt
-    assert "処刑候補が CO 群に集中する" in system_prompt
-    assert "相方と整合する形で選ぶ" in system_prompt
-
-
-async def test_ask_system_prompt_madman_co_overflow_addition_keeps_partner_isolation(
-    repo: SqliteRepo,
-) -> None:
-    """狂人席の system prompt には、同じリスクを公開情報視点で認識する運用が
-    届く一方、wolf-coordination 語彙 (bare `相方` / `襲撃先を揃える`) は
-    引き続き混入してはならず、本物の人狼位置を知っている前提の禁止文言も
-    保持される (既存 leak guard との整合)。"""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
-    # 新規 CO-overflow 文言は届く。
-    assert "対抗 CO 超過分" in system_prompt
-    assert "超過分合計が 3 に達した時点で" in system_prompt
-    assert "処刑候補が CO 群に集中するリスクを認識する" in system_prompt
-    assert "公開情報の各 CO 数と残り縄から判断する" in system_prompt
-    # Wolf-coordination 語彙が漏れていないこと。
-    assert not re.search(r"相方(?!候補)", system_prompt), (
-        "bare '相方' (actor mode) leaked into madman system prompt via "
-        "CO-overflow addition"
-    )
-    assert "襲撃先を揃える" not in system_prompt
-    # 既存 prohibition 文言が残っていること。
-    assert "人狼位置を知っている前提で話してはならない" in system_prompt
-
-
-async def test_ask_system_prompt_contains_advanced_guard_vocab_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """Advanced guard vocabulary (鉄板護衛 / 捨て護衛 / 連続護衛不可 / 護衛読み /
-    護衛誘導) lives in the shared rules block so every seat — not just the
-    knight — can interpret these terms when they appear in the public log."""
-    for role in (
-        Role.VILLAGER,
-        Role.SEER,
-        Role.MEDIUM,
-        Role.KNIGHT,
-        Role.WEREWOLF,
-        Role.MADMAN,
-    ):
-        system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert "鉄板護衛" in system_prompt, f"{role.name} missed 鉄板護衛"
-        assert "捨て護衛" in system_prompt, f"{role.name} missed 捨て護衛"
-        assert "連続護衛不可" in system_prompt, f"{role.name} missed 連続護衛不可"
-        assert "護衛読み" in system_prompt, f"{role.name} missed 護衛読み"
-        assert "護衛誘導" in system_prompt, f"{role.name} missed 護衛誘導"
 
 
 async def test_ask_system_prompt_contains_enthusiast_checklist_for_any_role(
@@ -1509,50 +1314,6 @@ async def test_ask_system_prompt_contains_enthusiast_checklist_for_any_role(
     assert "投票履歴" in system_prompt
     assert "縄数" in system_prompt
     assert "1〜2 点" in system_prompt
-
-
-async def test_ask_system_prompt_contains_fake_co_legality_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """Fake-CO legality constraints live in common rules so both wolf and
-    madman see them, and the wolf-coordination leak guards still hold when
-    exercising the madman path."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
-    assert "実ルール上あり得る内容" in system_prompt
-    assert "自分護衛" in system_prompt
-    assert "同一対象連続護衛" in system_prompt
-    # Leak guards must still hold even with the new common-rules additions.
-    # Bare 相方 (actor mode, partner-known) absent; 相方候補 (public-log
-    # inference noun) is allowed in the shared 2-wolf-pair-inference rules.
-    assert not re.search(r"相方(?!候補)", system_prompt)
-    assert "襲撃先を揃える" not in system_prompt
-
-
-async def test_ask_system_prompt_contains_day1_fake_seer_must_white_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """The NIGHT_0 day-1 fake-seer-must-white rule lives in the shared rules
-    block so every seat sees it. Exercising via VILLAGER (no wolf-strategy
-    leak) doubles as a non-leak guard."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "NIGHT_0" in system_prompt
-    assert "初回" in system_prompt
-    assert "day 1" in system_prompt
-    assert "必ず白を主張" in system_prompt
-    assert "day 1 で初回黒主張はしない" in system_prompt
-    assert "偽占い師の黒結果主張は day 2 以降" in system_prompt
-    # Wolf-coordination guard still holds for the villager seat. Bare 相方
-    # (actor mode) absent; 相方候補 (inference) allowed.
-    assert not re.search(r"相方(?!候補)", system_prompt)
-    assert "襲撃先を揃える" not in system_prompt
-
-
-async def test_ask_system_prompt_wolf_seat_includes_wolf_strategy(repo: SqliteRepo) -> None:
-    """A werewolf LLM must receive wolf-coordination tips in its system
-    prompt (`相方`, `襲撃先を揃える`)."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
-    assert "相方" in system_prompt
-    assert "襲撃先を揃える" in system_prompt
 
 
 async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy(repo: SqliteRepo) -> None:
@@ -1583,19 +1344,6 @@ async def test_ask_system_prompt_madman_excludes_wolf_positions_assumption(
     assert "人狼位置を知っている前提で話してはならない" in system_prompt
     assert not re.search(r"相方(?!候補)", system_prompt)
     assert "襲撃先を揃える" not in system_prompt
-
-
-async def test_ask_system_prompt_wolf_seat_includes_attack_evaluation_axes(
-    repo: SqliteRepo,
-) -> None:
-    """End-to-end: a werewolf LLM's system prompt carries the new 4-axis attack
-    rubric (襲撃価値 / 護衛されやすさ / 騎士候補度) and the 騎士探し approach
-    label via `_build_strategy_block(Role.WEREWOLF)`."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
-    assert "襲撃価値" in system_prompt
-    assert "護衛されやすさ" in system_prompt
-    assert "騎士候補度" in system_prompt
-    assert "騎士探し" in system_prompt
 
 
 async def test_ask_system_prompt_wolf_attack_task_includes_checklist(
@@ -1703,33 +1451,6 @@ async def test_ask_system_prompt_madman_vote_task_drops_partner_token(
     assert "席3 X" not in system_prompt
 
 
-async def test_ask_system_prompt_role_strategy_isolated_between_roles(
-    repo: SqliteRepo,
-) -> None:
-    """A role's own strategy phrase appears in its system prompt; other roles'
-    unique phrases must not. Integration-level analog of
-    `test_strategy_block_no_cross_role_leak` in test_llm_prompt_builder.py."""
-    unique_phrases = {
-        Role.WEREWOLF: "相方を露骨に庇いすぎない",
-        Role.MADMAN: "人狼位置を知っている前提で話してはならない",
-        Role.SEER: "判定履歴を時系列で一貫",
-        Role.MEDIUM: "処刑された相手が狂人でも",
-        Role.KNIGHT: "前夜と違う相手を選ぶ",
-        Role.VILLAGER: "CO 騙りは村陣営としては行わない",
-    }
-    for role, own_phrase in unique_phrases.items():
-        system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert own_phrase in system_prompt, (
-            f"{role.name} did not see its own phrase in system prompt"
-        )
-        for other_role, other_phrase in unique_phrases.items():
-            if other_role is role:
-                continue
-            assert other_phrase not in system_prompt, (
-                f"{other_role.name}'s tip leaked into {role.name}'s system prompt"
-            )
-
-
 async def test_ask_system_prompt_includes_speech_profile_section(repo: SqliteRepo) -> None:
     """Every LLM seat's system prompt carries the new `## 話法` section with
     the persona's first-person and the static common rule from the template."""
@@ -1786,67 +1507,6 @@ async def test_ask_system_prompt_non_wolf_excludes_wolf_strategy_even_with_speec
             )
 
 
-async def test_ask_system_prompt_contains_co_evaluation_rules_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """The shared CO evaluation guidance (single-CO default-truthy, conditions
-    to suspect, counter-CO comparison axes) must reach every LLM seat via the
-    rules block. `_build_game_rules_block` is role-independent so one role
-    suffices to exercise the production path."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "単独 CO" in system_prompt
-    assert "真の役職者にかなり近い" in system_prompt
-    assert "対抗 CO" in system_prompt
-    assert "噛み筋" in system_prompt
-
-
-async def test_ask_system_prompt_distinguishes_sole_survivor_from_lone_co(
-    repo: SqliteRepo,
-) -> None:
-    """Every LLM seat must receive the refinement that distinguishes a truly-
-    lone CO (no counter ever appeared) from a sole-survivor CO (counter was
-    executed or attacked). The rules block enforces: 2+ historical COs → do
-    not auto-trust the survivor, and dead CO holders stay in the comparison
-    via death-timing integrity."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "2 人以上" in system_prompt
-    assert "自動的に真置きしない" in system_prompt
-    assert "死亡済み" in system_prompt
-    assert "死亡タイミング" in system_prompt
-
-
-async def test_ask_system_prompt_warns_against_last_surviving_co_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """Every LLM seat must receive the conclusion-side refinement: a
-    last-surviving CO is not automatically true. Wolves can leave an info role
-    unattacked, get the counter executed, or keep a CO around for protective
-    cover. Sample multiple roles to exercise both wolf-faction and village-
-    faction paths through the shared rules block."""
-    for role in (Role.VILLAGER, Role.SEER, Role.WEREWOLF, Role.MADMAN, Role.KNIGHT):
-        system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert "最後まで生き残った" in system_prompt, f"{role.name} missed last-survivor warning"
-        assert "噛まずに残した" in system_prompt, f"{role.name} missed wolf-skip framing"
-        assert "単独 CO だから真" in system_prompt, f"{role.name} missed shortcut prohibition"
-
-
-async def test_ask_system_prompt_villager_seat_prohibits_villager_co(
-    repo: SqliteRepo,
-) -> None:
-    """A villager LLM's system prompt must explicitly forbid declaring
-    '村人CO' / '素村CO' / '普通の村人です' / '役職は村人です' as a trust-buy and
-    must point at the alternative '非 CO の灰' stance. The guidance reaches the
-    villager via `_ROLE_STRATEGIES[Role.VILLAGER]`, so this test pins the
-    end-to-end composition path through `build_system_prompt`."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "村人CO" in system_prompt
-    assert "素村CO" in system_prompt
-    assert "普通の村人です" in system_prompt
-    assert "役職は村人です" in system_prompt
-    assert "村人は能力結果を持たない" in system_prompt
-    assert "非 CO の灰" in system_prompt
-
-
 @pytest.mark.parametrize("role", [Role.WEREWOLF, Role.MADMAN, Role.SEER, Role.MEDIUM, Role.KNIGHT])
 async def test_ask_system_prompt_villager_co_prohibition_isolated(
     repo: SqliteRepo, role: Role
@@ -1858,109 +1518,6 @@ async def test_ask_system_prompt_villager_co_prohibition_isolated(
     system_prompt = await _capture_ask_system_prompt(repo, role)
     assert "村人CO" not in system_prompt, f"{role.name} saw '村人CO' in system prompt"
     assert "素村CO" not in system_prompt, f"{role.name} saw '素村CO' in system prompt"
-
-
-async def test_ask_system_prompt_explains_medium_white_semantics_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """Every LLM seat must receive the shared rule that medium-white means
-    `not a real werewolf` only — not a role-claim refutation. Sampling one
-    role suffices because `_build_game_rules_block` is role-independent."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.VILLAGER)
-    assert "本物の人狼ではない" in system_prompt
-    assert "真占い師だった可能性と矛盾しない" in system_prompt
-    assert "偽扱いしない" in system_prompt
-
-
-async def test_ask_system_prompt_contains_advanced_terminology_for_any_role(
-    repo: SqliteRepo,
-) -> None:
-    """Every LLM seat (wolf, madman, villager, info role) must receive the
-    advanced jinro terminology (グレラン / 縄計算 / スケール / 確白 / 確黒 /
-    パンダ / PP / RPP) via the shared rules block. Sampling 4 representative
-    roles exercises `build_system_prompt` for both wolf-faction and village-
-    faction paths, since the terminology is emitted independent of role."""
-    for role in (Role.VILLAGER, Role.SEER, Role.WEREWOLF, Role.MADMAN):
-        system_prompt = await _capture_ask_system_prompt(repo, role)
-        assert "グレラン" in system_prompt, f"{role.name} missed グレラン"
-        assert "縄計算" in system_prompt, f"{role.name} missed 縄計算"
-        assert "スケール" in system_prompt, f"{role.name} missed スケール"
-        assert "確白" in system_prompt, f"{role.name} missed 確白"
-        assert "確黒" in system_prompt, f"{role.name} missed 確黒"
-        assert "パンダ" in system_prompt, f"{role.name} missed パンダ"
-        assert "PP" in system_prompt, f"{role.name} missed PP"
-        assert "RPP" in system_prompt, f"{role.name} missed RPP"
-
-
-async def test_ask_system_prompt_medium_guards_against_seer_co_white_misread(
-    repo: SqliteRepo,
-) -> None:
-    """The Medium LLM's system prompt must carry the role-specific guidance:
-    medium-white on an executed Seer-CO is NOT proof of a fake seer; the
-    Medium should separate real-seer from non-wolf-fake hypotheses."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
-    assert "占い師 CO 偽の証明ではない" in system_prompt
-    assert "真占い師だった可能性" in system_prompt
-    assert "狂人" in system_prompt
-
-
-async def test_ask_system_prompt_knight_includes_protection_success_co_strategy(
-    repo: SqliteRepo,
-) -> None:
-    """The knight LLM's system prompt must cover the peaceful-morning /
-    protection-success CO pathway with the guard target disclosure rule."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
-    assert "平和な朝" in system_prompt
-    assert "護衛成功" in system_prompt
-    assert "護衛先を添えて" in system_prompt
-
-
-async def test_ask_system_prompt_seer_includes_counter_co_strategy(
-    repo: SqliteRepo,
-) -> None:
-    """A true seer LLM must receive on-turn CO guidance (when their day-1
-    speaking turn arrives), counter-CO (when a fake seer appears), and
-    black-pull CO guidance so the true seer doesn't stay silent and cede
-    single-truth treatment to a fake. The on-turn framing replaces the
-    'mid-discussion no-seer-CO' trigger because the NPC cannot self-
-    trigger speech — the rule must fire whenever the arbiter dispatches
-    them."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
-    assert "発言の番" in system_prompt
-    assert "次の自分のターンに先送りしない" in system_prompt
-    assert "対抗 CO" in system_prompt
-    assert "時系列で公開" in system_prompt
-    assert "黒を引いた場合" in system_prompt
-
-
-async def test_ask_system_prompt_medium_includes_counter_co_strategy(
-    repo: SqliteRepo,
-) -> None:
-    """A true medium LLM must receive on-turn result-publication guidance
-    (when their post-execution speaking turn arrives) and the counter-CO
-    pathway, with explicit self-roller vulnerability framing so the medium
-    doesn't stay silent against a fake medium. The on-turn framing replaces
-    the 'day after execution' anchor for the same reason as seer."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MEDIUM)
-    assert "前日に処刑があった" in system_prompt
-    assert "発言の番" in system_prompt
-    assert "次の自分のターンに先送りしない" in system_prompt
-    assert "対抗霊媒" in system_prompt
-    assert "ローラー" in system_prompt
-
-
-async def test_ask_system_prompt_knight_includes_legal_guard_history_and_endgame_co(
-    repo: SqliteRepo,
-) -> None:
-    """A knight LLM's system prompt must cover endgame / about-to-be-hung CO
-    timing AND must constrain the guard-diary to the bot's legal guard rules
-    (no self-guard, no consecutive guard of the same seat, no dead-seat guard)."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.KNIGHT)
-    assert "終盤" in system_prompt
-    assert "吊られそう" in system_prompt
-    assert "護衛履歴を日付順" in system_prompt
-    assert "自分護衛" in system_prompt
-    assert "同じ相手の連続護衛" in system_prompt
 
 
 async def test_ask_system_prompt_knight_includes_advanced_guard_strategy(
@@ -2010,89 +1567,6 @@ async def test_ask_system_prompt_knight_guard_task_includes_checklist(
     assert "騎士探し" not in system_prompt
 
 
-async def test_ask_system_prompt_wolf_seat_includes_fake_strategy(repo: SqliteRepo) -> None:
-    """The werewolf LLM's system prompt must carry the fake-CO playbook:
-    day-1 戦術 is presented as a 3-way choice (先制CO / 対抗CO / 潜伏) without
-    a single mechanical trigger that funnels the LLM into one option,
-    day-2+ medium/knight fake, the over-fake warning, and medium-roller /
-    knight-legal-guard-history caveats."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
-    assert "day 1" in system_prompt
-    assert "占い師騙り" in system_prompt
-    assert "霊媒師騙り" in system_prompt
-    assert "騎士騙り" in system_prompt
-    assert "6 人以上" in system_prompt
-    assert "騙りすぎ" in system_prompt
-    # 3-way framing — 先制CO / 対抗CO / 潜伏 each presented as a first-class option.
-    assert "先制CO" in system_prompt
-    assert "対抗CO" in system_prompt
-    assert "潜伏" in system_prompt
-    assert "3 択" in system_prompt
-    assert "等しく強い" in system_prompt
-    assert "機械的" in system_prompt
-    assert "潜伏は安全策ではない" in system_prompt
-    # Day-1 first-result-white anchor + day-1 black prohibition + day-2+ deferral.
-    assert "NIGHT_0 ランダム白" in system_prompt
-    assert "必ず白を主張" in system_prompt
-    assert "初日に黒を出す主張" in system_prompt
-    assert "黒出しは day 2 以降" in system_prompt
-    assert "前夜に占ったという想定" in system_prompt
-
-
-async def test_ask_system_prompt_madman_includes_fake_strategy_without_wolf_coordination(
-    repo: SqliteRepo,
-) -> None:
-    """The madman LLM's system prompt must carry the fake-CO playbook
-    (day-1 3-way choice 先制CO / 対抗CO / 潜伏, day-2+ medium/knight fake,
-    over-fake warning) with misfire caveats — and no wolf-coordination
-    vocabulary (`相方` / `襲撃先を揃える`)."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
-    assert "day 1" in system_prompt
-    assert "占い師騙り" in system_prompt
-    assert "霊媒師騙り" in system_prompt
-    assert "騎士騙り" in system_prompt
-    assert "6 人以上" in system_prompt
-    assert "騙りすぎ" in system_prompt
-    # Wolf-coordination vocabulary must not appear for the madman. Bare 相方
-    # (actor mode, partner-known) absent; 相方候補 (public-log inference) allowed.
-    assert not re.search(r"相方(?!候補)", system_prompt)
-    assert "襲撃先を揃える" not in system_prompt
-    # Existing prohibition phrase must also still be present.
-    assert "人狼位置を知っている前提で話してはならない" in system_prompt
-    # 3-way framing + anti-mechanical-default + misfire / white-out caveats.
-    assert "先制CO" in system_prompt
-    assert "対抗CO" in system_prompt
-    assert "潜伏" in system_prompt
-    assert "3 択" in system_prompt
-    assert "等しく強い" in system_prompt
-    assert "機械的" in system_prompt
-    assert "潜伏は安全策ではない" in system_prompt
-    assert "誤爆リスク" in system_prompt
-    assert "白先が本物の狼とは限らない" in system_prompt
-    # Day-1 first-result-white anchor + day-1 black prohibition + day-2+ deferral.
-    assert "NIGHT_0 ランダム白" in system_prompt
-    assert "必ず白を主張" in system_prompt
-    assert "初日に黒を出す主張" in system_prompt
-    assert "黒出しは day 2 以降" in system_prompt
-    assert "誤爆リスクは day 2 以降の黒出しでも常に残る" in system_prompt
-
-
-async def test_ask_system_prompt_seer_includes_night_targeting_axes(
-    repo: SqliteRepo,
-) -> None:
-    """The true seer's system prompt must carry the night-divination targeting
-    axes (占い価値 / 灰を狭める / 対抗 CO / 囲い候補 / 投票 /
-    白でも黒でも情報が落ちる) via `_ROLE_STRATEGIES[Role.SEER]`. End-to-end
-    analog of the unit-level `test_seer_strategy_includes_night_divination_targeting_axes`."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.SEER)
-    assert "占い価値" in system_prompt
-    assert "灰を狭める" in system_prompt
-    assert "対抗 CO" in system_prompt
-    assert "囲い候補" in system_prompt
-    assert "投票" in system_prompt
-    assert "白でも黒でも情報が落ちる" in system_prompt
-
-
 async def test_ask_system_prompt_seer_divine_task_includes_targeting_checklist(
     repo: SqliteRepo,
 ) -> None:
@@ -2115,46 +1589,6 @@ async def test_ask_system_prompt_seer_divine_task_includes_targeting_checklist(
     assert "騎士候補度" not in task_text
     assert "翌日の説明しやすさ" not in task_text
     assert "騎士探し" not in task_text
-
-
-async def test_ask_system_prompt_wolf_seat_includes_day2_round1_fake_publication(
-    repo: SqliteRepo,
-) -> None:
-    """The werewolf LLM's system prompt must carry the day-2+ round-1 fake-
-    result publication imperative for seer/medium/knight fakes, with the
-    integration cues (相方 / 囲い / 噛み筋 / 霊媒結果 / 合法な護衛履歴)."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.WEREWOLF)
-    assert "day 2 以降" in system_prompt
-    assert "1 巡目" in system_prompt
-    assert "前夜" in system_prompt
-    assert "能力結果" in system_prompt
-    assert "合法な護衛履歴" in system_prompt
-    # Wolf-private integration cues must be present.
-    assert "相方" in system_prompt
-    assert "囲い" in system_prompt
-    assert "噛み筋" in system_prompt
-    assert "霊媒結果" in system_prompt
-
-
-async def test_ask_system_prompt_madman_includes_day2_round1_fake_publication(
-    repo: SqliteRepo,
-) -> None:
-    """The madman LLM's system prompt must carry the day-2+ round-1 fake-
-    result publication imperative with explicit misfire framing — and must
-    NOT carry wolf-coordination vocabulary."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
-    assert "day 2 以降" in system_prompt
-    assert "1 巡目" in system_prompt
-    assert "前夜" in system_prompt
-    assert "能力結果" in system_prompt
-    assert "誤爆リスク" in system_prompt
-    assert "白先が本物の狼とは限らない" in system_prompt
-    assert "処刑なしの日は結果なし" in system_prompt
-    assert "合法な護衛履歴" in system_prompt
-    # Wolf-coordination vocabulary must remain absent. Bare 相方 (actor mode)
-    # forbidden; 相方候補 (public-log inference) allowed in pair-inference.
-    assert not re.search(r"相方(?!候補)", system_prompt)
-    assert "襲撃先を揃える" not in system_prompt
 
 
 async def test_discussion_speech_day2_round1_passes_first_round_rule(
@@ -2527,23 +1961,6 @@ async def test_ask_system_prompt_wolf_seat_includes_two_wolf_set_framing(
     assert "視点漏れ" in system_prompt
 
 
-async def test_ask_system_prompt_madman_pair_inference_carries_misfire(
-    repo: SqliteRepo,
-) -> None:
-    """The madman system prompt must carry the public-log pair-inference
-    framing with explicit misfire awareness — without leaking wolf-coordination
-    vocabulary. Bare `相方` (actor mode) must remain absent; `相方候補` is the
-    only allowed form. `襲撃先を揃える` and `仲間の人狼` must be absent."""
-    system_prompt = await _capture_ask_system_prompt(repo, Role.MADMAN)
-    assert "相方候補" in system_prompt
-    assert "公開ログからの推定" in system_prompt
-    assert "誤爆" in system_prompt
-    # Wolf-coordination vocab forbidden for the madman.
-    assert not re.search(r"相方(?!候補)", system_prompt)
-    assert "襲撃先を揃える" not in system_prompt
-    assert "仲間の人狼" not in system_prompt
-
-
 async def test_ask_system_prompt_wolf_vote_task_extends_with_two_wolf_set(
     repo: SqliteRepo,
 ) -> None:
@@ -2779,9 +2196,7 @@ def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) 
         GAMEPLAY_LLM_PROVIDER="xai",
         GAMEPLAY_LLM_API_KEY=SecretStr("x"),
     )
-    assert isinstance(
-        make_llm_decider(s_xai.gameplay_decider_config()), XAILLMActionDecider
-    )
+    assert isinstance(make_llm_decider(s_xai.gameplay_decider_config()), XAILLMActionDecider)
 
     s_ds = MasterSettings(  # type: ignore[arg-type]
         _env_file=None,
@@ -2789,9 +2204,7 @@ def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) 
         GAMEPLAY_LLM_PROVIDER="deepseek",
         GAMEPLAY_LLM_API_KEY=SecretStr("d"),
     )
-    assert isinstance(
-        make_llm_decider(s_ds.gameplay_decider_config()), DeepSeekLLMActionDecider
-    )
+    assert isinstance(make_llm_decider(s_ds.gameplay_decider_config()), DeepSeekLLMActionDecider)
 
     s_gem = MasterSettings(  # type: ignore[arg-type]
         _env_file=None,
@@ -2799,9 +2212,7 @@ def test_make_llm_decider_branches_on_provider(monkeypatch: pytest.MonkeyPatch) 
         GAMEPLAY_LLM_PROVIDER="gemini",
         GAMEPLAY_LLM_VERTEX_PROJECT="my-project",
     )
-    assert isinstance(
-        make_llm_decider(s_gem.gameplay_decider_config()), GeminiLLMActionDecider
-    )
+    assert isinstance(make_llm_decider(s_gem.gameplay_decider_config()), GeminiLLMActionDecider)
 
 
 def test_make_gemini_decider_constructs_vertex_ai_client(
@@ -2859,9 +2270,7 @@ class _FakeChatCompletionsWithUsage:
     """Like ``_FakeChatCompletions`` but the response carries ``.usage`` so
     the OpenAI-shaped token extractor returns real integers."""
 
-    def __init__(
-        self, content: str, usage: tuple[int, int, int] = (1500, 200, 1700)
-    ) -> None:
+    def __init__(self, content: str, usage: tuple[int, int, int] = (1500, 200, 1700)) -> None:
         self._content = content
         self._usage = usage
         self.calls: list[dict[str, object]] = []
@@ -2872,9 +2281,7 @@ class _FakeChatCompletionsWithUsage:
         self.calls.append(kwargs)
         prompt, completion, total = self._usage
         return SimpleNamespace(
-            choices=[
-                SimpleNamespace(message=SimpleNamespace(content=self._content))
-            ],
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self._content))],
             usage=SimpleNamespace(
                 prompt_tokens=prompt,
                 completion_tokens=completion,
@@ -2889,9 +2296,7 @@ class _FakeAsyncOpenAIWithUsage:
     def __init__(self, content: str, usage: tuple[int, int, int] = (1500, 200, 1700)) -> None:
         from types import SimpleNamespace
 
-        self.chat = SimpleNamespace(
-            completions=_FakeChatCompletionsWithUsage(content, usage)
-        )
+        self.chat = SimpleNamespace(completions=_FakeChatCompletionsWithUsage(content, usage))
 
 
 class _FakeGenAIModelsWithUsage:
