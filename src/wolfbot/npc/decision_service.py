@@ -36,6 +36,7 @@ from wolfbot.llm.prompt_builder import (
     build_speech_profile_block,
     build_strategy_block,
 )
+from wolfbot.llm.template import render_template
 from wolfbot.npc.game_state import NpcGameState
 
 log = logging.getLogger(__name__)
@@ -239,40 +240,31 @@ def build_vote_prompt(
     persona: Persona,
     request: DecideVoteRequest,
 ) -> tuple[str, str]:
-    """Compose the system + user prompt for a vote decision."""
-    candidates_str = _format_candidates(request.candidate_seats)
-    digest = request.public_state_summary or "(情報なし)"
-    round_label = _VOTE_ACT_TEXT_BY_ROUND.get(request.round_, f"round={request.round_}")
-    state_block = _build_state_block(state)
-    persona_block = _build_persona_block(persona)
-    role_block = _build_role_block(state.role)
-    system = (
-        "あなたは人狼ゲームの 1 プレイヤーです。"
-        "公開情報・自分が持つ非公開情報・性格・役職戦術に基づいて投票先を決めてください。"
-        "返答は JSON のみ。"
+    """Compose the system + user prompt for a vote decision.
+
+    Templates:
+    - npc/decision_vote_system.md  (fixed instruction)
+    - npc/decision_vote_user.md    (per-call context)
+    """
+    return (
+        render_template(_DECISION_VOTE_SYSTEM_TEMPLATE),
+        render_template(
+            _DECISION_VOTE_USER_TEMPLATE,
+            round_label=_VOTE_ACT_TEXT_BY_ROUND.get(
+                request.round_, f"round={request.round_}"
+            ),
+            day_number=state.day_number,
+            persona_block=_build_persona_block(persona),
+            role_block=_build_role_block(state.role),
+            state_block=_build_state_block(state),
+            digest=request.public_state_summary or "(情報なし)",
+            candidates_str=_format_candidates(request.candidate_seats),
+        ),
     )
-    user_parts = [
-        f"## フェイズ: {round_label} (day {state.day_number})",
-        "",
-        persona_block,
-        "",
-        role_block,
-        "",
-        "## 自分の状況 (非公開を含む)",
-        state_block,
-        "",
-        "## 場の状況 (Master ダイジェスト)",
-        digest,
-        "",
-        f"## 投票候補席\n{candidates_str}",
-        "",
-        "上記すべてを踏まえ、この投票で誰に票を入れるかを決めてください。"
-        "**棄権は禁止**: 必ず候補席の中から1人を選んで `target_seat` に入れる。"
-        "情報が薄くても、最も怪しい/役割上吊りたい/相方ライン以外の中から相対的に最も票を入れたい1人を選ぶこと。"
-        "JSON は {\"target_seat\": <候補席番号>, \"reason\": \"<短い理由>\"} の形 "
-        "(`target_seat` は必ず整数、null 不可)。",
-    ]
-    return system, "\n".join(p for p in user_parts if p is not None)
+
+
+_DECISION_VOTE_SYSTEM_TEMPLATE = "npc/decision_vote_system"
+_DECISION_VOTE_USER_TEMPLATE = "npc/decision_vote_user"
 
 
 _NIGHT_ACT_TEXT: dict[str, str] = {
@@ -295,6 +287,10 @@ _WOLF_CHAT_SCHEMA: dict[str, object] = {
 }
 
 
+_DECISION_WOLF_CHAT_SYSTEM_TEMPLATE = "npc/decision_wolf_chat_system"
+_DECISION_WOLF_CHAT_USER_TEMPLATE = "npc/decision_wolf_chat_user"
+
+
 def build_wolf_chat_prompt(
     *,
     state: NpcGameState,
@@ -304,63 +300,41 @@ def build_wolf_chat_prompt(
 ) -> tuple[str, str]:
     """Compose system + user prompts for a wolf-chat coordination line.
 
-    Wolves talk to each other privately. The line must:
-    - propose / agree / counter on a target,
-    - stay under 80 chars,
-    - speak in the persona's voice (this is still character).
+    Templates:
+    - npc/decision_wolf_chat_system.md (fixed: voice, JSON shape, GJ rebite rule)
+    - npc/decision_wolf_chat_user.md   (per-call context)
+
+    Wolves talk to each other privately. The line must propose / agree
+    / counter on a target, stay under 80 chars, and speak in the
+    persona's voice (this is still character).
 
     The role-strategy block (= ``build_strategy_block(WEREWOLF)``) is
-    INJECTED here too. Without it, the chat's "今夜誰を噛む?" decision
-    runs on the persona block + game ledger only; the master tactical
-    rules (multi-CO attack avoidance, GJ rebite, info-role priority,
-    knight-candidate scoring) live in the WEREWOLF strategy block and
-    were missing from the chat prompt — so wolves agreed to attack a
-    seer in a 3-CO board (game ``38627df1ade1`` night 1), and the
-    night-action prompt that follows already carries the chat history
-    as commitment, biasing both wolves to follow through.
+    INJECTED via :func:`_build_role_block`. Without it, the chat's
+    "今夜誰を噛む?" decision runs on the persona block + game ledger
+    only; the master tactical rules (multi-CO attack avoidance, GJ
+    rebite, info-role priority, knight-candidate scoring) live in the
+    WEREWOLF strategy block and were missing from the chat prompt —
+    so wolves agreed to attack a seer in a 3-CO board (game
+    ``38627df1ade1`` night 1), and the night-action prompt that
+    follows already carries the chat history as commitment, biasing
+    both wolves to follow through.
     """
-    persona_block = _build_persona_block(persona)
-    state_block = _build_state_block(state)
-    role_block = _build_role_block(state.role)
     candidates_str = (
         "、".join(f"席{seat_no} {name}" for seat_no, name in candidates)
         or "(なし)"
     )
-    digest = public_state_summary or "(情報なし)"
-    system = (
-        "あなたは人狼ゲームの 1 プレイヤーです。"
-        "あなたは人狼で、仲間の人狼にだけ届く秘密チャットでこのターンの "
-        "襲撃方針を簡潔に伝えてください。村人に届く発話ではないので、"
-        "ペルソナの口調を保ちつつ素直に作戦を提示してよい (ただし"
-        "メタ用語は避ける)。返答は JSON のみ。\n\n"
-        "**戦術指針 — GJ後の再噛み**: 前夜の襲撃が GJ で平和な朝になった "
-        "(自分達が昨夜噛んだ対象が今朝も生存している) 場合、"
-        "騎士の連続護衛禁止により今夜その対象は守られない。"
-        "盤面が大きく変わっていないなら同じ対象を再噛みするのが原則最善 — "
-        "数学的に成功が確定する。"
-        "切り替えるのは、対象の襲撃価値が大きく低下した、別位置に超緊急の情報役が出た、"
-        "等の具体的根拠があるときに限る。"
-        "「読まれそう」「対称的すぎる」のような漠然とした不安では切り替えない。"
+    return (
+        render_template(_DECISION_WOLF_CHAT_SYSTEM_TEMPLATE),
+        render_template(
+            _DECISION_WOLF_CHAT_USER_TEMPLATE,
+            day_number=state.day_number,
+            persona_block=_build_persona_block(persona),
+            role_block=_build_role_block(state.role),
+            state_block=_build_state_block(state),
+            digest=public_state_summary or "(情報なし)",
+            candidates_str=candidates_str,
+        ),
     )
-    user_parts = [
-        f"## 現在: 人狼チャット (day {state.day_number})",
-        "",
-        persona_block,
-        "",
-        role_block,
-        "",
-        "## 自分の状況 (非公開)",
-        state_block,
-        "",
-        "## 場の状況 (Master ダイジェスト)",
-        digest,
-        "",
-        f"## 襲撃候補席\n{candidates_str}",
-        "",
-        "上記を踏まえ、仲間の狼に向けて 80 文字以内で 1 行だけ書いてください。"
-        "JSON は {\"text\": \"...\"} の形。",
-    ]
-    return system, "\n".join(p for p in user_parts if p is not None)
 
 
 def parse_wolf_chat_text(raw_json: str) -> str | None:
@@ -379,48 +353,37 @@ def parse_wolf_chat_text(raw_json: str) -> str | None:
     return cleaned or None
 
 
+_DECISION_NIGHT_SYSTEM_TEMPLATE = "npc/decision_night_system"
+_DECISION_NIGHT_USER_TEMPLATE = "npc/decision_night_user"
+
+
 def build_night_prompt(
     *,
     state: NpcGameState,
     persona: Persona,
     request: DecideNightActionRequest,
 ) -> tuple[str, str]:
-    """Compose the system + user prompt for a night-action decision."""
-    candidates_str = _format_candidates(request.candidate_seats)
-    digest = request.public_state_summary or "(情報なし)"
-    state_block = _build_state_block(state)
-    persona_block = _build_persona_block(persona)
-    role_block = _build_role_block(state.role)
-    action_label = _NIGHT_ACT_TEXT.get(request.action_kind, request.action_kind)
-    system = (
-        "あなたは人狼ゲームの 1 プレイヤーです。"
-        "夜行動の対象を性格・役職戦術・公開/非公開情報を踏まえて決めてください。"
-        "返答は JSON のみ。"
+    """Compose the system + user prompt for a night-action decision.
+
+    Templates:
+    - npc/decision_night_system.md (fixed instruction)
+    - npc/decision_night_user.md   (per-call context)
+    """
+    return (
+        render_template(_DECISION_NIGHT_SYSTEM_TEMPLATE),
+        render_template(
+            _DECISION_NIGHT_USER_TEMPLATE,
+            action_label=_NIGHT_ACT_TEXT.get(
+                request.action_kind, request.action_kind
+            ),
+            day_number=state.day_number,
+            persona_block=_build_persona_block(persona),
+            role_block=_build_role_block(state.role),
+            state_block=_build_state_block(state),
+            digest=request.public_state_summary or "(情報なし)",
+            candidates_str=_format_candidates(request.candidate_seats),
+        ),
     )
-    user_parts = [
-        f"## フェイズ: {action_label} (day {state.day_number})",
-        "",
-        persona_block,
-        "",
-        role_block,
-        "",
-        "## 自分の状況 (非公開を含む)",
-        state_block,
-        "",
-        "## 場の状況 (Master ダイジェスト)",
-        digest,
-        "",
-        f"## 行動候補席\n{candidates_str}",
-        "",
-        "上記すべてを踏まえ、夜の行動対象を決めてください。"
-        "**スキップ禁止**: 必ず候補席の中から1人を選んで `target_seat` に入れる。"
-        "情報が薄くても、相対的に最も対象として価値がある1人を選ぶこと "
-        "(占い: 情報を取りたい灰、人狼: 噛み価値の高い位置、騎士: 守るべき情報役/重要位置)。"
-        "「捨て護衛」のような戦術選択をしたい場合も、null ではなく合法候補から1人を選ぶ。"
-        "JSON は {\"target_seat\": <候補席番号>, \"reason\": \"<短い理由>\"} の形 "
-        "(`target_seat` は必ず整数、null 不可)。",
-    ]
-    return system, "\n".join(p for p in user_parts if p is not None)
 
 
 def parse_decision(
