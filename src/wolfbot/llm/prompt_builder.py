@@ -1301,59 +1301,44 @@ def build_user_context(
 
 
 # ---------------------------------------------------------- task blocks
+_TASK_DAYTIME_SPEECH_TEMPLATE = "master/task_daytime_speech"
+_TASK_VOTE_TEMPLATE = "master/task_vote"
+_TASK_NIGHT_ACTION_TEMPLATE = "master/task_night_action"
+_TASK_WOLF_CHAT_TEMPLATE = "master/task_wolf_chat"
+
+
 def task_daytime_speech(
     day_number: int,
     discussion_round: int | None = None,
     *,
     role: Role | None = None,
 ) -> str:
-    base = (
-        f"現在は day {day_number} の議論フェイズです。"
-        " 必要と感じた場合のみ `intent=speak` を返し、`public_message` に 80〜300 字で短い発言を書いてください。"
-        " 発言したくない場合は `intent=skip` と明示してください。"
-        " 疑い先を出すときは、単体の怪しさだけでなく、その人物が人狼なら相方候補は誰か、"
-        "2 人狼セットとして票筋・噛み筋が自然かも必要に応じて短く触れてください。"
-        "全候補のペアを長く列挙せず、今の結論に効く 1〜2 点だけを出してください。"
-        "\n発話 (`public_message`) のルール:"
-        " 自然な日本語で喋ること。"
-        "「CO」「占いCO」「霊媒CO」「騎士CO」「黒判定」「白判定」「ライン」「グレー」「グレラン」"
-        "「縄」「PP」「RPP」「ローラー」「ロラ」「破綻」「確白」「確黒」「パンダ」「鉄板護衛」「捨て護衛」"
-        "「噛み筋」「票筋」「視点漏れ」「身内切り」「囲い」など、"
-        "プレイヤー間で使われがちなメタ用語は `public_message` 内で使わない"
-        "(これらは内部の `reason_summary` や思考メモには使ってよい)。"
-        "口に出すときは状況や感情として描写する"
-        "(例: 「あの白判定、無理に庇ってる気がして信用できない」「昨夜守ったのは◯◯です」"
-        "「あと処刑できる回数を考えると…」)。"
-        f"役職 CO したい場合は `co_declaration` を `{format_co_claim_options(separator=' / ')}` のいずれかに設定し、"
-        "`public_message` 側は「実は私、占い師なんだ」のように自然に名乗ってから能力結果を続ける。"
-        "`co_declaration` を設定しないなら `null`。"
+    """Day-discussion task instruction.
+
+    Body lives in ``master/task_daytime_speech.md``. Two optional
+    paragraphs are gated by template ``{{#if}}`` blocks:
+
+    * ``include_day2_round1_results_block`` — turns on when
+      ``day_number >= 2 and discussion_round == 1`` so the LLM is
+      reminded to surface previous-night ability results in their
+      first speech of the day.
+    * ``include_day1_round1_wolf_madman_block`` — wolf/madman-only
+      branch on day-1 round-1 that walks the 占い師騙り / 霊媒師騙り
+      / 潜伏 triad. Other roles never see partner / fake-CO tactics.
+    """
+    return render_template(
+        _TASK_DAYTIME_SPEECH_TEMPLATE,
+        day_number=day_number,
+        co_claim_options=format_co_claim_options(separator=" / "),
+        include_day2_round1_results_block=(
+            day_number >= 2 and discussion_round == 1
+        ),
+        include_day1_round1_wolf_madman_block=(
+            day_number == 1
+            and discussion_round == 1
+            and role in (Role.WEREWOLF, Role.MADMAN)
+        ),
     )
-    if day_number >= 2 and discussion_round == 1:
-        base += (
-            " これは day 2 以降の 1 巡目発言です。"
-            " 占い師・霊媒師・騎士として既に名乗っている、または今初めて名乗る場合は、"
-            "前夜の能力結果をこの発言で添えてください。"
-            " 占い師なら対象 + 白/黒 + 占い理由、"
-            "霊媒師なら前日処刑者 + 人狼/人狼ではない/結果なし、"
-            "騎士なら名乗る局面で合法な護衛履歴 (護衛日 + 護衛先) を日付順に出し、"
-            "平和な朝なら護衛成功も合わせて伝えます。"
-            " 結果を持つはずの役職を名乗っているのに 1 巡目で結果を出さないと、"
-            "信用低下や破綻疑いにつながります。"
-            " ただし `public_message` 内ではこの「白/黒」「結果なし」のような内部メモ語彙を"
-            "そのまま読み上げず、「結果は人狼でした」「占ったけど人狼じゃなかった」"
-            "「占ってみた感触は白かな」のように自然な発話に書き直す。"
-            " 名乗り直すならこのターンで `co_declaration` を立て、"
-            "`public_message` でも自然な日本語で名乗りと結果を述べてください。"
-        )
-    if day_number == 1 and discussion_round == 1 and role in (Role.WEREWOLF, Role.MADMAN):
-        base += (
-            " day 1 の 1 巡目で偽 CO を選ぶ場合、占い師騙り・霊媒師騙り・潜伏の 3 択を比較してください。"
-            " 霊媒師騙りに出ると、真霊媒との 1-2、または別の騙り狼との組み合わせで 2-2 を作りに行けます。"
-            " 占い師騙り CO 数・縄数・潜伏で白を取る余地と比べて、得な方を選びます。"
-            " 霊媒師騙りで day 1 に CO する場合は、まだ処刑がないので初日の霊媒結果は出さず、"
-            "翌日処刑があった時に結果を出す立ち回りだと添えてください。"
-        )
-    return base
 
 
 def task_vote(
@@ -1363,118 +1348,67 @@ def task_vote(
     role: Role | None = None,
     wolf_partner_tokens: Sequence[str] = (),
 ) -> str:
-    """Candidates are `席{N} {display_name}` tokens; target_name must echo one back.
+    """Vote-phase task instruction.
 
-    `role` + `wolf_partner_tokens` are an additive, wolf-only enrichment: when the
-    voter is a werewolf and at least one alive partner exists, append a checklist
-    that names the partner and walks熟練狼's vote-discipline tradeoffs (身内票 /
-    ライン切り / 票逸らしリスク / 決選投票). Other roles always get the base text
-    so partner identity and wolf-side voting tactics never reach non-wolf prompts.
+    Body lives in ``master/task_vote.md``. Candidates are
+    ``席{N} {display_name}`` tokens; target_name must echo one back.
+
+    ``role`` + ``wolf_partner_tokens`` are an additive, wolf-only
+    enrichment: the template's ``{{#if has_wolf_block}}`` branch
+    appends a checklist that names the partner and walks 熟練狼's
+    vote-discipline tradeoffs (身内票 / ライン切り / 票逸らしリスク
+    / 決選投票). Other roles flip ``has_wolf_block`` off so partner
+    identity and wolf-side voting tactics never reach non-wolf
+    prompts.
     """
-    names = "、".join(candidate_tokens)
-    runoff_note = "これは決選投票です。" if runoff else ""
-    base = (
-        f"{runoff_note}投票先として合法な候補は: {names}\n"
-        " `intent=vote`、`target_name` に候補トークン (例: `席3 Alice`) のいずれかを"
-        " 厳密に一致させて返してください。`席番号` を含めないと同名の別席と区別できません。"
-        " どうしても棄権したい場合は `intent=skip` を返し、`target_name` は `null` にします。\n"
-        "- 投票先は単体黒要素だけでなく、その人物が人狼なら相方候補は誰か、"
-        "2 人狼セットとして票筋・噛み筋が自然かも考えて選んでください。"
-        "投票理由は長くせず、最終判断で相方候補との整合を加味します。"
+    has_wolf_block = role is Role.WEREWOLF and bool(wolf_partner_tokens)
+    return render_template(
+        _TASK_VOTE_TEMPLATE,
+        runoff_note="これは決選投票です。" if runoff else "",
+        names="、".join(candidate_tokens),
+        has_wolf_block=has_wolf_block,
+        partners="、".join(wolf_partner_tokens) if has_wolf_block else "",
+        runoff=runoff and has_wolf_block,
     )
-    if role is not Role.WEREWOLF or not wolf_partner_tokens:
-        return base
-    partners = "、".join(wolf_partner_tokens)
-    runoff_extra = (
-        "\n- 決選投票では、相方救済の成功見込み、自分の透けリスク、"
-        "相方を切って翌日以降に残る価値、PP/RPP の近さと縄数を比較してください。"
-        if runoff
-        else ""
-    )
-    wolf_block = (
-        "\n\nあなたは人狼です。仲間の人狼: "
-        f"{partners}。"
-        "\n- 投票は翌日以降に票筋として読まれます。"
-        "仲間が公開ログ上で処刑濃厚なときに自分だけ弱い別候補へ票を逸らすと、"
-        "相方を庇った狼として透けやすくなります。"
-        "\n- 相方を救えない局面では、身内票やライン切りで相方へ投票することも検討してください。"
-        "投票理由は公開ログ上の発言・CO 矛盾・票筋・視点漏れに沿って自然に作り、"
-        "前日までの自分の発言や騙り結果と矛盾しないようにします。"
-        "\n- 相方を救う票は、自然に票が集まり得る対抗候補がいて、"
-        "自分の過去発言・投票理由・騙り結果と矛盾しないときだけ選んでください。"
-        "根拠の薄い票逸らしは狼ラインを濃くします。"
-        "\n- 救う票・切る票・票逸らしのどれも、翌日以降に自分と相方の 2 人狼セットとして読まれても"
-        "説明できるかを必ず確認してください。"
-        f"{runoff_extra}"
-        "\n- 最後は必ず合法候補トークンから 1 名を返します。"
-        "困っても安易に skip しないでください。"
-    )
-    return base + wolf_block
 
 
 def task_night_action(kind: SubmissionType, candidate_tokens: Sequence[str]) -> str:
-    """Candidates are `席{N} {display_name}` tokens; target_name must echo one back."""
-    names = "、".join(candidate_tokens)
+    """Night-action task instruction.
+
+    Body lives in ``master/task_night_action.md``. Candidates are
+    ``席{N} {display_name}`` tokens; target_name must echo one back.
+
+    Three role-scoped advice paragraphs (wolf-attack value scoring,
+    knight-guard tradeoffs, seer-divine target value) are gated by
+    template ``{{#if}}`` blocks keyed off the action kind so each
+    role only sees its own decision checklist.
+    """
     label = {
         SubmissionType.WOLF_ATTACK: "襲撃",
         SubmissionType.SEER_DIVINE: "占い",
         SubmissionType.KNIGHT_GUARD: "護衛",
     }[kind]
-    extra = ""
-    if kind is SubmissionType.WOLF_ATTACK:
-        extra = (
-            " 仲間の人狼が人狼チャットで案を出している場合、強い反対理由がなければ"
-            " その案に合わせてください。意見が割れると襲撃が空振りになります。\n"
-            " 候補ごとに「襲撃価値」「護衛されやすさ」「騎士候補度」「翌日の説明しやすさ」"
-            "を短く比較してから 1 名に決めてください。"
-            " 単独真寄りの情報役・確白寄り・進行役は襲撃価値も護衛されやすさも高い両刃です。"
-            " 騎士っぽい相手を「騎士探し」として先に噛む選択も忘れずに検討してください。"
-        )
-    elif kind is SubmissionType.KNIGHT_GUARD:
-        extra = (
-            " 候補ごとに「鉄板護衛すべき価値」"
-            "「今夜実際に噛まれそうか (護衛を読まれて避けられそうか含む)」"
-            "「GJ の価値」「次夜に同じ相手を守れないリスク」"
-            "「捨て護衛で本命護衛余地を残す価値」"
-            "を短く比較してから 1 名に決めてください。"
-            " 捨て護衛を選ぶ場合も、この bot では合法候補から 1 名を選びます。"
-            " 未提出や対象なしや skip にしてはいけません。"
-        )
-    elif kind is SubmissionType.SEER_DIVINE:
-        extra = (
-            " 候補ごとに「占い価値 (灰を狭める効果、CO 真偽比較への寄与、自分視点の進行整理)」"
-            "「対抗 CO の白先や囲い候補と比較して真偽判定に効くか」"
-            "「投票・票変え・誘導との整合 (浮いた位置・根拠の薄い強い誘導をしている位置)」"
-            "「白でも黒でも情報が落ちるか (白なら進行役候補、黒なら処刑提案)」"
-            "を短く比較してから 1 名に決めてください。"
-            " 既に自分が占った位置・今日ほぼ処刑されそうな位置・"
-            "公開情報で十分処理対象になっている位置・極端に発言が少なく白黒どちらでも議論が伸びにくい位置は占い価値が下がります。"
-            " 今夜襲撃される可能性が高い位置でも、結果が CO 真偽や囲い疑惑の整理に直結するなら候補に残してよいです"
-            "(死亡しても占い結果は得られます)。"
-        )
-    return (
-        f"夜です。{label} 対象を 1 名選んでください。合法候補: {names}\n"
-        " `intent=night_action`、`target_name` に候補トークン (例: `席3 Alice`) のいずれかを"
-        " 厳密に一致させて返してください。`席番号` を含めないと同名の別席と区別できません。"
-        f"{extra}"
+    return render_template(
+        _TASK_NIGHT_ACTION_TEMPLATE,
+        label=label,
+        names="、".join(candidate_tokens),
+        is_wolf_attack=kind is SubmissionType.WOLF_ATTACK,
+        is_knight_guard=kind is SubmissionType.KNIGHT_GUARD,
+        is_seer_divine=kind is SubmissionType.SEER_DIVINE,
     )
 
 
 def task_wolf_chat(partner_tokens: Sequence[str], candidate_tokens: Sequence[str]) -> str:
-    """Ask a wolf to post a short coordination message to the wolves-only chat."""
-    partners = "、".join(partner_tokens) if partner_tokens else "(なし)"
-    names = "、".join(candidate_tokens)
-    return (
-        f"夜になりました。仲間の人狼: {partners}。人狼チャット (村人には非公開) で"
-        f" 襲撃対象を調整してください。候補: {names}\n"
-        " `intent=speak` と `public_message` に 1 名の襲撃候補とその理由を"
-        " 80〜150 字で書いてください。"
-        " 理由には「襲撃価値 (情報役噛み/白位置噛み/意見噛み/騎士探し/SG 残しのどれか)」"
-        "「護衛されそうか」「本人が騎士っぽいか (騎士候補)」「相方案への賛否」のうち"
-        " 重要な 1〜2 点を含めてください。"
-        " 仲間が既に案を出している場合は、護衛リスクと襲撃価値を比較したうえで"
-        " 最終的に 1 人に揃えることを優先してください。"
-        " 話すことがなければ `intent=skip` を返してください。"
+    """Wolf-chat coordination task instruction.
+
+    Body lives in ``master/task_wolf_chat.md``. Asks a wolf to post a
+    short coordination line to the wolves-only chat naming the
+    intended attack target with concise reasoning.
+    """
+    return render_template(
+        _TASK_WOLF_CHAT_TEMPLATE,
+        partners="、".join(partner_tokens) if partner_tokens else "(なし)",
+        names="、".join(candidate_tokens),
     )
 
 
