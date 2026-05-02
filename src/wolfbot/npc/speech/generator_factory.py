@@ -4,7 +4,7 @@ Mirror of :func:`wolfbot.services.llm_service.make_llm_decider`, but for
 the NPC speech path: takes a provider-agnostic
 :class:`wolfbot.llm.decider_config.LLMDeciderConfig` plus the persona
 key bound to the worker process at startup, and returns a fully
-configured :class:`wolfbot.npc.speech_service.NpcGenerator`.
+configured :class:`wolfbot.npc.speech.speech_service.NpcGenerator`.
 
 Three providers supported, identical to the gameplay LLM path:
 
@@ -24,12 +24,12 @@ we get here; the asserts below are documentation aids for mypy.
 from __future__ import annotations
 
 from wolfbot.llm.decider_config import LLMDeciderConfig
-from wolfbot.npc.speech_service import NpcGenerator
+from wolfbot.npc.speech.speech_service import NpcGenerator
 
 
 def make_npc_generator(cfg: LLMDeciderConfig, *, persona_key: str) -> NpcGenerator:
     if cfg.provider == "xai":
-        from wolfbot.npc.openai_compatible_generator import (
+        from wolfbot.npc.speech.openai_compatible_generator import (
             OpenAICompatibleConfig,
             OpenAICompatibleNpcGenerator,
         )
@@ -48,7 +48,7 @@ def make_npc_generator(cfg: LLMDeciderConfig, *, persona_key: str) -> NpcGenerat
         return gen
 
     if cfg.provider == "deepseek":
-        from wolfbot.npc.openai_compatible_generator import (
+        from wolfbot.npc.speech.openai_compatible_generator import (
             OpenAICompatibleConfig,
             OpenAICompatibleNpcGenerator,
         )
@@ -69,7 +69,7 @@ def make_npc_generator(cfg: LLMDeciderConfig, *, persona_key: str) -> NpcGenerat
         return gen_ds
 
     if cfg.provider == "gemini":
-        from wolfbot.npc.gemini_generator import (
+        from wolfbot.npc.speech.gemini_generator import (
             GeminiNpcGenerator,
             GeminiVertexConfig,
         )
@@ -94,7 +94,7 @@ def make_npc_generator(cfg: LLMDeciderConfig, *, persona_key: str) -> NpcGenerat
         return gen_gemini
 
     if cfg.provider == "mock":
-        from wolfbot.npc.mock_generator import MockNpcGenerator
+        from wolfbot.npc.speech.mock_generator import MockNpcGenerator
 
         gen_mock = MockNpcGenerator()
         gen_mock.set_persona(persona_key)

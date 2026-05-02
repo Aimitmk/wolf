@@ -22,7 +22,7 @@ from wolfbot.domain.ws_messages import (
     SpeakRequest,
     SpeakResult,
 )
-from wolfbot.npc.game_state import NpcGameState
+from wolfbot.npc.decision.game_state import NpcGameState
 
 log = logging.getLogger(__name__)
 

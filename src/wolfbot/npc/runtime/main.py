@@ -1,6 +1,6 @@
 """NPC bot worker entrypoint.
 
-Loads :class:`wolfbot.npc.config.NpcSettings` from the env file pointed
+Loads :class:`wolfbot.npc.runtime.config.NpcSettings` from the env file pointed
 to by ``WOLFBOT_NPC_ENV`` (default ``.env.npc``), connects to Discord
 VC, opens a WS connection to Master, registers, and runs the heartbeat
 + message loop. On ``speak_request`` the NPC generates text via the
@@ -27,7 +27,7 @@ import time
 import discord
 from dotenv import load_dotenv
 
-from wolfbot.npc.config import NpcSettings
+from wolfbot.npc.runtime.config import NpcSettings
 
 log = logging.getLogger(__name__)
 
@@ -207,12 +207,12 @@ async def _main() -> None:
     discord_user_id = str(bot.user.id) if bot.user else "unknown"
 
     # ---- Build NPC pipeline ----
-    from wolfbot.npc.client import NpcClient, NpcClientConfig
-    from wolfbot.npc.decision_service import DecisionLLM
-    from wolfbot.npc.generator_factory import make_npc_generator
-    from wolfbot.npc.playback import DiscordVoicePlayback, VoicePlaybackError
-    from wolfbot.npc.speech_service import NpcSpeechService
-    from wolfbot.npc.tts import VoicevoxTtsService
+    from wolfbot.npc.audio.playback import DiscordVoicePlayback, VoicePlaybackError
+    from wolfbot.npc.audio.tts import VoicevoxTtsService
+    from wolfbot.npc.decision.decision_service import DecisionLLM
+    from wolfbot.npc.runtime.client import NpcClient, NpcClientConfig
+    from wolfbot.npc.speech.generator_factory import make_npc_generator
+    from wolfbot.npc.speech.speech_service import NpcSpeechService
 
     generator = make_npc_generator(
         settings.npc_decider_config(),

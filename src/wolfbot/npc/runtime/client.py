@@ -47,7 +47,17 @@ from wolfbot.domain.ws_messages import (
     WolfChatRequest,
     WolfChatSend,
 )
-from wolfbot.npc.decision_service import (
+from wolfbot.npc.audio.playback import (
+    VoicePlayback,
+    VoicePlaybackError,
+)
+from wolfbot.npc.audio.tts import (
+    InMemoryTtsCache,
+    TtsProviderError,
+    TtsRequest,
+    TtsService,
+)
+from wolfbot.npc.decision.decision_service import (
     _NIGHT_SCHEMA,
     _VOTE_SCHEMA,
     _WOLF_CHAT_SCHEMA,
@@ -58,18 +68,8 @@ from wolfbot.npc.decision_service import (
     parse_decision,
     parse_wolf_chat_text,
 )
-from wolfbot.npc.game_state import NpcGameState, apply_update, state_from_snapshot
-from wolfbot.npc.playback import (
-    VoicePlayback,
-    VoicePlaybackError,
-)
-from wolfbot.npc.speech_service import NpcSpeechService
-from wolfbot.npc.tts import (
-    InMemoryTtsCache,
-    TtsProviderError,
-    TtsRequest,
-    TtsService,
-)
+from wolfbot.npc.decision.game_state import NpcGameState, apply_update, state_from_snapshot
+from wolfbot.npc.speech.speech_service import NpcSpeechService
 
 log = logging.getLogger(__name__)
 

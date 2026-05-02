@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from wolfbot.master.voice.tts_playback import MasterTtsPlayback
-from wolfbot.npc.tts import FakeTtsService, TtsResult
+from wolfbot.npc.audio.tts import FakeTtsService, TtsResult
 
 
 @dataclass

@@ -9,8 +9,8 @@ LLM that returns structured JSON:
   :class:`wolfbot.config.MasterSettings` (env prefix ``GAMEPLAY_LLM_*``).
 * **NPC speech LLM** — drives one NPC bot's short reactive utterance in
   ``reactive_voice`` mode.  Lives in
-  :mod:`wolfbot.npc.openai_compatible_generator` (and the Vertex Gemini
-  sibling) and is configured via :class:`wolfbot.npc.config.NpcSettings`
+  :mod:`wolfbot.npc.speech.openai_compatible_generator` (and the Vertex Gemini
+  sibling) and is configured via :class:`wolfbot.npc.runtime.config.NpcSettings`
   (env prefix ``NPC_LLM_*``).
 
 Both roles support the same three providers (``xai`` / ``deepseek`` /
@@ -42,7 +42,7 @@ class LLMDeciderConfig:
     Constructed by ``MasterSettings.gameplay_decider_config()`` and
     ``NpcSettings.npc_decider_config()``; consumed by
     :func:`wolfbot.services.llm_service.make_llm_decider` (gameplay) and
-    :func:`wolfbot.npc.generator_factory.make_npc_generator` (NPC).
+    :func:`wolfbot.npc.speech.generator_factory.make_npc_generator` (NPC).
 
     Provider gating: the relevant Settings ``model_validator`` guarantees
     that the field tied to the chosen provider is non-None / non-empty

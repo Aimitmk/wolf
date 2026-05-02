@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from wolfbot.npc.config import NpcSettings
+from wolfbot.npc.runtime.config import NpcSettings
 
 
 def _base_kwargs() -> dict[str, object]:

@@ -18,12 +18,12 @@ from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Game, Seat
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
 from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
-from wolfbot.npc.openai_compatible_generator import (
+from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY as PERSONAS_BY_KEY
+from wolfbot.npc.speech.openai_compatible_generator import (
     _build_system,
     _build_user,
     _format_candidate,
 )
-from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY as PERSONAS_BY_KEY
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 
 
@@ -410,7 +410,7 @@ def test_build_user_prompt_uses_npc_state_over_request_fields() -> None:
         SeerResult,
         WolfChatLine,
     )
-    from wolfbot.npc.game_state import NpcGameState
+    from wolfbot.npc.decision.game_state import NpcGameState
 
     logic = LogicPacket(
         ts=1, trace_id="t", packet_id="lp", phase_id="ph",
@@ -485,7 +485,7 @@ def test_build_user_prompt_falls_back_to_request_when_state_none() -> None:
 def test_build_user_prompt_tags_dead_seats_with_death_cause() -> None:
     """Dead seat list must distinguish executions from attacks so the
     NPC stops calling yesterday's executed player "昨夜の犠牲者"."""
-    from wolfbot.npc.game_state import NpcGameState
+    from wolfbot.npc.decision.game_state import NpcGameState
 
     logic = LogicPacket(
         ts=1, trace_id="t", packet_id="lp", phase_id="ph",

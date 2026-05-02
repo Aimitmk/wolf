@@ -1,7 +1,7 @@
 """Master-side TTS playback — Levi narration via VOICEVOX in VC.
 
 NPC bots have their own per-process TTS pipeline
-(:mod:`wolfbot.npc.tts` + :mod:`wolfbot.npc.playback`). Master needs a
+(:mod:`wolfbot.npc.audio.tts` + :mod:`wolfbot.npc.audio.playback`). Master needs a
 parallel-but-simpler pipeline: synthesize narration text via the same
 VOICEVOX HTTP engine, then push the audio through Master's own
 `discord.VoiceClient.play(...)` so phase-transition announcements are
@@ -37,7 +37,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from wolfbot.npc.tts import (
+from wolfbot.npc.audio.tts import (
     InMemoryTtsCache,
     TtsProviderError,
     TtsRequest,

@@ -31,7 +31,7 @@ from wolfbot.master.state.private_state import (
     make_seer_result_update,
     make_wolf_chat_update,
 )
-from wolfbot.npc.game_state import apply_update, state_from_snapshot
+from wolfbot.npc.decision.game_state import apply_update, state_from_snapshot
 from wolfbot.persistence.schema import migrate
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 

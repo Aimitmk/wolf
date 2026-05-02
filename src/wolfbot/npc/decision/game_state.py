@@ -9,7 +9,7 @@ the Master DB or persists state locally — a process restart re-hydrates
 from a Master-sent snapshot at re-register.
 
 This module is the pure data container. The dispatch / WS handlers live
-in :mod:`wolfbot.npc.client`; the prompt-building consumers live in the
+in :mod:`wolfbot.npc.runtime.client`; the prompt-building consumers live in the
 NPC LLM generators.
 """
 

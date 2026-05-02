@@ -25,10 +25,10 @@ remarks, not multi-paragraph analytical speeches. The persona's
 ``style_guide`` and ``speech_profile`` are included for voice consistency
 but the strategic rules sections are omitted.
 
-For Vertex AI Gemini, see :mod:`wolfbot.npc.gemini_generator` — that
+For Vertex AI Gemini, see :mod:`wolfbot.npc.speech.gemini_generator` — that
 provider is not OpenAI-compatible and uses the ``google-genai`` SDK.
 The right generator for a given ``LLMDeciderConfig`` is picked by
-:func:`wolfbot.npc.generator_factory.make_npc_generator`.
+:func:`wolfbot.npc.speech.generator_factory.make_npc_generator`.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from wolfbot.llm.prompt_builder import (
 )
 from wolfbot.llm.template import render_template
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
-from wolfbot.npc.speech_service import NpcGeneratedSpeech
+from wolfbot.npc.speech.speech_service import NpcGeneratedSpeech
 
 log = logging.getLogger(__name__)
 
@@ -480,7 +480,7 @@ class OpenAICompatibleConfig:
 class OpenAICompatibleNpcGenerator:
     """Production NpcGenerator backed by any OpenAI-compatible LLM endpoint.
 
-    Implements :class:`wolfbot.npc.speech_service.NpcGenerator` via the
+    Implements :class:`wolfbot.npc.speech.speech_service.NpcGenerator` via the
     ``openai`` SDK's ``chat.completions`` API. The choice of provider is
     a config decision (``base_url`` + ``model`` + ``mode``), not a code
     decision.  Strict ``json_schema`` mode is the default; DeepSeek

@@ -5,7 +5,7 @@ don't fill all 9 slots. Master picks from this pool at game start (via
 ``pick_personas``) and writes the chosen ``persona_key`` onto each LLM
 ``Seat``; both rounds-mode prompt building (``services.llm_service``) and
 reactive_voice NPC speech generation
-(:mod:`wolfbot.npc.openai_compatible_generator`) look up the persona by
+(:mod:`wolfbot.npc.speech.openai_compatible_generator`) look up the persona by
 that key.
 
 Names are taken from Gnosia; style guidelines describe judgment tendency

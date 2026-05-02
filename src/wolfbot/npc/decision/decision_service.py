@@ -37,7 +37,7 @@ from wolfbot.llm.prompt_builder import (
     build_strategy_block,
 )
 from wolfbot.llm.template import render_template
-from wolfbot.npc.game_state import NpcGameState
+from wolfbot.npc.decision.game_state import NpcGameState
 
 log = logging.getLogger(__name__)
 

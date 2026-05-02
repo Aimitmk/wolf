@@ -1,7 +1,7 @@
 """NPC bot worker settings.
 
 Loaded once at startup via pydantic-settings.  The actual env file path
-is selected by :mod:`wolfbot.npc.main` from ``WOLFBOT_NPC_ENV``; per-
+is selected by :mod:`wolfbot.npc.runtime.main` from ``WOLFBOT_NPC_ENV``; per-
 persona templates live under ``envs/npc/.env.<persona>.example`` (see
 :file:`envs/npc/README.md`).  One NPC worker process = one persona = one
 ``envs/npc/.env.<persona>`` file (each NPC needs its own Discord bot

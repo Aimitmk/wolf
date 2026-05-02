@@ -16,7 +16,7 @@
   `LLMDeciderConfig.provider`.  ``cfg`` is built by
   ``MasterSettings.gameplay_decider_config()`` from ``GAMEPLAY_LLM_*``
   env vars (the symmetrical NPC factory in
-  :mod:`wolfbot.npc.generator_factory` consumes the same config dataclass
+  :mod:`wolfbot.npc.speech.generator_factory` consumes the same config dataclass
   built from ``NPC_LLM_*`` instead).
 - `LLMAdapter`: implements the LLMAdapter Protocol consumed by game_service; iterates
   LLM seats and submits their actions via GameService.submit_*.
@@ -2121,7 +2121,7 @@ def make_llm_decider(cfg: LLMDeciderConfig) -> LLMActionDecider:
     The same factory is used for both Master's Gameplay LLM (built from
     ``MasterSettings.gameplay_decider_config()``) and any ad-hoc gameplay
     decider tests need.  NPC speech generation has its own factory in
-    :mod:`wolfbot.npc.generator_factory` because the NPC schema differs.
+    :mod:`wolfbot.npc.speech.generator_factory` because the NPC schema differs.
     """
     if cfg.provider == "xai":
         assert cfg.api_key is not None  # validated in Settings

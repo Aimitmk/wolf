@@ -3,7 +3,7 @@
 Returns scripted utterances per persona, no network call.
 
 Each NPC bot worker is bound to exactly one persona at startup. The factory
-:func:`wolfbot.npc.generator_factory.make_npc_generator` calls
+:func:`wolfbot.npc.speech.generator_factory.make_npc_generator` calls
 :meth:`MockNpcGenerator.set_persona` after construction so the mock can
 pick the right canned-phrase pool. When the persona key is unknown to
 this module, a generic fallback script is used so a new persona doesn't
@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest
-from wolfbot.npc.speech_service import NpcGeneratedSpeech
+from wolfbot.npc.speech.speech_service import NpcGeneratedSpeech
 
 _PERSONA_SCRIPTS: dict[str, tuple[str, ...]] = {
     "setsu": (

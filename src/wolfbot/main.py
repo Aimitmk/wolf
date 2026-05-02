@@ -841,7 +841,7 @@ async def _run() -> None:
             render_master_narration,
         )
         from wolfbot.master.voice.tts_playback import MasterTtsPlayback
-        from wolfbot.npc.tts import VoicevoxTtsService
+        from wolfbot.npc.audio.tts import VoicevoxTtsService
 
         master_tts = MasterTtsPlayback(
             tts=VoicevoxTtsService(

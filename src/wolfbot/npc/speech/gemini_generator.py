@@ -1,6 +1,6 @@
 """Vertex AI Gemini-backed NPC speech generator.
 
-Mirror of :mod:`wolfbot.npc.openai_compatible_generator` but talks to
+Mirror of :mod:`wolfbot.npc.speech.openai_compatible_generator` but talks to
 Vertex AI's Gemini API via the official ``google-genai`` SDK with
 ``response_mime_type="application/json"`` + ``response_json_schema`` for
 structured output and ``ThinkingConfig.thinking_level`` for thinking
@@ -25,14 +25,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest
-from wolfbot.npc.openai_compatible_generator import (
+from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
+from wolfbot.npc.speech.openai_compatible_generator import (
     _RESPONSE_SCHEMA,
     _build_speech_from_json,
     _build_system,
     _build_user,
 )
-from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
-from wolfbot.npc.speech_service import NpcGeneratedSpeech
+from wolfbot.npc.speech.speech_service import NpcGeneratedSpeech
 
 log = logging.getLogger(__name__)
 

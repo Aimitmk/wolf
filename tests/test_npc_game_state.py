@@ -25,12 +25,12 @@ from wolfbot.domain.ws_messages import (
     VoteDecision,
     WolfChatLine,
 )
-from wolfbot.npc.client import NpcClient, NpcClientConfig
-from wolfbot.npc.game_state import (
+from wolfbot.npc.decision.game_state import (
     NpcGameState,
     apply_update,
     state_from_snapshot,
 )
+from wolfbot.npc.runtime.client import NpcClient, NpcClientConfig
 
 
 def _snapshot(**overrides: object) -> PrivateStateSnapshot:

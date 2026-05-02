@@ -31,21 +31,21 @@ from wolfbot.domain.ws_messages import (
     SpeakResult,
     TtsFinished,
 )
-from wolfbot.npc.client import NpcClient, NpcClientConfig
-from wolfbot.npc.playback import (
+from wolfbot.npc.audio.playback import (
     FakeVoicePlayback,
     VoicePlaybackError,
 )
-from wolfbot.npc.speech_service import (
-    FakeNpcGenerator,
-    NpcGeneratedSpeech,
-    NpcSpeechService,
-)
-from wolfbot.npc.tts import (
+from wolfbot.npc.audio.tts import (
     FakeTtsService,
     InMemoryTtsCache,
     TtsProviderError,
     TtsResult,
+)
+from wolfbot.npc.runtime.client import NpcClient, NpcClientConfig
+from wolfbot.npc.speech.speech_service import (
+    FakeNpcGenerator,
+    NpcGeneratedSpeech,
+    NpcSpeechService,
 )
 
 
@@ -375,7 +375,7 @@ def test_npc_bot_main_module_loads() -> None:
     """Smoke-load the entrypoint module to catch import-time regressions."""
     import importlib
 
-    mod = importlib.import_module("wolfbot.npc.main")
+    mod = importlib.import_module("wolfbot.npc.runtime.main")
     assert hasattr(mod, "main")
 
 

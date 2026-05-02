@@ -21,8 +21,8 @@ from wolfbot.domain.ws_messages import (
     LogicPacket,
     SpeakRequest,
 )
-from wolfbot.npc.openai_compatible_generator import _parse_claim_fields
-from wolfbot.npc.speech_service import (
+from wolfbot.npc.speech.openai_compatible_generator import _parse_claim_fields
+from wolfbot.npc.speech.speech_service import (
     NpcGeneratedSpeech,
     NpcSpeechService,
 )
@@ -173,7 +173,7 @@ async def test_speech_service_threads_claim_into_speak_result() -> None:
     """``NpcSpeechService.respond`` must lift the generated speech's
     ``claimed_*`` fields onto the wire model so Master persists them
     on the SpeechEvent."""
-    from wolfbot.npc.speech_service import FakeNpcGenerator
+    from wolfbot.npc.speech.speech_service import FakeNpcGenerator
 
     speech = NpcGeneratedSpeech(
         text="昨夜セツを占って白だった。",
@@ -229,7 +229,7 @@ async def test_speech_service_drops_self_claim() -> None:
     """A wolf NPC that names its own seat as the divined target is
     self-incriminating gibberish; the service drops the structured
     claim before persisting (the speech itself still goes through)."""
-    from wolfbot.npc.speech_service import FakeNpcGenerator
+    from wolfbot.npc.speech.speech_service import FakeNpcGenerator
 
     speech = NpcGeneratedSpeech(
         text="自分を占いました（バグ）",

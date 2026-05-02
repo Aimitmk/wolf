@@ -2,7 +2,7 @@
 
 Loaded once at startup from ``.env.master`` via pydantic-settings.
 
-NPC bot worker settings live in :mod:`wolfbot.npc.config`.
+NPC bot worker settings live in :mod:`wolfbot.npc.runtime.config`.
 """
 
 from __future__ import annotations

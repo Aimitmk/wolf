@@ -15,12 +15,12 @@ from wolfbot.domain.ws_messages import (
     DecideNightActionRequest,
     DecideVoteRequest,
 )
-from wolfbot.npc.decision_service import (
+from wolfbot.npc.decision.decision_service import (
     build_night_prompt,
     build_vote_prompt,
     parse_decision,
 )
-from wolfbot.npc.game_state import NpcGameState
+from wolfbot.npc.decision.game_state import NpcGameState
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 
 
@@ -146,7 +146,7 @@ def test_build_wolf_chat_prompt_includes_role_strategy_block() -> None:
     The night-action prompt does carry it, but by then `wolf_chat_history`
     already locks the wolves to the chat-time consensus.
     """
-    from wolfbot.npc.decision_service import build_wolf_chat_prompt
+    from wolfbot.npc.decision.decision_service import build_wolf_chat_prompt
 
     persona = NPC_PERSONAS_BY_KEY["gina"]
     _system, user = build_wolf_chat_prompt(

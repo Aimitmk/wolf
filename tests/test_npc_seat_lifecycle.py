@@ -29,10 +29,10 @@ from wolfbot.domain.ws_messages import (
     SetMuteState,
 )
 from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
-from wolfbot.npc.client import NpcClient, NpcClientConfig
-from wolfbot.npc.playback import FakeVoicePlayback
-from wolfbot.npc.speech_service import FakeNpcGenerator, NpcSpeechService
-from wolfbot.npc.tts import FakeTtsService
+from wolfbot.npc.audio.playback import FakeVoicePlayback
+from wolfbot.npc.audio.tts import FakeTtsService
+from wolfbot.npc.runtime.client import NpcClient, NpcClientConfig
+from wolfbot.npc.speech.speech_service import FakeNpcGenerator, NpcSpeechService
 
 
 @dataclass

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from wolfbot.domain.ws_messages import LogicPacket, SpeakRequest
 from wolfbot.llm.decider_config import LLMDeciderConfig
-from wolfbot.npc.generator_factory import make_npc_generator
-from wolfbot.npc.mock_generator import MockNpcGenerator
+from wolfbot.npc.speech.generator_factory import make_npc_generator
+from wolfbot.npc.speech.mock_generator import MockNpcGenerator
 
 
 def _logic_packet() -> LogicPacket:
