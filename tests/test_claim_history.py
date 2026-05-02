@@ -148,6 +148,125 @@ def test_collect_claim_history_handles_medium_void_result() -> None:
     )
 
 
+def test_collect_claim_history_dedupes_same_day_reassertions() -> None:
+    """Same (day, target, verdict) restated across multiple speech turns
+    in one day's discussion rounds folds to a single ledger row.
+
+    Regression: game ``2026-05-02_09-34-19`` exported two ledger rows
+    for the medium claimer's "day 2 シゲミチ白" (round 1 + round 2 of
+    the same morning) and four rows for Yuriko's seer claim (with
+    "day 3 セツ白" repeated twice). The viewer's CO-history panel
+    rendered both as visible duplicates, and the seer-cap header
+    chip ("通算 X / 期待 Y") overshot. A real seer never issues two
+    cumulative entries for the same morning's NIGHT_K result, so the
+    aggregator must collapse identical re-assertions.
+    """
+    events = [
+        _speech_event(
+            seat=9,
+            day=3,
+            seer_target=5,
+            seer_is_wolf=False,
+            event_id="ev_first",
+            created_at_ms=10,
+        ),
+        # Same speaker, same day, same target+verdict — re-asserted
+        # across discussion rounds. Must be folded.
+        _speech_event(
+            seat=9,
+            day=3,
+            seer_target=5,
+            seer_is_wolf=False,
+            event_id="ev_second",
+            created_at_ms=20,
+        ),
+        # Medium claim on the same day, repeated.
+        _speech_event(
+            seat=8,
+            day=2,
+            medium_target=6,
+            medium_is_wolf=False,
+            event_id="ev_med1",
+            created_at_ms=5,
+        ),
+        _speech_event(
+            seat=8,
+            day=2,
+            medium_target=6,
+            medium_is_wolf=False,
+            event_id="ev_med2",
+            created_at_ms=15,
+        ),
+    ]
+
+    history = collect_claim_history(
+        events,
+        seat_names={5: "Setsu", 6: "Shigemichi"},
+    )
+
+    # Seer dedup: only the first event_id survives, ledger has 1 row.
+    assert history.by_seat[9].seer_claims == (
+        ClaimedSeerEntry(
+            day=3,
+            target_seat=5,
+            target_name="Setsu",
+            is_wolf=False,
+            declared_at_event_id="ev_first",
+        ),
+    )
+    # Medium dedup: identical re-assert collapses too.
+    assert history.by_seat[8].medium_claims == (
+        ClaimedMediumEntry(
+            day=2,
+            target_seat=6,
+            target_name="Shigemichi",
+            is_wolf=False,
+            declared_at_event_id="ev_med1",
+        ),
+    )
+
+
+def test_collect_claim_history_keeps_same_day_target_swap() -> None:
+    """A different target or color on the same day is *not* a duplicate
+    — it's an inconsistency the validator catches as
+    ``seer_target_swap`` / ``seer_verdict_flip``. The ledger must
+    preserve both rows so post-game review surfaces the contradiction
+    even when the validator was bypassed (e.g. legacy export, or a
+    structured claim slipping past the retry loop)."""
+    events = [
+        _speech_event(
+            seat=9,
+            day=2,
+            seer_target=5,
+            seer_is_wolf=False,
+            event_id="ev_a",
+            created_at_ms=10,
+        ),
+        # Different target on the same day → kept as a separate row.
+        _speech_event(
+            seat=9,
+            day=2,
+            seer_target=4,
+            seer_is_wolf=False,
+            event_id="ev_b",
+            created_at_ms=20,
+        ),
+        # Same target, flipped verdict → also kept.
+        _speech_event(
+            seat=9,
+            day=2,
+            seer_target=5,
+            seer_is_wolf=True,
+            event_id="ev_c",
+            created_at_ms=30,
+        ),
+    ]
+
+    history = collect_claim_history(events, seat_names={4: "Comet", 5: "Setsu"})
+
+    assert len(history.by_seat[9].seer_claims) == 3
+
+
 def test_collect_claim_history_drops_partial_seer_claims() -> None:
     """A seer claim missing ``is_wolf`` is meaningless and the
     aggregator drops it rather than guessing a verdict."""

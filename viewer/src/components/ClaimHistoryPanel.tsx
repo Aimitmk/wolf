@@ -15,9 +15,11 @@
  * the table noticing. This panel stacks every claim against day +
  * expected count so the discrepancy reads at a glance:
  *
- *   - Day-N integrity rule (seer): a real seer at day N should have
- *     N + 1 results (NIGHT_0 random white + one per night). The
- *     header chip shows "通算 X / 期待 Y" and turns red when X ≠ Y.
+ *   - Day-N integrity rule (seer): a real seer at day N's morning
+ *     should have exactly N cumulative results (NIGHT_0's random
+ *     white declared on day 1 + one per subsequent night, each
+ *     surfaced the morning after). The header chip shows
+ *     "通算 X / 期待 Y" and turns red when X ≠ Y.
  *   - Per-claim row: day, target, verdict (黒/白). The wolf badge
  *     contrast against the claimer's actual role makes fake CO obvious
  *     post-game.
@@ -41,6 +43,41 @@ import type {
   GameSample,
   Seat,
 } from "@/lib/types";
+
+// Older exports (pre-2026-05-02) kept one ledger row per speech
+// utterance, so an LLM seat that restated the same divination /
+// medium result across multiple discussion rounds appears as
+// repeated rows. The Python collector now dedupes at export time;
+// this guard re-runs the same fold in-browser so legacy JSON files
+// also render cleanly.
+function dedupeSeerClaims(
+  claims: readonly ClaimedSeerHistoryEntry[],
+): ClaimedSeerHistoryEntry[] {
+  const seen = new Set<string>();
+  const out: ClaimedSeerHistoryEntry[] = [];
+  for (const c of claims) {
+    const key = `${c.day}|${c.target_seat}|${c.is_wolf ? 1 : 0}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
+
+function dedupeMediumClaims(
+  claims: readonly ClaimedMediumHistoryEntry[],
+): ClaimedMediumHistoryEntry[] {
+  const seen = new Set<string>();
+  const out: ClaimedMediumHistoryEntry[] = [];
+  for (const c of claims) {
+    const verdict = c.is_wolf === null ? "n" : c.is_wolf ? "1" : "0";
+    const key = `${c.day}|${c.target_seat}|${verdict}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
 
 const CO_LABEL: Record<string, string> = {
   seer: "占い",
@@ -103,8 +140,10 @@ function ClaimerRow({
   // not match their seat role is rendering the panel's value most.
   // The role chip on the header carries that contrast so post-game
   // readers see "Yuriko (狼) — 占い 通算 1 件" without scanning seats.
-  const seerCount = entry.seer_claims.length;
-  const mediumCount = entry.medium_claims.length;
+  const seerClaims = dedupeSeerClaims(entry.seer_claims);
+  const mediumClaims = dedupeMediumClaims(entry.medium_claims);
+  const seerCount = seerClaims.length;
+  const mediumCount = mediumClaims.length;
   const expectedSeer = expectedSeerCountForDay(currentDay);
   // Medium count == executions seen so far; we don't have a clean way
   // to count executions per game in the viewer, so we render the raw
@@ -145,7 +184,7 @@ function ClaimerRow({
         )}
       </Stack>
       <Stack spacing={0.5} sx={{ pl: 1 }}>
-        {entry.seer_claims.map((c, idx) => (
+        {seerClaims.map((c, idx) => (
           <SeerClaimRow
             key={`s-${c.declared_at_event_id}-${idx}`}
             claim={c}
@@ -153,7 +192,7 @@ function ClaimerRow({
             label={CO_LABEL.seer}
           />
         ))}
-        {entry.medium_claims.map((c, idx) => (
+        {mediumClaims.map((c, idx) => (
           <MediumClaimRow
             key={`m-${c.declared_at_event_id}-${idx}`}
             claim={c}
@@ -269,11 +308,13 @@ function MediumClaimRow({
 }
 
 function expectedSeerCountForDay(day: number): number {
-  // Mirrors `wolfbot.master.claim_history.expected_seer_claim_count_for_day`:
-  // the seer surfaces N + 1 cumulative results at day N's morning
-  // (NIGHT_0 random white + one per night). Day 0 = 1, day 1 = 2…
-  if (day < 0) return 0;
-  return day + 1;
+  // Mirrors `wolfbot.master.claim.claim_history.expected_seer_claim_count_for_day`:
+  // each entry is tagged with the day it was *announced* (NIGHT_0
+  // surfaces day 1 morning, NIGHT_K surfaces day K+1 morning), so by
+  // day-N morning the cumulative count is exactly N. This matches the
+  // validator's "1 entry per declared day" rule (`same_day_priors`).
+  if (day < 1) return 0;
+  return day;
 }
 
 function computeDayCount(data: GameSample): number {

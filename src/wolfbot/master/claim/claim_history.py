@@ -111,6 +111,16 @@ def collect_claim_history(
       announces both kinds at once.
     * Preserves chronological order via the input sequence's order
       (callers MUST pass events sorted by ``created_at_ms`` ASC).
+    * Folds repeat re-assertions into a single ledger row keyed on
+      ``(day, target_seat, is_wolf)``. LLM seats routinely restate
+      "yesterday I divined X = white" across multiple speech turns
+      in the same day's discussion rounds, and surfacing each
+      utterance as a separate ledger entry double-counts the same
+      claim — viewer panels show duplicate rows and the seer/medium
+      header chip overshoots the expected per-day cap. A second
+      utterance with a *different* target or color on the same day
+      is kept (the validator catches it as a swap/flip; the ledger
+      preserves the inconsistency for post-game review).
     """
     name_lookup = dict(seat_names or {})
 
@@ -119,6 +129,8 @@ def collect_claim_history(
 
     seer_by_seat: dict[int, list[ClaimedSeerEntry]] = {}
     medium_by_seat: dict[int, list[ClaimedMediumEntry]] = {}
+    seer_seen: dict[int, set[tuple[int, int, bool]]] = {}
+    medium_seen: dict[int, set[tuple[int, int, bool | None]]] = {}
 
     for event in events:
         if event.source == SpeechSource.PHASE_BASELINE:
@@ -130,27 +142,35 @@ def collect_claim_history(
         seer_target = event.claimed_seer_target_seat
         seer_verdict = event.claimed_seer_is_wolf
         if seer_target is not None and seer_verdict is not None:
-            seer_by_seat.setdefault(speaker, []).append(
-                ClaimedSeerEntry(
-                    day=event.day,
-                    target_seat=seer_target,
-                    target_name=_name(seer_target),
-                    is_wolf=seer_verdict,
-                    declared_at_event_id=event.event_id,
+            seer_key = (event.day, seer_target, seer_verdict)
+            speaker_seen = seer_seen.setdefault(speaker, set())
+            if seer_key not in speaker_seen:
+                speaker_seen.add(seer_key)
+                seer_by_seat.setdefault(speaker, []).append(
+                    ClaimedSeerEntry(
+                        day=event.day,
+                        target_seat=seer_target,
+                        target_name=_name(seer_target),
+                        is_wolf=seer_verdict,
+                        declared_at_event_id=event.event_id,
+                    )
                 )
-            )
 
         medium_target = event.claimed_medium_target_seat
         if medium_target is not None:
-            medium_by_seat.setdefault(speaker, []).append(
-                ClaimedMediumEntry(
-                    day=event.day,
-                    target_seat=medium_target,
-                    target_name=_name(medium_target),
-                    is_wolf=event.claimed_medium_is_wolf,
-                    declared_at_event_id=event.event_id,
+            medium_key = (event.day, medium_target, event.claimed_medium_is_wolf)
+            speaker_seen_m = medium_seen.setdefault(speaker, set())
+            if medium_key not in speaker_seen_m:
+                speaker_seen_m.add(medium_key)
+                medium_by_seat.setdefault(speaker, []).append(
+                    ClaimedMediumEntry(
+                        day=event.day,
+                        target_seat=medium_target,
+                        target_name=_name(medium_target),
+                        is_wolf=event.claimed_medium_is_wolf,
+                        declared_at_event_id=event.event_id,
+                    )
                 )
-            )
 
     seats = sorted(set(seer_by_seat) | set(medium_by_seat))
     by_seat = {
