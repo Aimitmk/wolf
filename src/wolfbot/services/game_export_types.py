@@ -304,6 +304,31 @@ class ArbiterDecisionEntry(BaseModel):
     tts_duration_ms: int | None = None
 
 
+class SuspicionEntry(BaseModel):
+    """One row of the public suspicion timeline.
+
+    Mirrors the ``suspicions`` DB row 1:1 so the viewer can both render
+    the timeline (chronological feed) and pivot it into a (suspecter,
+    target) → level matrix.
+    """
+
+    model_config = _StrictConfig
+
+    source: Literal["speech", "vote"]
+    event_id: str | None = None
+    seq: int
+    day: int
+    phase: str
+    vote_round: int | None = None
+    suspecter_seat: int
+    target_seat: int
+    level: Literal["trust", "low", "medium", "high"]
+    reason: str
+    update_from_level: Literal["trust", "low", "medium", "high"] | None = None
+    update_reason: str | None = None
+    created_at_ms: int
+
+
 class GameExport(BaseModel):
     """Top-level shape of one ``viewer/games/{id}.json`` file."""
 
@@ -319,6 +344,10 @@ class GameExport(BaseModel):
     # the exporter so the viewer renders a "claim ledger" panel without
     # walking every phase's speech_events.
     claim_history: list[ClaimHistoryEntry] = []
+    # Public suspicion timeline (speech + vote derived). Chronological
+    # order. Empty for older exports / games before the structured
+    # suspicion feature shipped.
+    suspicions: list[SuspicionEntry] = []
 
 
 __all__ = [

@@ -95,6 +95,40 @@ export interface ClaimHistoryEntry {
   medium_claims: ClaimedMediumHistoryEntry[];
 }
 
+/** 4-step suspicion scale.
+ *
+ * - `trust`:  村寄り信頼 (white-leaning)
+ * - `low`:    弱い違和感
+ * - `medium`: 明確に怪しい
+ * - `high`:   処刑第一候補
+ */
+export type SuspicionLevel = "trust" | "low" | "medium" | "high";
+
+export interface SuspicionEntry {
+  /** Origin of the row: discussion speech vs vote / night decision. */
+  source: "speech" | "vote";
+  /** Speech-derived rows reference their parent SpeechEvent. Vote-derived
+   * rows are null (no SpeechEvent backs the vote). */
+  event_id: string | null;
+  seq: number;
+  day: number;
+  /** Phase value at write time (DAY_DISCUSSION / DAY_VOTE / NIGHT etc). */
+  phase: string;
+  /** Vote round (0=normal, 1=runoff, -1=night seer-divine). Null for speech. */
+  vote_round: number | null;
+  suspecter_seat: number;
+  target_seat: number;
+  level: SuspicionLevel;
+  reason: string;
+  /** When non-null, this entry updates a prior suspicion of the same
+   * (suspecter, target). The viewer can render an arrow showing the
+   * shift; an LLM that silently reverses without setting this field is
+   * the anti-fabrication red flag the timeline is designed to surface. */
+  update_from_level: SuspicionLevel | null;
+  update_reason: string | null;
+  created_at_ms: number;
+}
+
 export interface Vote {
   day: number;
   round: number;
@@ -217,4 +251,10 @@ export interface GameSample {
    * 2026-05-01) lack the field; the viewer treats absence as `[]`.
    */
   claim_history?: ClaimHistoryEntry[];
+  /**
+   * Public suspicion timeline (speech + vote derived). Chronological
+   * order. Older exports (pre-2026-05-03) lack the field; the viewer
+   * treats absence as `[]`.
+   */
+  suspicions?: SuspicionEntry[];
 }

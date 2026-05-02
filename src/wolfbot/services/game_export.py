@@ -52,6 +52,7 @@ from wolfbot.services.game_export_types import (
     SeatExport,
     SpeechEventExport,
     SpeechSource,
+    SuspicionEntry,
     TraceEntry,
     Victory,
     VoteExport,
@@ -215,6 +216,22 @@ async def _build_payload(game_id: str, db_path: Path, trace_root: Path) -> GameE
                 (game_id,),
             )
         ]
+        # Public suspicion timeline (speech + vote derived). Walk every
+        # row in chronological order so the viewer can render both the
+        # timeline feed and a (suspecter, target) pivot matrix without
+        # re-querying.
+        suspicion_rows = [
+            dict(r)
+            for r in await _fetch_all(
+                db,
+                "SELECT source, event_id, seq, day, phase, vote_round, "
+                "suspecter_seat, target_seat, level, reason, "
+                "update_from_level, update_reason, created_at_ms "
+                "FROM suspicions WHERE game_id = ? "
+                "ORDER BY created_at_ms ASC, id ASC",
+                (game_id,),
+            )
+        ]
         # Arbiter decision timeline — joined LEFT-OUTER from requests so
         # in-flight or rejected dispatches still appear (results /
         # playback may legitimately be missing).
@@ -262,6 +279,9 @@ async def _build_payload(game_id: str, db_path: Path, trace_root: Path) -> GameE
         trace=_load_trace(trace_root, game_id),
         arbiter_decisions=[_build_arbiter_decision(r) for r in arbiter_rows],
         claim_history=_build_claim_history(speech_event_rows, seat_lookup),
+        suspicions=[
+            _build_suspicion(r) for r in suspicion_rows
+        ],
     )
 
 
@@ -338,6 +358,27 @@ def _build_arbiter_decision(row: dict[str, Any]) -> ArbiterDecisionEntry:
         playback_finished_at_ms=row.get("playback_finished_at_ms"),
         tts_outcome=row.get("tts_outcome"),
         tts_duration_ms=row.get("tts_duration_ms"),
+    )
+
+
+def _build_suspicion(row: dict[str, Any]) -> SuspicionEntry:
+    """Map a `suspicions` DB row to the export shape."""
+    return SuspicionEntry(
+        source=cast(Any, row["source"]),
+        event_id=row["event_id"],
+        seq=int(row["seq"]),
+        day=int(row["day"]),
+        phase=str(row["phase"]),
+        vote_round=row["vote_round"],
+        suspecter_seat=int(row["suspecter_seat"]),
+        target_seat=int(row["target_seat"]),
+        level=cast(Any, row["level"]),
+        reason=str(row["reason"]),
+        update_from_level=cast(
+            Any, row["update_from_level"]
+        ) if row["update_from_level"] is not None else None,
+        update_reason=row["update_reason"],
+        created_at_ms=int(row["created_at_ms"]),
     )
 
 

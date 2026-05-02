@@ -780,6 +780,125 @@
       "title": "SpeechEventExport",
       "type": "object"
     },
+    "SuspicionEntry": {
+      "additionalProperties": false,
+      "description": "One row of the public suspicion timeline.\n\nMirrors the ``suspicions`` DB row 1:1 so the viewer can both render\nthe timeline (chronological feed) and pivot it into a (suspecter,\ntarget) → level matrix.",
+      "properties": {
+        "source": {
+          "enum": [
+            "speech",
+            "vote"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "day": {
+          "title": "Day",
+          "type": "integer"
+        },
+        "phase": {
+          "title": "Phase",
+          "type": "string"
+        },
+        "vote_round": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vote Round"
+        },
+        "suspecter_seat": {
+          "title": "Suspecter Seat",
+          "type": "integer"
+        },
+        "target_seat": {
+          "title": "Target Seat",
+          "type": "integer"
+        },
+        "level": {
+          "enum": [
+            "trust",
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "update_from_level": {
+          "anyOf": [
+            {
+              "enum": [
+                "trust",
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Update From Level"
+        },
+        "update_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Update Reason"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source",
+        "seq",
+        "day",
+        "phase",
+        "suspecter_seat",
+        "target_seat",
+        "level",
+        "reason",
+        "created_at_ms"
+      ],
+      "title": "SuspicionEntry",
+      "type": "object"
+    },
     "TokenUsage": {
       "additionalProperties": false,
       "properties": {
@@ -1095,6 +1214,14 @@
         "$ref": "#/$defs/ClaimHistoryEntry"
       },
       "title": "Claim History",
+      "type": "array"
+    },
+    "suspicions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SuspicionEntry"
+      },
+      "title": "Suspicions",
       "type": "array"
     }
   },

@@ -9,6 +9,7 @@ import Container from "@mui/material/Container";
 import Stack from "@mui/material/Stack";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import ClaimHistoryPanel from "@/components/ClaimHistoryPanel";
+import SuspicionPanel from "@/components/SuspicionPanel";
 import GameHeader from "@/components/GameHeader";
 import PhaseSection from "@/components/PhaseSection";
 import SeatGrid from "@/components/SeatGrid";
@@ -128,6 +129,7 @@ export default function GameView({
         <Box>
           <Stack spacing={2}>
             <ClaimHistoryPanel data={data} />
+            <SuspicionPanel data={data} />
             <StatsPanel data={data} />
           </Stack>
         </Box>

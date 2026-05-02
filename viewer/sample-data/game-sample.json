@@ -613,6 +613,98 @@
       "night_actions": []
     }
   ],
+  "suspicions": [
+    {
+      "source": "speech",
+      "event_id": "ev_d1_setsu_01",
+      "seq": 0,
+      "day": 1,
+      "phase": "DAY_DISCUSSION",
+      "vote_round": null,
+      "suspecter_seat": 2,
+      "target_seat": 5,
+      "level": "low",
+      "reason": "議論を急ぎすぎている印象。役職持ちが揃う前に進めようとする動きが少し不自然。",
+      "update_from_level": null,
+      "update_reason": null,
+      "created_at_ms": 1717000050000
+    },
+    {
+      "source": "speech",
+      "event_id": "ev_d1_jonas_01",
+      "seq": 0,
+      "day": 1,
+      "phase": "DAY_DISCUSSION",
+      "vote_round": null,
+      "suspecter_seat": 9,
+      "target_seat": 5,
+      "level": "medium",
+      "reason": "議論を煽る速度が早く、CO 待ちを軽視する発言が続いている。",
+      "update_from_level": null,
+      "update_reason": null,
+      "created_at_ms": 1717000060000
+    },
+    {
+      "source": "speech",
+      "event_id": "ev_d1_setsu_02",
+      "seq": 0,
+      "day": 1,
+      "phase": "DAY_DISCUSSION",
+      "vote_round": null,
+      "suspecter_seat": 2,
+      "target_seat": 5,
+      "level": "medium",
+      "reason": "ジョナスの指摘とも合致して、議論妨害の動機が見えてきた。",
+      "update_from_level": "low",
+      "update_reason": "ジョナスの指摘で違和感が裏付けられたため medium に格上げ。",
+      "created_at_ms": 1717000080000
+    },
+    {
+      "source": "speech",
+      "event_id": "ev_d1_jonas_02",
+      "seq": 0,
+      "day": 1,
+      "phase": "DAY_DISCUSSION",
+      "vote_round": null,
+      "suspecter_seat": 9,
+      "target_seat": 2,
+      "level": "trust",
+      "reason": "セツが冷静に状況整理しており、村陣営寄りに見える。",
+      "update_from_level": null,
+      "update_reason": null,
+      "created_at_ms": 1717000090000
+    },
+    {
+      "source": "vote",
+      "event_id": null,
+      "seq": 0,
+      "day": 1,
+      "phase": "DAY_VOTE",
+      "vote_round": 0,
+      "suspecter_seat": 2,
+      "target_seat": 5,
+      "level": "high",
+      "reason": "発話で示した懸念を投票で固める。ラキオを処刑候補に。",
+      "update_from_level": "medium",
+      "update_reason": "投票時点で確信が固まったため high に。",
+      "created_at_ms": 1717000200000
+    },
+    {
+      "source": "vote",
+      "event_id": null,
+      "seq": 0,
+      "day": 1,
+      "phase": "DAY_VOTE",
+      "vote_round": 0,
+      "suspecter_seat": 9,
+      "target_seat": 5,
+      "level": "high",
+      "reason": "セツと同じ理由でラキオへ票。",
+      "update_from_level": "medium",
+      "update_reason": "投票時点でラインが見えたため。",
+      "created_at_ms": 1717000210000
+    }
+  ],
   "trace": [
     {
       "ts": "2026-04-28T08:00:15+00:00",
