@@ -47,7 +47,13 @@ SpeechSource = Literal["text", "voice_stt", "npc_generated"]
 # Re-export the canonical wire/storage form from domain/enums so the
 # viewer schema stays aligned with runtime validators in lockstep.
 CoDeclaration = _CoDeclaration
-TraceRole = Literal["gameplay", "npc_speech", "voice_stt", "text_analysis"]
+TraceRole = Literal[
+    "gameplay",
+    "npc_speech",
+    "npc_decision",
+    "voice_stt",
+    "text_analysis",
+]
 Victory = Literal["village", "wolf"]
 
 
@@ -184,6 +190,25 @@ class NightActionExport(BaseModel):
     submitted_at_ms: int
 
 
+class WolfChatLogEntry(BaseModel):
+    """One wolf-only night-coordination utterance.
+
+    Sourced from the ``logs_private`` table where ``visibility='PRIVATE'``
+    and ``kind='WOLF_CHAT'``. The DB row is duplicated per audience-seat
+    (one for each living wolf) so the exporter dedupes on
+    ``(actor_seat, created_at_ms, text)`` and emits a single entry per
+    utterance — the audience side is implicit (= every alive wolf at the
+    time of the utterance) and not surfaced in the viewer because the
+    wolves channel is wolf-private by construction.
+    """
+
+    model_config = _StrictConfig
+
+    actor_seat: int
+    text: str
+    created_at_ms: int
+
+
 class PhaseSection(BaseModel):
     model_config = _StrictConfig
 
@@ -194,6 +219,11 @@ class PhaseSection(BaseModel):
     speech_events: list[SpeechEventExport]
     votes: list[VoteExport]
     night_actions: list[NightActionExport]
+    # Night-only: each wolf's coordination line during NIGHT. Empty for
+    # day-side phases. Kept on the phase rather than top-level so the
+    # viewer renders them inline in the night's timeline next to wolf
+    # attack night_actions.
+    wolf_chat_logs: list[WolfChatLogEntry] = []
 
 
 class TokenUsage(BaseModel):
@@ -315,4 +345,5 @@ __all__ = [
     "TraceRole",
     "Victory",
     "VoteExport",
+    "WolfChatLogEntry",
 ]

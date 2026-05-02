@@ -201,6 +201,88 @@ async def test_export_game_writes_json_with_full_shape(
     assert payload["trace"] == []
 
 
+async def test_export_game_emits_wolf_chat_logs_per_phase(
+    fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
+) -> None:
+    """Wolf-only night chat is stored fan-out (one row per audience seat)
+    in ``logs_private``. The exporter must dedupe to one entry per
+    actual utterance and attach it to the matching NIGHT phase.
+
+    Why this matters: viewer renders the wolves' coordination in the
+    night timeline. Pre-fix the WOLF_CHAT rows were excluded entirely
+    (exporter only read ``logs_public``), so the viewer had no way to
+    surface the most informative private signal a post-game review
+    needs (which wolf proposed which target, in what order).
+    """
+    repo, db_path = fixture_repo
+    await _seed_minimal_game(repo)
+
+    # Add a second wolf so the fan-out (one row per audience) is
+    # exercised — the exporter must collapse N audience rows back to 1.
+    seat3 = Seat(
+        seat_no=3, display_name="Wolf2", is_llm=True, persona_key="raqio",
+        discord_user_id="u3",
+    )
+    await repo.insert_seat(GAME_ID, seat3)
+    await repo.set_player_role(GAME_ID, 3, Role.WEREWOLF)
+
+    # Wolf seat 2's NIGHT_1 utterance, fan-out written to both wolves.
+    for audience in (2, 3):
+        await repo.insert_log_private(
+            LogEntry(
+                game_id=GAME_ID,
+                day=1,
+                phase=Phase.NIGHT,
+                kind="WOLF_CHAT",
+                actor_seat=2,
+                visibility="PRIVATE",
+                audience_seat=audience,
+                text="セツを噛もう",
+                created_at=1_700_000_700,
+            )
+        )
+    # Wolf seat 3's reply.
+    for audience in (2, 3):
+        await repo.insert_log_private(
+            LogEntry(
+                game_id=GAME_ID,
+                day=1,
+                phase=Phase.NIGHT,
+                kind="WOLF_CHAT",
+                actor_seat=3,
+                visibility="PRIVATE",
+                audience_seat=audience,
+                text="同意。霊媒回避が優先",
+                created_at=1_700_000_710,
+            )
+        )
+
+    out = await export_game(
+        game_id=GAME_ID,
+        db_path=db_path,
+        trace_dir=tmp_path / "no_trace",
+        output_dir=tmp_path / "out",
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    # NIGHT phase appears in the timeline because of the wolf chat
+    # rows (no NIGHT_1 actions or public logs were seeded for day 1).
+    night1 = next(
+        p for p in payload["phases"] if p["day"] == 1 and p["phase"] == "NIGHT"
+    )
+    assert len(night1["wolf_chat_logs"]) == 2  # deduped from 4 rows
+    first, second = night1["wolf_chat_logs"]
+    assert first["actor_seat"] == 2
+    assert first["text"] == "セツを噛もう"
+    assert first["created_at_ms"] == 1_700_000_700_000
+    assert second["actor_seat"] == 3
+    assert second["text"] == "同意。霊媒回避が優先"
+
+    # Day-side phases stay empty so nothing leaks across.
+    disc = next(p for p in payload["phases"] if p["phase"] == "DAY_DISCUSSION")
+    assert disc["wolf_chat_logs"] == []
+
+
 async def test_export_game_inlines_jsonl_trace(
     fixture_repo: tuple[SqliteRepo, Path], tmp_path: Path
 ) -> None:

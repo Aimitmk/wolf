@@ -92,6 +92,8 @@ export default function PhaseSection({
   );
 }
 
+type WolfChatLog = NonNullable<PhaseSectionType["wolf_chat_logs"]>[number];
+
 type TimelineEvent =
   | { kind: "log"; ts: number; data: PhaseSectionType["public_logs"][number] }
   | {
@@ -106,6 +108,12 @@ type TimelineEvent =
       kind: "night_action";
       ts: number;
       data: PhaseSectionType["night_actions"][number];
+      trace: TraceEntry | null;
+    }
+  | {
+      kind: "wolf_chat";
+      ts: number;
+      data: WolfChatLog;
       trace: TraceEntry | null;
     };
 
@@ -142,6 +150,14 @@ function buildTimeline(
       ts: na.submitted_at_ms,
       data: na,
       trace: matchTraceForNightAction(na, phase, trace),
+    });
+  }
+  for (const wc of phase.wolf_chat_logs ?? []) {
+    events.push({
+      kind: "wolf_chat",
+      ts: wc.created_at_ms,
+      data: wc,
+      trace: matchTraceForWolfChat(wc, phase, trace),
     });
   }
   events.sort((a, b) => a.ts - b.ts);
@@ -254,6 +270,29 @@ function matchTraceForSpeech(
   );
 }
 
+// Vote / night-action LLM calls land in the trace under two distinct
+// `role` values depending on which side of the WS the decision LLM
+// runs on:
+//   - rounds mode: Master's `LLMAdapter._ask` calls the gameplay
+//     decider → role="gameplay", metadata.task="vote"|"night_action".
+//   - reactive_voice mode: each NPC bot decides for its own seat via
+//     `decision_service` → role="npc_decision",
+//     metadata.task="vote"|"night_action" (added on the NPC client
+//     wrap-context, see npc/runtime/client.py).
+// The viewer accepts both so the lightbulb buttons attach in either
+// mode. `phase` matching is loose for npc_decision because the trace
+// records the canonical phase_id (`{gid}::dayN::PHASE::seq`) rather
+// than the bare PhaseEnum value.
+function isDecisionRole(t: TraceEntry): boolean {
+  return t.role === "gameplay" || t.role === "npc_decision";
+}
+
+function phaseMatchesLoose(t: TraceEntry, phase: PhaseSectionType): boolean {
+  if (t.day !== phase.day) return false;
+  if (t.phase === phase.phase) return true;
+  return typeof t.phase === "string" && t.phase.includes(`::${phase.phase}`);
+}
+
 function matchTraceForVote(
   v: Vote,
   phase: PhaseSectionType,
@@ -262,15 +301,19 @@ function matchTraceForVote(
 ): TraceEntry | null {
   const targetSeat = findSeat(seats, v.target_seat);
   if (!targetSeat) return null;
+  // For role="gameplay" we additionally key on the response containing
+  // `席N` because the rounds-mode dispatcher batches all voters into one
+  // task and the response payload is the only thing tying a trace line
+  // to a specific (voter, target) pair. For role="npc_decision" the
+  // trace already has a 1:1 actor→seat binding so we don't need it.
   return (
     trace.find(
       (t) =>
-        t.role === "gameplay" &&
-        t.day === phase.day &&
-        t.phase === phase.phase &&
+        isDecisionRole(t) &&
+        phaseMatchesLoose(t, phase) &&
         actorSeat(t) === v.voter_seat &&
         t.metadata?.task === "vote" &&
-        responseContains(t, `席${v.target_seat}`),
+        (t.role !== "gameplay" || responseContains(t, `席${v.target_seat}`)),
     ) ?? null
   );
 }
@@ -283,13 +326,42 @@ function matchTraceForNightAction(
   return (
     trace.find(
       (t) =>
-        t.role === "gameplay" &&
-        t.day === phase.day &&
-        t.phase === phase.phase &&
+        isDecisionRole(t) &&
+        phaseMatchesLoose(t, phase) &&
         actorSeat(t) === na.actor_seat &&
-        t.metadata?.task === "night_action",
+        t.metadata?.task === "night_action" &&
+        (t.metadata?.action_kind == null ||
+          t.metadata?.action_kind === na.kind),
     ) ?? null
   );
+}
+
+function matchTraceForWolfChat(
+  wc: WolfChatLog,
+  phase: PhaseSectionType,
+  trace: TraceEntry[],
+): TraceEntry | null {
+  // Pair each wolf-chat utterance with its decision LLM call. Since
+  // the request_id isn't in the DB row, the closest stable match is
+  // (phase, day, actor_seat, task=wolf_chat) — picking the first
+  // unpaired trace whose timestamp is at or before the utterance.
+  // Multiple wolves coordinate sequentially so per-actor matching is
+  // accurate enough; viewer prefers the LATEST candidate before the
+  // utterance to handle retry / fallback cycles.
+  let best: TraceEntry | null = null;
+  let bestTs = -Infinity;
+  for (const t of trace) {
+    if (!isDecisionRole(t)) continue;
+    if (!phaseMatchesLoose(t, phase)) continue;
+    if (actorSeat(t) !== wc.actor_seat) continue;
+    if (t.metadata?.task !== "wolf_chat") continue;
+    const ts = t.ts ? new Date(t.ts).getTime() : 0;
+    if (ts <= wc.created_at_ms && ts > bestTs) {
+      best = t;
+      bestTs = ts;
+    }
+  }
+  return best;
 }
 
 function actorSeat(t: TraceEntry): number | null {
@@ -405,6 +477,45 @@ function EventRow({
               {voter ? seatLabel(voter) : "?"} → {target ? seatLabel(target) : "棄権"}
             </Typography>
           </Stack>
+        </Box>
+        <TraceButton entry={event.trace} onOpen={onOpenTrace} />
+      </Box>
+    );
+  }
+
+  if (event.kind === "wolf_chat") {
+    const speaker = findSeat(seats, event.data.actor_seat);
+    return (
+      <Box
+        sx={{
+          py: 1,
+          display: "flex",
+          gap: 1.5,
+          // Wolf-side coordination is private to the wolves channel
+          // during play; tint the row so it visually separates from
+          // public night_action / public_log rows in the same phase.
+          bgcolor: "rgba(211, 47, 47, 0.06)",
+          borderLeft: "3px solid",
+          borderColor: "error.light",
+          pl: 1.25,
+        }}
+      >
+        <TimeCell time={time} />
+        <Box flex={1}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.25 }}>
+            <Chip
+              label="人狼会話"
+              size="small"
+              color="error"
+              sx={{ height: 18, fontSize: 10 }}
+            />
+            <Typography variant="body2" sx={{ fontWeight: 500 }}>
+              {speaker ? seatLabel(speaker) : `席${event.data.actor_seat}`}
+            </Typography>
+          </Stack>
+          <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
+            {event.data.text}
+          </Typography>
         </Box>
         <TraceButton entry={event.trace} onOpen={onOpenTrace} />
       </Box>

@@ -507,6 +507,14 @@
           },
           "title": "Night Actions",
           "type": "array"
+        },
+        "wolf_chat_logs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WolfChatLogEntry"
+          },
+          "title": "Wolf Chat Logs",
+          "type": "array"
         }
       },
       "required": [
@@ -829,6 +837,7 @@
           "enum": [
             "gameplay",
             "npc_speech",
+            "npc_decision",
             "voice_stt",
             "text_analysis"
           ],
@@ -1017,6 +1026,31 @@
         "submitted_at_ms"
       ],
       "title": "VoteExport",
+      "type": "object"
+    },
+    "WolfChatLogEntry": {
+      "additionalProperties": false,
+      "description": "One wolf-only night-coordination utterance.\n\nSourced from the ``logs_private`` table where ``visibility='PRIVATE'``\nand ``kind='WOLF_CHAT'``. The DB row is duplicated per audience-seat\n(one for each living wolf) so the exporter dedupes on\n``(actor_seat, created_at_ms, text)`` and emits a single entry per\nutterance — the audience side is implicit (= every alive wolf at the\ntime of the utterance) and not surfaced in the viewer because the\nwolves channel is wolf-private by construction.",
+      "properties": {
+        "actor_seat": {
+          "title": "Actor Seat",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actor_seat",
+        "text",
+        "created_at_ms"
+      ],
+      "title": "WolfChatLogEntry",
       "type": "object"
     }
   },

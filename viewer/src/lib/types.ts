@@ -17,7 +17,12 @@ export type SpeechSource = "text" | "voice_stt" | "npc_generated";
 
 export type CoDeclaration = "seer" | "medium" | "knight" | null;
 
-export type TraceRole = "gameplay" | "npc_speech" | "voice_stt" | "text_analysis";
+export type TraceRole =
+  | "gameplay"
+  | "npc_speech"
+  | "npc_decision"
+  | "voice_stt"
+  | "text_analysis";
 
 export interface Seat {
   seat_no: number;
@@ -106,6 +111,16 @@ export interface NightAction {
   submitted_at_ms: number;
 }
 
+// Wolf-only night coordination utterances. Stored in `logs_private`
+// during play (one row per audience-seat fan-out) and deduped at
+// export time so the viewer renders one entry per actual utterance.
+// `wolf_chat_logs` is empty on day-side phases.
+export interface WolfChatLog {
+  actor_seat: number;
+  text: string;
+  created_at_ms: number;
+}
+
 export interface PhaseSection {
   day: number;
   phase: string;
@@ -114,6 +129,7 @@ export interface PhaseSection {
   speech_events: SpeechEvent[];
   votes: Vote[];
   night_actions: NightAction[];
+  wolf_chat_logs?: WolfChatLog[];
 }
 
 export interface TokenUsage {

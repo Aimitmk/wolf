@@ -54,6 +54,7 @@ from wolfbot.services.game_export_types import (
     TraceEntry,
     Victory,
     VoteExport,
+    WolfChatLogEntry,
 )
 
 log = logging.getLogger(__name__)
@@ -164,6 +165,22 @@ async def _build_payload(
             "ORDER BY day, submitted_at",
             (game_id,),
         )]
+        # Wolf chat is fan-out-stored in `logs_private` (one row per
+        # audience seat) so the same utterance shows up N times where N
+        # = alive wolves at the moment. Dedupe on
+        # (actor_seat, created_at, text) keeps one row per actual
+        # utterance — that's what the viewer wants to render. Phase is
+        # always 'NIGHT' (or 'NIGHT_0' on day 0) by construction; we
+        # carry it through so the per-phase grouping in `_build_phases`
+        # picks it up without extra logic.
+        wolf_chat_rows = [dict(r) for r in await _fetch_all(
+            db,
+            "SELECT DISTINCT day, phase, actor_seat, text, created_at "
+            "FROM logs_private "
+            "WHERE game_id = ? AND kind = 'WOLF_CHAT' AND actor_seat IS NOT NULL "
+            "ORDER BY created_at ASC",
+            (game_id,),
+        )]
         # `phase_baseline` rows are an internal sentinel used by
         # PublicDiscussionState to seed alive-seat baselines; they have
         # empty text and are explicitly excluded from public-log emission
@@ -216,7 +233,11 @@ async def _build_payload(
         game=_build_game_meta(game_row, public_log_rows),
         seats=[_build_seat(s) for s in seat_rows],
         phases=_build_phases(
-            public_log_rows, speech_event_rows, vote_rows, night_action_rows
+            _rebucket_morning_logs(public_log_rows),
+            speech_event_rows,
+            vote_rows,
+            night_action_rows,
+            wolf_chat_rows,
         ),
         trace=_load_trace(trace_root, game_id),
         arbiter_decisions=[_build_arbiter_decision(r) for r in arbiter_rows],
@@ -320,52 +341,130 @@ def _build_seat(row: dict[str, Any]) -> SeatExport:
     )
 
 
+_DAY_START_TEXT_PREFIX = ("夜が明けました。1 日目の議論を開始", "日目の議論を開始")
+
+
+def _rebucket_morning_logs(
+    public_logs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Defensive rebucketing for legacy games whose MORNING + day-start
+    PHASE_CHANGE logs were written with the *prior* day_number.
+
+    Pre-fix (state_machine.py before 2026-05-02), ``plan_night_resolve``
+    and ``plan_night0`` emitted these logs through the ``_public_log``
+    helper which defaulted ``day=game.day_number`` — and that's the
+    OLD day at the moment the transition is computed. So a NIGHT 1
+    resolution wrote "朝になりました" / "2 日目の議論を開始" with
+    ``day=1`` instead of ``day=2``, and the viewer's per-(day, phase)
+    bucketing put day-2's morning into day-1's DAY_DISCUSSION section.
+    The visible symptom: timeline reads
+    "DAY_DISCUSSION → DAY_VOTE → NIGHT → DAY_DISCUSSION" with the
+    second discussion's started_at_ms timestamped *after* its own
+    speeches.
+
+    The state machine now tags these logs explicitly with
+    ``day=next_day`` (commit ``state_machine.py``). Existing games
+    re-exported through this path still need the fix without a DB
+    rewrite — hence this normalisation step. Returns a *new* list
+    with day-fields adjusted; the input is not mutated so other
+    consumers (e.g. ``_build_game_meta``) keep their original view.
+    """
+    fixed: list[dict[str, Any]] = []
+    for row in public_logs:
+        if (
+            row.get("phase") == "DAY_DISCUSSION"
+            and (
+                row.get("kind") == "MORNING"
+                or (
+                    row.get("kind") == "PHASE_CHANGE"
+                    and isinstance(row.get("text"), str)
+                    and "日目の議論を開始" in row["text"]
+                )
+            )
+        ):
+            patched = dict(row)
+            patched["day"] = (row.get("day") or 0) + 1
+            fixed.append(patched)
+        else:
+            fixed.append(row)
+    return fixed
+
+
 def _build_phases(
     public_logs: list[dict[str, Any]],
     speech_events: list[dict[str, Any]],
     votes: list[dict[str, Any]],
     night_actions: list[dict[str, Any]],
+    wolf_chat_logs: list[dict[str, Any]],
 ) -> list[PhaseSection]:
     """Group all per-game events into ordered ``(day, phase)`` buckets.
 
     A phase appears in the output if AT LEAST ONE of public_logs /
-    speech_events / votes / night_actions has data for it. We don't
-    invent empty buckets — a game that died in lobby produces only a
-    SETUP / LOBBY section, not a full ladder of empty NIGHT/DAY rows.
+    speech_events / votes / night_actions / wolf_chat_logs has data for
+    it. We don't invent empty buckets — a game that died in lobby
+    produces only a SETUP / LOBBY section, not a full ladder of empty
+    NIGHT/DAY rows.
     """
-    # Discover (day, phase) pairs in chronological order from public logs;
-    # those are the most reliable per-phase event source.
-    seen: dict[tuple[int, str], int] = {}  # (day, phase) -> first_ts (epoch s)
+    # Discover (day, phase) pairs in chronological order. Each bucket's
+    # ``first_ts_ms`` is the earliest timestamp of any event tagged for
+    # it — public_logs (epoch s), speech_events (ms), votes (s),
+    # night_actions (s), wolf_chat_logs (s). We track milliseconds so a
+    # phase that ends and the next phase that begins within the same
+    # epoch second still order correctly (only speech_events carry
+    # sub-second resolution today, but a per-(day, phase) tie still
+    # falls back to the secondary phase-ordering key below).
+    seen: dict[tuple[int, str], int] = {}  # (day, phase) -> first_ts_ms
+
+    def _record(key: tuple[int, str], ts_ms: int) -> None:
+        existing = seen.get(key)
+        if existing is None or ts_ms < existing:
+            seen[key] = ts_ms
+
     for row in public_logs:
-        key = (row["day"], row["phase"])
-        if key not in seen:
-            seen[key] = row["created_at"]
-    # Plus any phase that has speeches but no public log:
+        _record((row["day"], row["phase"]), _epoch_to_ms(row["created_at"]))
     for ev in speech_events:
-        key = (ev["day"], ev["phase"])
-        if key not in seen:
-            seen[key] = ev["created_at_ms"] // 1000
-    # Plus night phases inferred from night_actions:
+        _record((ev["day"], ev["phase"]), int(ev["created_at_ms"]))
     for na in night_actions:
         phase = "NIGHT_0" if na["day"] == 0 else "NIGHT"
-        key = (na["day"], phase)
-        if key not in seen:
-            seen[key] = na["submitted_at"]
-    # Plus vote phases inferred from votes:
+        _record((na["day"], phase), _epoch_to_ms(na["submitted_at"]))
     for v in votes:
         phase = "DAY_RUNOFF" if v["round"] >= 2 else "DAY_VOTE"
-        key = (v["day"], phase)
-        if key not in seen:
-            seen[key] = v["submitted_at"]
+        _record((v["day"], phase), _epoch_to_ms(v["submitted_at"]))
+    # Wolf chat surfaces phases that have no other events (rare:
+    # attack-less NIGHT where wolves coordinated but never committed).
+    for wc in wolf_chat_logs:
+        _record((wc["day"], wc["phase"]), _epoch_to_ms(wc["created_at"]))
 
-    ordered = sorted(seen.items(), key=lambda kv: kv[1])
+    # Stable secondary sort: when two phases share a millisecond
+    # (typical at the NIGHT-resolve / next-day-MORNING boundary, where
+    # the night's last submission and the morning log share an epoch
+    # second), enforce within-day phase order so the timeline reads
+    # SETUP → DAY_DISCUSSION → DAY_VOTE → DAY_RUNOFF_SPEECH →
+    # DAY_RUNOFF → NIGHT → (next day) DAY_DISCUSSION → ...
+    phase_order_within_day = {
+        "SETUP": 0,
+        "NIGHT_0": 1,
+        "DAY_DISCUSSION": 2,
+        "DAY_VOTE": 3,
+        "DAY_RUNOFF_SPEECH": 4,
+        "DAY_RUNOFF": 5,
+        "NIGHT": 6,
+        "GAME_OVER": 7,
+        "WAITING_HOST_DECISION": 8,
+    }
+
+    def _sort_key(item: tuple[tuple[int, str], int]) -> tuple[int, int, int]:
+        (day, phase), first_ts_ms = item
+        return (first_ts_ms, day, phase_order_within_day.get(phase, 99))
+
+    ordered = sorted(seen.items(), key=_sort_key)
     result: list[PhaseSection] = []
-    for (day, phase), first_ts in ordered:
+    for (day, phase), first_ts_ms in ordered:
         result.append(
             PhaseSection(
                 day=day,
                 phase=phase,
-                started_at_ms=_epoch_to_ms(first_ts),
+                started_at_ms=first_ts_ms,
                 public_logs=[
                     PublicLogEntry(
                         kind=r["kind"],
@@ -414,6 +513,15 @@ def _build_phases(
                     )
                     for na in night_actions
                     if na["day"] == day and _night_phase(na["day"]) == phase
+                ],
+                wolf_chat_logs=[
+                    WolfChatLogEntry(
+                        actor_seat=wc["actor_seat"],
+                        text=wc["text"],
+                        created_at_ms=_epoch_to_ms(wc["created_at"]),
+                    )
+                    for wc in wolf_chat_logs
+                    if wc["day"] == day and wc["phase"] == phase
                 ],
             )
         )

@@ -70,6 +70,11 @@ from wolfbot.npc.decision.decision_service import (
 )
 from wolfbot.npc.decision.game_state import NpcGameState, apply_update, state_from_snapshot
 from wolfbot.npc.speech.speech_service import NpcSpeechService
+from wolfbot.services.llm_trace import (
+    parse_day_from_phase_id,
+    parse_game_id_from_phase_id,
+    trace_context,
+)
 
 log = logging.getLogger(__name__)
 
@@ -315,8 +320,6 @@ class NpcClient:
         has been received yet — the generator falls back to the
         SpeakRequest fields in that case.
         """
-        from wolfbot.services.llm_trace import parse_game_id_from_phase_id
-
         gid = parse_game_id_from_phase_id(request.phase_id)
         if gid is None:
             return None
@@ -564,10 +567,25 @@ class NpcClient:
         # village's ability to lynch a wolf when one round-trip flakes.
         result_target_seat: int | None = None
         reason_summary = "llm_error"
+        actor = (
+            f"seat={req.seat_no} persona={state.persona_key} "
+            f"role={state.role} npc_id={self.config.npc_id}"
+        )
         try:
-            raw = await self.decision_llm.decide_json(
-                system_prompt=system, user_prompt=user, schema=_VOTE_SCHEMA,
-            )
+            with trace_context(
+                game_id=req.game_id,
+                phase=req.phase_id,
+                day=parse_day_from_phase_id(req.phase_id),
+                actor=actor,
+                metadata={
+                    "task": "vote",
+                    "round": req.round_,
+                    "request_id": req.request_id,
+                },
+            ):
+                raw = await self.decision_llm.decide_json(
+                    system_prompt=system, user_prompt=user, schema=_VOTE_SCHEMA,
+                )
             result = parse_decision(raw, legal_seats=legal)
             result_target_seat = result.target_seat
             reason_summary = result.reason_summary
@@ -665,10 +683,24 @@ class NpcClient:
             candidates=req.candidate_seats,
             public_state_summary=req.public_state_summary,
         )
+        actor = (
+            f"seat={req.seat_no} persona={state.persona_key} "
+            f"role={state.role} npc_id={self.config.npc_id}"
+        )
         try:
-            raw = await self.decision_llm.decide_json(
-                system_prompt=system, user_prompt=user, schema=_WOLF_CHAT_SCHEMA,
-            )
+            with trace_context(
+                game_id=req.game_id,
+                phase=req.phase_id,
+                day=parse_day_from_phase_id(req.phase_id),
+                actor=actor,
+                metadata={
+                    "task": "wolf_chat",
+                    "request_id": req.request_id,
+                },
+            ):
+                raw = await self.decision_llm.decide_json(
+                    system_prompt=system, user_prompt=user, schema=_WOLF_CHAT_SCHEMA,
+                )
         except Exception:
             log.exception(
                 "npc_wolf_chat_llm_failed game=%s seat=%d",
@@ -706,10 +738,25 @@ class NpcClient:
         # WAITING_HOST_DECISION.
         result_target_seat: int | None = None
         reason_summary = "llm_error"
+        actor = (
+            f"seat={req.seat_no} persona={state.persona_key} "
+            f"role={state.role} npc_id={self.config.npc_id}"
+        )
         try:
-            raw = await self.decision_llm.decide_json(
-                system_prompt=system, user_prompt=user, schema=_NIGHT_SCHEMA,
-            )
+            with trace_context(
+                game_id=req.game_id,
+                phase=req.phase_id,
+                day=parse_day_from_phase_id(req.phase_id),
+                actor=actor,
+                metadata={
+                    "task": "night_action",
+                    "action_kind": req.action_kind,
+                    "request_id": req.request_id,
+                },
+            ):
+                raw = await self.decision_llm.decide_json(
+                    system_prompt=system, user_prompt=user, schema=_NIGHT_SCHEMA,
+                )
             result = parse_decision(raw, legal_seats=legal)
             result_target_seat = result.target_seat
             reason_summary = result.reason_summary
