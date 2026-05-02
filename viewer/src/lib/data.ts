@@ -1,6 +1,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import type { DiscussionMode, GameSample } from "./types";
+import { buildMatchMaps, type MatchMaps } from "./match";
+import type { DiscussionMode, GameSample, TraceEntry } from "./types";
 
 /**
  * Where exported game JSONs live.  Populated automatically by the bot's
@@ -22,6 +23,10 @@ export interface GameSummary {
   ended_at_ms: number | null;
   duration_ms: number | null;
   seat_count: number;
+  /** Number of seats whose ``is_llm`` is false (i.e., real Discord users). */
+  human_count: number;
+  /** Number of seats whose ``is_llm`` is true (NPC personas). */
+  llm_count: number;
   llm_call_count: number;
   total_tokens: number;
   total_latency_ms: number;
@@ -116,6 +121,85 @@ export async function loadSample(): Promise<GameSample> {
   return JSON.parse(raw) as GameSample;
 }
 
+/**
+ * What `loadGameWithMatches` returns.
+ *
+ * `data.trace[i]` has the heavy fields (`system_prompt`, `user_prompt`,
+ * `response`) replaced by empty strings / null. The full versions are
+ * available via the `/api/games/[gameId]/trace/[index]` route. This
+ * trims hundreds of KB to several MB off the SSR HTML payload for
+ * games with non-trivial trace counts — historically the dominant
+ * cost of opening a game detail page.
+ *
+ * `matches.trace[eventKey]` returns the index into `data.trace` (i.e.
+ * the position of the matched trace entry). PhaseSection consumes this
+ * map and never re-runs the matchers client-side. `matches.arbiter`
+ * mirrors the same shape for speech → arbiter dispatch lookup.
+ *
+ * Returns `null` when the game JSON does not exist.
+ */
+export interface GameWithMatches {
+  data: GameSample;
+  matches: MatchMaps;
+}
+
+export async function loadGameWithMatches(
+  gameId: string,
+): Promise<GameWithMatches | null> {
+  const data = await loadGameById(gameId);
+  if (data === null) return null;
+  // Run the matchers BEFORE slimming so they see the heavy fields.
+  const matches = buildMatchMaps(
+    data.phases,
+    data.trace,
+    data.arbiter_decisions ?? [],
+    data.seats,
+  );
+  return { data: { ...data, trace: slimTrace(data.trace) }, matches };
+}
+
+/**
+ * Heavy-field accessor used by the lazy-load API route. Re-reads the
+ * source JSON because slimmed copies don't keep the original strings
+ * around — the cost of one cold disk read per drawer-open is dwarfed
+ * by the SSR payload savings on every page load.
+ */
+export interface TraceHeavyFields {
+  system_prompt: string;
+  user_prompt: string;
+  response: string | null;
+}
+
+export async function loadTraceHeavyFields(
+  gameId: string,
+  index: number,
+): Promise<TraceHeavyFields | null> {
+  const data = await loadGameById(gameId);
+  if (data === null) return null;
+  if (!Number.isInteger(index) || index < 0 || index >= data.trace.length) {
+    return null;
+  }
+  const t = data.trace[index];
+  return {
+    system_prompt: t.system_prompt,
+    user_prompt: t.user_prompt,
+    response: t.response,
+  };
+}
+
+function slimTrace(trace: TraceEntry[]): TraceEntry[] {
+  // Replace heavy strings with empty placeholders rather than
+  // ``undefined`` so the client type stays the same and existing
+  // ``entry.system_prompt`` accesses stay valid until they explicitly
+  // opt into the lazy fetch.
+  return trace.map((t) => ({
+    ...t,
+    system_prompt: "",
+    user_prompt: "",
+    response: t.response === null ? null : "",
+  }));
+}
+
 function summarize(data: GameSample, mtimeMs: number): GameSummary {
   let totalTokens = 0;
   let totalLatencyMs = 0;
@@ -127,6 +211,15 @@ function summarize(data: GameSample, mtimeMs: number): GameSummary {
     data.game.ended_at_ms != null
       ? data.game.ended_at_ms - data.game.created_at_ms
       : null;
+  let humanCount = 0;
+  let llmCount = 0;
+  for (const seat of data.seats) {
+    if (seat.is_llm) {
+      llmCount += 1;
+    } else {
+      humanCount += 1;
+    }
+  }
   return {
     id: data.game.id,
     discussion_mode: data.game.discussion_mode,
@@ -135,6 +228,8 @@ function summarize(data: GameSample, mtimeMs: number): GameSummary {
     ended_at_ms: data.game.ended_at_ms,
     duration_ms: duration,
     seat_count: data.seats.length,
+    human_count: humanCount,
+    llm_count: llmCount,
     llm_call_count: data.trace.length,
     total_tokens: totalTokens,
     total_latency_ms: totalLatencyMs,

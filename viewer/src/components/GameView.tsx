@@ -14,18 +14,70 @@ import PhaseSection from "@/components/PhaseSection";
 import SeatGrid from "@/components/SeatGrid";
 import StatsPanel from "@/components/StatsPanel";
 import TraceDrawer from "@/components/TraceDrawer";
+import { buildMatchMaps, type MatchMaps } from "@/lib/match";
 import type { GameSample, TraceEntry } from "@/lib/types";
 
 export default function GameView({
   data,
+  matches,
+  traceFetcher,
   backHref,
   sampleBadge = false,
 }: {
   data: GameSample;
+  /**
+   * Precomputed `(eventKey → traceIndex)` map. Required because the
+   * client never reruns the matchers — we ship the lookup table from
+   * the server load step (see `lib/data.ts::loadGameWithMatches`). Set
+   * to `null` (sample page) to fall through to in-browser computation.
+   */
+  matches: MatchMaps | null;
+  /**
+   * Lazy heavy-field loader for the trace drawer. Provided when the
+   * page strips ``system_prompt`` / ``user_prompt`` / ``response`` from
+   * the SSR payload to keep the initial HTML small. ``null`` = the
+   * trace already carries its heavy fields (sample page) and the
+   * drawer renders synchronously.
+   */
+  traceFetcher?:
+    | ((index: number) => Promise<{
+        system_prompt: string;
+        user_prompt: string;
+        response: string | null;
+      }>)
+    | null;
   backHref?: string;
   sampleBadge?: boolean;
 }) {
-  const [openTrace, setOpenTrace] = React.useState<TraceEntry | null>(null);
+  const [openTrace, setOpenTrace] = React.useState<{
+    entry: TraceEntry;
+    index: number;
+  } | null>(null);
+
+  // Sample page passes `matches=null` (it doesn't pre-slim) — fall
+  // through to in-browser computation so the lightbulb buttons keep
+  // working without a server round-trip on the static demo.
+  const resolvedMatches: MatchMaps = React.useMemo(() => {
+    if (matches !== null) return matches;
+    return buildMatchMaps(
+      data.phases,
+      data.trace,
+      data.arbiter_decisions ?? [],
+      data.seats,
+    );
+  }, [data, matches]);
+
+  // Index lookup keeps drawer's lazy fetch keyed on the canonical
+  // position in `data.trace[]`. Reference equality on TraceEntry is
+  // what the server precompute used to assign indices, so we mirror
+  // that here with `indexOf`.
+  const handleOpen = React.useCallback(
+    (entry: TraceEntry) => {
+      const index = data.trace.indexOf(entry);
+      if (index >= 0) setOpenTrace({ entry, index });
+    },
+    [data.trace],
+  );
 
   return (
     <Container maxWidth="xl" sx={{ py: 3 }}>
@@ -68,7 +120,8 @@ export default function GameView({
               seats={data.seats}
               trace={data.trace}
               arbiterDecisions={data.arbiter_decisions ?? []}
-              onOpenTrace={setOpenTrace}
+              matches={resolvedMatches}
+              onOpenTrace={handleOpen}
             />
           ))}
         </Box>
@@ -79,7 +132,12 @@ export default function GameView({
           </Stack>
         </Box>
       </Box>
-      <TraceDrawer entry={openTrace} onClose={() => setOpenTrace(null)} />
+      <TraceDrawer
+        entry={openTrace?.entry ?? null}
+        index={openTrace?.index ?? null}
+        fetcher={traceFetcher ?? null}
+        onClose={() => setOpenTrace(null)}
+      />
     </Container>
   );
 }
