@@ -1103,6 +1103,103 @@ class SqliteRepo:
         )
         await self._db.commit()
 
+    async def insert_speech_suspicions(
+        self,
+        *,
+        event_id: str,
+        game_id: str,
+        day: int,
+        phase: Phase,
+        suspecter_seat: int,
+        created_at_ms: int,
+        suspicions: Sequence[Any],
+    ) -> None:
+        """Persist a batch of `Suspicion` records attached to one SpeechEvent.
+
+        Uses ``INSERT OR IGNORE`` so a duplicate ``(event_id, seq)`` write
+        (e.g. on retry of the same speech result) is a silent no-op rather
+        than a constraint violation that aborts the whole batch.
+        Empty `suspicions` is a fast-path no-op.
+        """
+        if not suspicions:
+            return
+        rows = [
+            (
+                event_id,
+                seq,
+                game_id,
+                day,
+                phase.value,
+                suspecter_seat,
+                int(s.target_seat),
+                str(s.level.value if hasattr(s.level, "value") else s.level),
+                str(s.reason),
+                (
+                    s.update_from_level.value
+                    if s.update_from_level is not None
+                    and hasattr(s.update_from_level, "value")
+                    else (
+                        str(s.update_from_level)
+                        if s.update_from_level is not None
+                        else None
+                    )
+                ),
+                s.update_reason,
+                created_at_ms,
+            )
+            for seq, s in enumerate(suspicions)
+        ]
+        async with self._tx() as db:
+            await db.executemany(
+                """
+                INSERT OR IGNORE INTO speech_suspicions (
+                    event_id, seq, game_id, day, phase,
+                    suspecter_seat, target_seat, level, reason,
+                    update_from_level, update_reason, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    async def load_speech_suspicions_for_game(
+        self, game_id: str
+    ) -> list[dict[str, Any]]:
+        """All suspicions for a game in chronological order.
+
+        Returned as a list of plain dicts so the caller can decide
+        whether to project into a Pydantic model. Used by prompt
+        builders to render the public history block and by viewer /
+        export tooling to draw the suspicion timeline.
+        """
+        async with self._db.execute(
+            """
+            SELECT event_id, seq, day, phase, suspecter_seat, target_seat,
+                   level, reason, update_from_level, update_reason,
+                   created_at_ms
+              FROM speech_suspicions
+             WHERE game_id=?
+             ORDER BY created_at_ms ASC, event_id ASC, seq ASC
+            """,
+            (game_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {
+                "event_id": row[0],
+                "seq": int(row[1]),
+                "day": int(row[2]),
+                "phase": str(row[3]),
+                "suspecter_seat": int(row[4]),
+                "target_seat": int(row[5]),
+                "level": str(row[6]),
+                "reason": str(row[7]),
+                "update_from_level": row[8],
+                "update_reason": row[9],
+                "created_at_ms": int(row[10]),
+            }
+            for row in rows
+        ]
+
     async def load_open_npc_speak_requests(self, game_id: str) -> list[dict[str, Any]]:
         async with self._db.execute(
             """

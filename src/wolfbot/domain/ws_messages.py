@@ -21,6 +21,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from wolfbot.domain.enums import CoDeclaration
+from wolfbot.domain.suspicion import Suspicion
 
 
 class BaseEnvelope(BaseModel):
@@ -167,6 +168,19 @@ class LogicPacket(BaseEnvelope):
             "treat this as a CO trigger; wolf-side NPCs should consider "
             "whether to fake CO. Cleared on the Master side when a "
             "matching CO arrives."
+        ),
+    )
+    past_suspicions: tuple[
+        tuple[int, str, int, int, str, str, str | None, str | None], ...
+    ] = Field(
+        default_factory=tuple,
+        description=(
+            "Public suspicion timeline carried as a flat tuple of "
+            "``(day, phase, suspecter_seat, target_seat, level, reason, "
+            "update_from_level | None, update_reason | None)`` rows in "
+            "chronological order. Used by the NPC speech LLM to render "
+            "the immutable suspicion history block so silent reversals "
+            "are detectable."
         ),
     )
 
@@ -332,6 +346,19 @@ class SpeakResult(BaseEnvelope):
             "prioritises every named NPC and consumes them one-by-one "
             "as each replies. Self-address (==speaker_seat) and "
             "non-alive seats are dropped on the Master boundary."
+        ),
+    )
+    suspicions: tuple[Suspicion, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Structured suspicion records this utterance asserts. Each "
+            "entry says 「自分は target_seat を level (理由 reason) で見ている」. "
+            "Master persists them to ``speech_suspicions`` keyed on "
+            "``event_id`` and folds the immutable history into every "
+            "subsequent prompt so a silent reversal (e.g. trust → high "
+            "without setting ``update_from_level``) is detectable. "
+            "Empty tuple is allowed but discouraged — see the speech "
+            "system prompt's 名指し義務 rule."
         ),
     )
 

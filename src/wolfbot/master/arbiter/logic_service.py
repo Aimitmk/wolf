@@ -47,6 +47,9 @@ def build_logic_packet(
     past_votes: Iterable[
         tuple[int, int, tuple[tuple[int, int | None], ...]]
     ] = (),
+    past_suspicions: Iterable[
+        tuple[int, str, int, int, str, str, str | None, str | None]
+    ] = (),
     seat_names: dict[int, str] | None = None,
     claim_history: ClaimHistory | None = None,
     recipient_seat_no: int | None = None,
@@ -284,6 +287,7 @@ def build_logic_packet(
         recent_speeches=tuple(recent_speeches),
         past_votes=tuple(past_votes),
         pending_role_callouts=tuple(sorted(state.pending_role_callouts)),
+        past_suspicions=tuple(past_suspicions),
     )
 
 

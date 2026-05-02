@@ -54,6 +54,7 @@ from wolfbot.domain.rules import (
     legal_guard_targets,
     previous_guard_seat_for_night,
 )
+from wolfbot.domain.suspicion import Suspicion
 from wolfbot.llm.decider_config import LLMDeciderConfig
 from wolfbot.llm.prompt_builder import (
     build_system_prompt,
@@ -152,6 +153,12 @@ class LLMAction(BaseModel):
     # a new divination outcome.
     claimed_seer_result: _ClaimedSeerAction | None = None
     claimed_medium_result: _ClaimedMediumAction | None = None
+    # Structured suspicion records this utterance asserts. Mirrors the
+    # reactive_voice NPC speech schema so the public suspicion timeline
+    # is built from one source-of-truth shape across both modes. Empty
+    # tuple is allowed; the speech-task prompt's 名指し義務 rule asks
+    # for ≥1 entry per intent=speak.
+    suspicions: tuple[Suspicion, ...] = ()
 
 
 RESPONSE_SCHEMA: dict[str, object] = {
@@ -169,6 +176,7 @@ RESPONSE_SCHEMA: dict[str, object] = {
             "co_declaration",
             "claimed_seer_result",
             "claimed_medium_result",
+            "suspicions",
         ],
         "properties": {
             "intent": {
@@ -207,6 +215,47 @@ RESPONSE_SCHEMA: dict[str, object] = {
                         "maximum": 9,
                     },
                     "is_wolf": {"type": ["boolean", "null"]},
+                },
+            },
+            "suspicions": {
+                "type": "array",
+                "description": (
+                    "Structured suspicion records this utterance asserts. "
+                    "Each entry says 「自分は target_seat を level (理由 reason) "
+                    "で見ている」. Master persists them keyed on event_id "
+                    "and folds the immutable history into every subsequent "
+                    "prompt so a silent reversal is detectable."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "target_seat",
+                        "level",
+                        "reason",
+                        "update_from_level",
+                        "update_reason",
+                    ],
+                    "properties": {
+                        "target_seat": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9,
+                        },
+                        "level": {
+                            "type": "string",
+                            "enum": ["trust", "low", "medium", "high"],
+                        },
+                        "reason": {"type": "string", "maxLength": 500},
+                        "update_from_level": {
+                            "type": ["string", "null"],
+                            "enum": ["trust", "low", "medium", "high", None],
+                        },
+                        "update_reason": {
+                            "type": ["string", "null"],
+                            "maxLength": 500,
+                        },
+                    },
                 },
             },
         },
@@ -1618,6 +1667,7 @@ class LLMAdapter:
             claimed_seer_is_wolf=seer_verdict,
             claimed_medium_target_seat=medium_seat,
             claimed_medium_is_wolf=medium_verdict,
+            suspicions=action.suspicions,
         )
 
     # --------------------------------------------------- runoff candidate speech
@@ -1779,6 +1829,7 @@ class LLMAdapter:
             claimed_seer_is_wolf=seer_verdict,
             claimed_medium_target_seat=medium_seat,
             claimed_medium_is_wolf=medium_verdict,
+            suspicions=action.suspicions,
         )
 
     async def _emit_npc_speech_event(
@@ -1792,6 +1843,7 @@ class LLMAdapter:
         claimed_seer_is_wolf: bool | None = None,
         claimed_medium_target_seat: int | None = None,
         claimed_medium_is_wolf: bool | None = None,
+        suspicions: Sequence[Suspicion] = (),
     ) -> None:
         """Persist a SpeechEvent(source=npc_generated) for an LLM utterance.
 
@@ -1838,6 +1890,24 @@ class LLMAdapter:
             # rounds-mode path already posted it via MessagePoster) and
             # avoids re-inserting the PLAYER_SPEECH LogEntry (already inserted).
             await self.discussion_service.record_persist_only(event)
+            # Persist structured suspicions attached to this utterance.
+            # Drop self-targeted entries (LLM occasionally mis-targets
+            # itself); rest go to the speech_suspicions table keyed on
+            # the event_id we just wrote.
+            valid_suspicions = [
+                s for s in suspicions if s.target_seat != speaker_seat
+            ]
+            if valid_suspicions:
+                from wolfbot.services.discussion_service import now_ms
+                await self.repo.insert_speech_suspicions(
+                    event_id=event.event_id,
+                    game_id=game.id,
+                    day=game.day_number,
+                    phase=game.phase,
+                    suspecter_seat=speaker_seat,
+                    created_at_ms=now_ms(),
+                    suspicions=valid_suspicions,
+                )
         except Exception:
             log.exception(
                 "SpeechEvent(npc_generated) write failed for game=%s seat=%s",

@@ -394,6 +394,7 @@ class SpeakArbiter:
             role_strategy,
         ) = await self._collect_request_context(state, seat_no)
         past_votes = await self._load_past_votes(game_id, state.day)
+        past_suspicions = await self._load_past_suspicions(game_id)
         seat_names_lookup: dict[int, str] = {
             seat: name for seat, name in (list(alive_seats) + list(dead_seats))
         }
@@ -408,6 +409,7 @@ class SpeakArbiter:
             now_ms=now,
             recent_speeches=recent_speeches,
             past_votes=past_votes,
+            past_suspicions=past_suspicions,
             seat_names=seat_names_lookup,
             claim_history=claim_history,
             recipient_seat_no=seat_no,
@@ -667,6 +669,33 @@ class SpeakArbiter:
             )
             return None
         return collect_claim_history(events, seat_names=seat_names)
+
+    async def _load_past_suspicions(
+        self, game_id: str
+    ) -> tuple[tuple[int, str, int, int, str, str, str | None, str | None], ...]:
+        """Load the public suspicion timeline for the game.
+
+        Best-effort: returns an empty tuple on any DB glitch so a
+        suspicions-table read failure cannot stall a SpeakRequest.
+        """
+        try:
+            rows = await self.repo.load_speech_suspicions_for_game(game_id)
+        except Exception:
+            log.exception("past_suspicions_load_failed game=%s", game_id)
+            return ()
+        return tuple(
+            (
+                int(r["day"]),
+                str(r["phase"]),
+                int(r["suspecter_seat"]),
+                int(r["target_seat"]),
+                str(r["level"]),
+                str(r["reason"]),
+                r["update_from_level"] if r["update_from_level"] is not None else None,
+                r["update_reason"] if r["update_reason"] is not None else None,
+            )
+            for r in rows
+        )
 
     async def _load_past_votes(
         self, game_id: str, current_day: int
@@ -1180,6 +1209,31 @@ class SpeakArbiter:
             created_at_ms=now,
         )
         await self.discussion.record(speech_event)
+        # Persist structured suspicions attached to this utterance. Drop
+        # entries that target the speaker's own seat (the SpeakResult
+        # builder already filters but a stale NPC binary could slip
+        # through). Empty list is a no-op.
+        valid_suspicions = tuple(
+            s for s in result.suspicions if s.target_seat != pending.seat_no
+        )
+        if valid_suspicions:
+            try:
+                await self.repo.insert_speech_suspicions(
+                    event_id=speech_event.event_id,
+                    game_id=pending.game_id,
+                    day=day,
+                    phase=phase,
+                    suspecter_seat=pending.seat_no,
+                    created_at_ms=now,
+                    suspicions=valid_suspicions,
+                )
+            except Exception:
+                log.exception(
+                    "speech_suspicions_insert_failed game=%s seat=%d event=%s",
+                    pending.game_id,
+                    pending.seat_no,
+                    speech_event.event_id,
+                )
         deadline = now + self.config.playback_deadline_ms
         await self.repo.open_npc_playback(
             request_id=result.request_id,

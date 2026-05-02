@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from wolfbot.domain.enums import CO_CLAIM_VALUES, CoDeclaration
+from wolfbot.domain.suspicion import Suspicion
 from wolfbot.domain.ws_messages import (
     ClaimedMediumResult,
     ClaimedSeerResult,
@@ -46,6 +47,10 @@ class NpcGeneratedSpeech:
     claimed_seer_is_wolf: bool | None = None
     claimed_medium_target_seat: int | None = None
     claimed_medium_is_wolf: bool | None = None
+    # Structured suspicion records this utterance asserts. Empty tuple
+    # means no suspicion was declared (allowed but discouraged — see
+    # the speech system prompt's 名指し義務 rule).
+    suspicions: tuple[Suspicion, ...] = ()
 
 
 @runtime_checkable
@@ -163,6 +168,13 @@ class NpcSpeechService:
 
         claimed_seer = _build_claimed_seer(speech, speaker_seat=request.seat_no)
         claimed_medium = _build_claimed_medium(speech, speaker_seat=request.seat_no)
+        # Filter self-suspicions (target == speaker). The LLM occasionally
+        # mis-targets itself; rather than fail the whole speech, drop just
+        # the bad entries — same forgiveness as the addressed_seat_nos
+        # self-filter above.
+        valid_suspicions = tuple(
+            s for s in speech.suspicions if s.target_seat != request.seat_no
+        )
 
         return SpeakResult(
             ts=now_ms,
@@ -180,6 +192,7 @@ class NpcSpeechService:
             claimed_medium_result=claimed_medium,
             addressed_seat_no=addressed_seat_no,
             addressed_seat_nos=addressed_seat_nos,
+            suspicions=valid_suspicions,
         )
 
 

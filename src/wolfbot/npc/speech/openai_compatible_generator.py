@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from wolfbot.domain.enums import CO_CLAIM_VALUES
+from wolfbot.domain.suspicion import Suspicion
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
 from wolfbot.llm.persona_base import Persona
 from wolfbot.llm.prompt_builder import (
@@ -51,6 +52,8 @@ from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 from wolfbot.npc.speech.speech_service import NpcGeneratedSpeech
 
 log = logging.getLogger(__name__)
+
+_SUSPICION_LEVELS = ["trust", "low", "medium", "high"]
 
 _RESPONSE_SCHEMA: dict[str, object] = {
     "name": "reactive_speech",
@@ -66,6 +69,7 @@ _RESPONSE_SCHEMA: dict[str, object] = {
             "addressed_seat_nos",
             "claimed_seer_result",
             "claimed_medium_result",
+            "suspicions",
         ],
         "properties": {
             "text": {"type": "string", "maxLength": 300},
@@ -133,6 +137,63 @@ _RESPONSE_SCHEMA: dict[str, object] = {
                     "Mirrors claimed_seer_result. ``is_wolf=null`` "
                     "encodes 'no execution yesterday → no result today'."
                 ),
+            },
+            "suspicions": {
+                "type": "array",
+                "description": (
+                    "Structured suspicion records the utterance asserts. "
+                    "Each entry says 「自分は target_seat を level (理由 reason) "
+                    "で見ている」. Master persists them keyed on event_id "
+                    "and folds the immutable history into every subsequent "
+                    "prompt so a silent reversal is detectable. "
+                    "Empty array is allowed but discouraged — the system "
+                    "prompt's 名指し義務 rule expects ≥1 entry per speak."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "target_seat",
+                        "level",
+                        "reason",
+                        "update_from_level",
+                        "update_reason",
+                    ],
+                    "properties": {
+                        "target_seat": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9,
+                        },
+                        "level": {
+                            "type": "string",
+                            "enum": _SUSPICION_LEVELS,
+                            "description": (
+                                "trust=村寄り信頼 / low=弱い疑い / "
+                                "medium=明確に怪しい / high=処刑第一候補"
+                            ),
+                        },
+                        "reason": {"type": "string", "maxLength": 500},
+                        "update_from_level": {
+                            "type": ["string", "null"],
+                            "enum": [*_SUSPICION_LEVELS, None],
+                            "description": (
+                                "Set ONLY when amending a prior suspicion "
+                                "against the same target_seat. Must record "
+                                "the previous level. Silent reversals are "
+                                "anti-fabrication red flags."
+                            ),
+                        },
+                        "update_reason": {
+                            "type": ["string", "null"],
+                            "maxLength": 500,
+                            "description": (
+                                "Why the level changed. Required when "
+                                "update_from_level is non-null."
+                            ),
+                        },
+                    },
+                },
             },
         },
     },
@@ -388,6 +449,43 @@ def _build_user(
             lines.append(f"- day{day} {label}:")
             for voter, target in pairs:
                 lines.append(f"    {_voter_label(voter)} → {_voter_label(target)}")
+    if logic.past_suspicions:
+        # Public suspicion timeline. The LLM uses this both as a memory
+        # aid (don't fabricate a contradicting suspicion) and as evidence
+        # (a target who has been suspected by N seats with consistent
+        # reasoning is a strong lynch candidate). Silent reversals
+        # (where update_from_level is null but the speaker had previously
+        # declared a different level) are anti-fabrication red flags.
+        lines.append("")
+        lines.append("## 公開された疑い履歴 (古い順、不変記録)")
+        seat_name_for_susp = {
+            seat_no: name
+            for seat_no, name in (list(alive_seats) + list(dead_seats))
+        }
+        level_label = {
+            "trust": "信頼",
+            "low": "弱疑",
+            "medium": "疑",
+            "high": "強疑",
+        }
+        for (
+            day,
+            _phase,
+            suspecter,
+            target,
+            level,
+            reason,
+            from_level,
+            update_reason,
+        ) in logic.past_suspicions:
+            sname = seat_name_for_susp.get(suspecter) or f"席{suspecter}"
+            tname = seat_name_for_susp.get(target) or f"席{target}"
+            level_text = level_label.get(level, level)
+            line = f"- day{day} {sname} → {tname} ({level_text}): {reason}"
+            if from_level is not None:
+                from_text = level_label.get(from_level, from_level)
+                line += f"  [{from_text}→{level_text} 更新理由: {update_reason or '(未記入)'}]"
+            lines.append(line)
     if logic.recent_speeches:
         lines.append("")
         lines.append("## 直近の発言 (古い順)")
@@ -775,6 +873,7 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         data.get("claimed_medium_result"),
         allow_null_verdict=True,
     )
+    suspicions = _parse_suspicions(data.get("suspicions"))
     # Rough estimate: ~150ms per character for TTS
     estimated_ms = max(500, len(text) * 150)
 
@@ -790,7 +889,30 @@ def _build_speech_from_json(data: dict[str, object]) -> NpcGeneratedSpeech | Non
         claimed_seer_is_wolf=seer_is_wolf,
         claimed_medium_target_seat=medium_seat,
         claimed_medium_is_wolf=medium_is_wolf,
+        suspicions=suspicions,
     )
+
+
+def _parse_suspicions(raw: object) -> tuple[Suspicion, ...]:
+    """Coerce a raw `suspicions` array from structured-output JSON into a
+    tuple of validated `Suspicion` models.
+
+    Drops malformed entries silently (mirrors `_parse_claim_fields`'s
+    forgiveness — the speech is still delivered without the bad
+    suspicion attached). Empty / non-list input → empty tuple.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[Suspicion] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            out.append(Suspicion.model_validate(entry))
+        except Exception:
+            log.debug("malformed suspicion entry dropped: %r", entry)
+            continue
+    return tuple(out)
 
 
 def _parse_claim_fields(raw: object, *, allow_null_verdict: bool) -> tuple[int | None, bool | None]:
