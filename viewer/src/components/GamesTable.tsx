@@ -47,39 +47,20 @@ interface ColumnDef {
   key: SortKey;
   label: string;
   align?: TableCellProps["align"];
-  /** Default direction the first time this column is clicked. Numeric
-   * columns default to ``desc`` because "biggest first" is the typical
-   * read; text-ish columns default to ``asc``. */
-  initialDir: SortDir;
 }
 
 const COLUMNS: readonly ColumnDef[] = [
-  { key: "id", label: "Game ID", initialDir: "asc" },
-  { key: "victory", label: "勝敗", initialDir: "asc" },
-  { key: "discussion_mode", label: "モード", initialDir: "asc" },
-  { key: "created_at_ms", label: "開始 (JST)", initialDir: "desc" },
-  { key: "duration_ms", label: "所要", align: "right", initialDir: "desc" },
-  { key: "seat_count", label: "席", align: "center", initialDir: "desc" },
-  { key: "human_count", label: "人間", align: "right", initialDir: "desc" },
-  { key: "llm_count", label: "LLM", align: "right", initialDir: "desc" },
-  {
-    key: "llm_call_count",
-    label: "LLM 呼び出し",
-    align: "right",
-    initialDir: "desc",
-  },
-  {
-    key: "total_tokens",
-    label: "合計トークン",
-    align: "right",
-    initialDir: "desc",
-  },
-  {
-    key: "total_latency_ms",
-    label: "合計レイテンシ",
-    align: "right",
-    initialDir: "desc",
-  },
+  { key: "id", label: "Game ID" },
+  { key: "victory", label: "勝敗" },
+  { key: "discussion_mode", label: "モード" },
+  { key: "created_at_ms", label: "開始 (JST)" },
+  { key: "duration_ms", label: "所要", align: "right" },
+  { key: "seat_count", label: "席", align: "center" },
+  { key: "human_count", label: "人間", align: "right" },
+  { key: "llm_count", label: "LLM", align: "right" },
+  { key: "llm_call_count", label: "LLM 呼び出し", align: "right" },
+  { key: "total_tokens", label: "合計トークン", align: "right" },
+  { key: "total_latency_ms", label: "合計レイテンシ", align: "right" },
 ];
 
 const VICTORY_RANK: Record<string, number> = {
@@ -127,18 +108,19 @@ export default function GamesTable({ games }: { games: GameSummary[] }) {
     return null; // empty state is rendered by the page
   }
 
-  const handleSort = (key: SortKey, defaultDir: SortDir) => {
+  const handleSort = (key: SortKey) => {
     setPage(0);
-    setSortKey((prev) => {
-      if (prev === key) {
-        // Same column → flip direction.
-        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-        return prev;
-      }
-      // New column → use the column's natural initial direction.
-      setSortDir(defaultDir);
-      return key;
-    });
+    if (sortKey === key) {
+      // Same column → toggle direction.
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+      return;
+    }
+    // New column → start at desc. Every subsequent click on the same
+    // header just flips between desc and asc, matching the typical
+    // spreadsheet/JIRA/GitHub-style "first click is desc, click again
+    // for asc" interaction.
+    setSortKey(key);
+    setSortDir("desc");
   };
 
   return (
@@ -173,8 +155,12 @@ export default function GamesTable({ games }: { games: GameSummary[] }) {
                 >
                   <TableSortLabel
                     active={sortKey === col.key}
-                    direction={sortKey === col.key ? sortDir : col.initialDir}
-                    onClick={() => handleSort(col.key, col.initialDir)}
+                    // Inactive columns render the indicator in the
+                    // direction they'll start at on first click — desc
+                    // — so the affordance previews "click me to sort
+                    // newest/biggest first".
+                    direction={sortKey === col.key ? sortDir : "desc"}
+                    onClick={() => handleSort(col.key)}
                   >
                     {col.label}
                   </TableSortLabel>
