@@ -16,7 +16,7 @@ participant. These tests pin the prompt-construction contract:
 
 from __future__ import annotations
 
-from wolfbot.master.stt_service import (
+from wolfbot.master.voice.stt_service import (
     GeminiAudioAnalyzer,
     GroqWhisperAudioAnalyzer,
     _format_roster_block,

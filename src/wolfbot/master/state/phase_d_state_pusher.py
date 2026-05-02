@@ -32,8 +32,7 @@ from collections.abc import Callable, Sequence
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, NightAction, Player, Seat
 from wolfbot.domain.models import LogEntry as DomainLogEntry
-from wolfbot.master.npc_registry import NpcEntry, NpcRegistry
-from wolfbot.master.private_state import (
+from wolfbot.master.state.private_state import (
     make_alive_changed_update,
     make_day_advanced_update,
     make_guard_entry_update,
@@ -41,6 +40,7 @@ from wolfbot.master.private_state import (
     make_medium_result_update,
     make_seer_result_update,
 )
+from wolfbot.master.ws.npc_registry import NpcEntry, NpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 
 log = logging.getLogger(__name__)

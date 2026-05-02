@@ -29,9 +29,9 @@ from wolfbot.domain.ws_messages import (
     PlaybackRejected,
     SpeakResult,
 )
-from wolfbot.master.logic_service import build_logic_packet
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
-from wolfbot.master.speak_arbiter import SpeakArbiter, SpeakArbiterConfig
+from wolfbot.master.arbiter.logic_service import build_logic_packet
+from wolfbot.master.arbiter.speak_arbiter import SpeakArbiter, SpeakArbiterConfig
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discussion_service import (
     DiscussionService,
@@ -2268,7 +2268,7 @@ async def test_pair_volley_demotion_fires_after_4_low_info_speeches(
     in the volley. Reproduces the production loop where ラキオ ↔ ジョナス
     spoke alternately for the entire phase.
     """
-    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+    from wolfbot.master.arbiter.speak_arbiter import _compute_demoted_seats
 
     # 4-event window: 1, 2, 1, 2 (no info)
     summary = ((1, False), (2, False), (1, False), (2, False))
@@ -2283,7 +2283,7 @@ async def test_pair_volley_resets_when_co_declared() -> None:
     punished. Note: only the first CO per (seat, role) sets has_info —
     the fold dedups so re-declaring an existing CO doesn't bypass.
     """
-    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+    from wolfbot.master.arbiter.speak_arbiter import _compute_demoted_seats
 
     summary = ((1, False), (2, False), (1, True), (2, False))
     assert _compute_demoted_seats(summary) == frozenset()
@@ -2380,7 +2380,7 @@ async def test_repeated_co_from_same_seat_does_not_bypass_gate(
     # 5 events → summary is capped at 6 → all 5 retained.
     # Last 4 entries: (2, False), (3, False), (2, False), (3, False)
     # Pair volley: 2 distinct seats {2,3}, no has_info in window → demote.
-    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+    from wolfbot.master.arbiter.speak_arbiter import _compute_demoted_seats
 
     assert _compute_demoted_seats(state.recent_speech_summary) == frozenset({2, 3})
 
@@ -2389,7 +2389,7 @@ async def test_consecutive_cap_demotion_after_3_same_seat() -> None:
     """Same seat speaking 3 in a row → demote that seat. Mostly fires
     when a human keeps re-addressing the same NPC, but defensive against
     any future bug that lets the same seat dispatch repeatedly."""
-    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+    from wolfbot.master.arbiter.speak_arbiter import _compute_demoted_seats
 
     summary = ((5, False), (5, False), (5, False))
     assert _compute_demoted_seats(summary) == frozenset({5})
@@ -2397,7 +2397,7 @@ async def test_consecutive_cap_demotion_after_3_same_seat() -> None:
 
 async def test_compute_demoted_seats_no_op_for_short_window() -> None:
     """Window shorter than the gate thresholds yields an empty set."""
-    from wolfbot.master.speak_arbiter import _compute_demoted_seats
+    from wolfbot.master.arbiter.speak_arbiter import _compute_demoted_seats
 
     assert _compute_demoted_seats(()) == frozenset()
     assert _compute_demoted_seats(((1, False), (2, False))) == frozenset()
@@ -2693,7 +2693,7 @@ async def test_handle_tts_failed_pops_pending_before_returning(
     "capture game_id first" invariant.
     """
     from wolfbot.domain.ws_messages import TtsFailed
-    from wolfbot.master.speak_arbiter import _PendingRequest
+    from wolfbot.master.arbiter.speak_arbiter import _PendingRequest
 
     discussion = DiscussionService(
         store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
@@ -2763,7 +2763,7 @@ async def test_arbiter_cleanup_game_drops_only_target_game(repo: SqliteRepo) -> 
     `_playback_deadlines` across games. Two-game scenario: seed pending
     state for both, sweep g1, verify g2 untouched.
     """
-    from wolfbot.master.speak_arbiter import _PendingRequest
+    from wolfbot.master.arbiter.speak_arbiter import _PendingRequest
 
     discussion = DiscussionService(
         store=SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]

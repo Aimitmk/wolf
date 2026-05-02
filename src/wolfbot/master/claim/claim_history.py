@@ -175,7 +175,7 @@ def expected_seer_claim_count_for_day(day: int) -> int:
 
     So by day N morning the seer has announced exactly N entries
     (one per declared day, day=1..N). This matches
-    :func:`wolfbot.master.claim_validator._validate_seer_fake`'s
+    :func:`wolfbot.master.claim.claim_validator._validate_seer_fake`'s
     "1 entry per declared day" rule (``same_day_priors``).
 
     Day 0 has no morning discussion (SETUP / NIGHT_0 are transient),

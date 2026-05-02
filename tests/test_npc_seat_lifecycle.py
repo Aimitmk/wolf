@@ -28,7 +28,7 @@ from wolfbot.domain.ws_messages import (
     SeatReleased,
     SetMuteState,
 )
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
 from wolfbot.npc.client import NpcClient, NpcClientConfig
 from wolfbot.npc.playback import FakeVoicePlayback
 from wolfbot.npc.speech_service import FakeNpcGenerator, NpcSpeechService

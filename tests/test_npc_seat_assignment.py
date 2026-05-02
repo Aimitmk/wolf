@@ -17,7 +17,7 @@ from wolfbot.domain.discussion import make_phase_id
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Game, Seat
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, SpeakRequest
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
 from wolfbot.npc.openai_compatible_generator import (
     _build_system,
     _build_user,

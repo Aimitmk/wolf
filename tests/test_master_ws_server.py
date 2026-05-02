@@ -35,12 +35,12 @@ from wolfbot.domain.ws_messages import (
     SpeakResult,
     SpeechEventPayload,
 )
-from wolfbot.master.ingest_service import (
+from wolfbot.master.arbiter.ingest_service import (
     MasterIngestService,
     PhaseLookup,
 )
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
-from wolfbot.master.ws_server import (
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
+from wolfbot.master.ws.ws_server import (
     ConnectionContext,
     HandlerRegistry,
     MasterHandlers,
@@ -591,7 +591,7 @@ def test_websockets_master_ws_server_constructs_without_starting(
     psk_match: bool,
 ) -> None:
     """Constructor wiring smoke — no actual socket bind."""
-    from wolfbot.master.ws_server import WebsocketsMasterWsServer
+    from wolfbot.master.ws.ws_server import WebsocketsMasterWsServer
 
     registry = InMemoryNpcRegistry()
     handlers = MasterHandlers(registry=registry, now_ms=lambda: 0)

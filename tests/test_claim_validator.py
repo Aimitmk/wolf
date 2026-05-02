@@ -1,4 +1,4 @@
-"""Tests for `wolfbot.master.claim_validator`.
+"""Tests for `wolfbot.master.claim.claim_validator`.
 
 Covers the matrix:
   * real seer: legal / wrong target / wrong color
@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.ws_messages import ClaimedMediumResult, ClaimedSeerResult
-from wolfbot.master.claim_history import (
+from wolfbot.master.claim.claim_history import (
     ClaimedMediumEntry,
     ClaimedSeerEntry,
     ClaimerHistory,
 )
-from wolfbot.master.claim_validator import (
+from wolfbot.master.claim.claim_validator import (
     REASON_MEDIUM_DAY1,
     REASON_MEDIUM_FABRICATED_TARGET,
     REASON_MEDIUM_NO_EXECUTION,
@@ -427,7 +427,7 @@ def test_madman_first_seer_claim_passes() -> None:
 def test_4th_seer_co_rejected() -> None:
     """Reproduces game `59d5377c6794`: a 4th seat tries to seer-CO when
     3 distinct seats already have seer claims in the public ledger."""
-    from wolfbot.master.claim_validator import REASON_SEER_CO_CAP_EXCEEDED
+    from wolfbot.master.claim.claim_validator import REASON_SEER_CO_CAP_EXCEEDED
 
     res = validate_claim_against_truth(
         speaker_role=Role.VILLAGER,
@@ -465,7 +465,7 @@ def test_repeat_claim_from_same_speaker_at_cap_passes() -> None:
     """The cap only blocks NEW CO claimers. A speaker who's already
     CO'd seer can keep adding new daily results past day 1 even when
     the ledger has 3 distinct claimers (they're one of those 3)."""
-    from wolfbot.master.claim_history import ClaimedSeerEntry
+    from wolfbot.master.claim.claim_history import ClaimedSeerEntry
 
     prior = ClaimerHistory(
         claimer_seat=4,
@@ -492,7 +492,7 @@ def test_repeat_claim_from_same_speaker_at_cap_passes() -> None:
 def test_3rd_medium_co_rejected() -> None:
     """Medium cap is 2. A 3rd medium CO from a new claimer is rejected."""
     from wolfbot.domain.ws_messages import ClaimedMediumResult
-    from wolfbot.master.claim_validator import REASON_MEDIUM_CO_CAP_EXCEEDED
+    from wolfbot.master.claim.claim_validator import REASON_MEDIUM_CO_CAP_EXCEEDED
 
     res = validate_claim_against_truth(
         speaker_role=Role.VILLAGER,

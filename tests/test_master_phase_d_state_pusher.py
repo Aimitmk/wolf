@@ -15,8 +15,8 @@ from wolfbot.domain.models import (
     NightAction,
     Seat,
 )
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
-from wolfbot.master.phase_d_state_pusher import PhaseDStatePusher
+from wolfbot.master.state.phase_d_state_pusher import PhaseDStatePusher
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 
 

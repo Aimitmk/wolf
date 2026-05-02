@@ -30,7 +30,7 @@ from wolfbot.domain.discussion import (
 from wolfbot.domain.enums import Phase
 from wolfbot.domain.models import Seat
 from wolfbot.domain.ws_messages import SpeechEventPayload
-from wolfbot.master.npc_registry import NpcRegistry
+from wolfbot.master.ws.npc_registry import NpcRegistry
 from wolfbot.services.discussion_service import (
     DiscussionService,
     new_event_id,

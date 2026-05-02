@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 import pytest
 
-from wolfbot.master.stt_service import (
+from wolfbot.master.voice.stt_service import (
     GroqWhisperAudioAnalyzer,
     SttProviderError,
 )
@@ -342,7 +342,7 @@ async def test_empty_transcript_short_circuits_analyzer(
             return httpx.Response(200, json={"text": ""})
         return httpx.Response(200, json=_analyzer_json({}))
 
-    import wolfbot.master.stt_service as stt_module  # noqa: F401
+    import wolfbot.master.voice.stt_service as stt_module  # noqa: F401
 
     transport = httpx.MockTransport(handler)
     real = httpx.AsyncClient

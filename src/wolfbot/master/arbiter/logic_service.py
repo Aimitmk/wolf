@@ -25,7 +25,7 @@ from collections.abc import Iterable
 
 from wolfbot.domain.discussion import PublicDiscussionState
 from wolfbot.domain.ws_messages import LogicCandidate, LogicPacket, RecentSpeech
-from wolfbot.master.claim_history import (
+from wolfbot.master.claim.claim_history import (
     ClaimHistory,
     expected_seer_claim_count_for_day,
 )

@@ -20,7 +20,7 @@ from wolfbot.domain.durations import (
 )
 from wolfbot.domain.enums import Phase
 from wolfbot.domain.models import LogEntry, Seat
-from wolfbot.master.narration import (
+from wolfbot.master.narration.narration import (
     NarrationContext,
     NarrationOutput,
     render_master_narration,

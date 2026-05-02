@@ -42,9 +42,9 @@ from wolfbot.domain.ws_messages import (
     VadSpeechEnded,
     VadSpeechStarted,
 )
-from wolfbot.master.audio_sink import WolfbotAudioSink
-from wolfbot.master.stt_service import RosterEntry, SttResult
-from wolfbot.master.voice_ingest_service import (
+from wolfbot.master.voice.audio_sink import WolfbotAudioSink
+from wolfbot.master.voice.stt_service import RosterEntry, SttResult
+from wolfbot.master.voice.voice_ingest_service import (
     VoiceIngestConfig,
     VoiceIngestService,
 )
@@ -243,7 +243,7 @@ def _build_production_stt(settings: VoicetestSettings):  # type: ignore[no-untyp
                 "requires GAMEPLAY_LLM_API_KEY for the analyzer step "
                 "(set in .env.master)."
             )
-        from wolfbot.master.stt_service import GroqWhisperAudioAnalyzer
+        from wolfbot.master.voice.stt_service import GroqWhisperAudioAnalyzer
 
         analyzer_base_url = (
             settings.GAMEPLAY_LLM_BASE_URL or "https://api.x.ai/v1"
@@ -269,7 +269,7 @@ def _build_production_stt(settings: VoicetestSettings):  # type: ignore[no-untyp
                 "VOICETEST_USE_STT=true with VOICE_STT_PROVIDER=gemini "
                 "requires VOICE_LLM_API_KEY (set in .env.master)."
             )
-        from wolfbot.master.stt_service import GeminiAudioAnalyzer
+        from wolfbot.master.voice.stt_service import GeminiAudioAnalyzer
 
         log.info(
             "voicetest_stt=ON provider=gemini model=%s",
@@ -321,7 +321,7 @@ def _install_silence_gate(
     actual speech recordings.
 
     ``VoiceIngestService._run_stt_inner`` does
-    ``from wolfbot.master.voice_debug_dump import dump_segment``
+    ``from wolfbot.master.voice.voice_debug_dump import dump_segment``
     *inside the function body*, so a module-level monkey-patch
     applied before any segment fires will be picked up by every
     subsequent call without touching production code.
@@ -329,7 +329,7 @@ def _install_silence_gate(
     import dataclasses
     from datetime import datetime
 
-    import wolfbot.master.voice_debug_dump as _dump_mod
+    import wolfbot.master.voice.voice_debug_dump as _dump_mod
 
     original = _dump_mod.dump_segment
 
@@ -432,7 +432,7 @@ async def _run() -> None:
         settings.VOICETEST_MIN_DURATION_MS,
     )
 
-    from wolfbot.master.stt_service import SttService
+    from wolfbot.master.voice.stt_service import SttService
 
     stt_service: SttService
     if settings.VOICETEST_USE_STT:
@@ -457,10 +457,10 @@ async def _run() -> None:
     vc_ref: list[voice_recv.VoiceRecvClient | None] = [None]
 
     async def _join_vc() -> None:
-        from wolfbot.master.voice_recv_dave_patch import (
+        from wolfbot.master.voice.voice_recv_dave_patch import (
             apply_dave_decrypt_patch,
         )
-        from wolfbot.master.voice_recv_resilience import (
+        from wolfbot.master.voice.voice_recv_resilience import (
             apply_packet_router_resilience,
         )
 

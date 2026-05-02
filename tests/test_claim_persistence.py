@@ -1,6 +1,6 @@
 """Round-trip tests for the claim columns on ``speech_events``.
 
-The claim aggregator (`wolfbot.master.claim_history`) is unit-tested
+The claim aggregator (`wolfbot.master.claim.claim_history`) is unit-tested
 in :mod:`tests.test_claim_history`; this file pins the persistence
 seam so a column rename or a missed migration block fails noisily.
 """

@@ -27,8 +27,8 @@ from collections.abc import Awaitable, Callable
 from wolfbot.domain.enums import Role
 from wolfbot.domain.models import LogEntry
 from wolfbot.domain.ws_messages import WolfChatSend
-from wolfbot.master.npc_registry import NpcEntry, NpcRegistry
-from wolfbot.master.private_state import make_wolf_chat_update
+from wolfbot.master.state.private_state import make_wolf_chat_update
+from wolfbot.master.ws.npc_registry import NpcEntry, NpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 
 log = logging.getLogger(__name__)

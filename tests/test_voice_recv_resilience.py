@@ -29,7 +29,7 @@ discord.opus._load_default()
 
 from discord.opus import OpusError  # noqa: E402
 
-from wolfbot.master.voice_recv_resilience import (  # noqa: E402
+from wolfbot.master.voice.voice_recv_resilience import (  # noqa: E402
     apply_packet_router_resilience,
 )
 

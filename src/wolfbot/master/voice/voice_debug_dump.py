@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from wolfbot.master.stt_service import SttResult, pcm_to_wav
+from wolfbot.master.voice.stt_service import SttResult, pcm_to_wav
 
 log = logging.getLogger(__name__)
 

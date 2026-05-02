@@ -22,7 +22,7 @@ import discord
 from discord.ext import voice_recv
 
 if TYPE_CHECKING:
-    from wolfbot.master.voice_ingest_service import VoiceIngestService
+    from wolfbot.master.voice.voice_ingest_service import VoiceIngestService
 
 log = logging.getLogger(__name__)
 

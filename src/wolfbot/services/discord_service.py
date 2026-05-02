@@ -51,7 +51,7 @@ from wolfbot.services.timer_service import EngineRegistry, GameEngine
 from wolfbot.ui.views import NightActionView, VoteView
 
 if TYPE_CHECKING:
-    from wolfbot.master.npc_registry import NpcRegistry
+    from wolfbot.master.ws.npc_registry import NpcRegistry
     from wolfbot.services.discussion_service import DiscussionService
 
 log = logging.getLogger(__name__)
@@ -762,7 +762,7 @@ class WolfCog(commands.Cog):
                             co_declaration = analysis.co_declaration
                             role_callout = analysis.role_callout
                             if analysis.addressed_name:
-                                from wolfbot.master.ingest_service import (
+                                from wolfbot.master.arbiter.ingest_service import (
                                     resolve_seat_by_name,
                                 )
 

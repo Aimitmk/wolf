@@ -637,10 +637,10 @@ async def test_main_py_wires_reactive_voice_pipeline_services() -> None:
     constructors accept the expected parameters."""
     import inspect
 
-    from wolfbot.master.ingest_service import MasterIngestService
-    from wolfbot.master.npc_registry import InMemoryNpcRegistry
-    from wolfbot.master.speak_arbiter import SpeakArbiter
-    from wolfbot.master.ws_server import (
+    from wolfbot.master.arbiter.ingest_service import MasterIngestService
+    from wolfbot.master.arbiter.speak_arbiter import SpeakArbiter
+    from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.ws.ws_server import (
         MasterHandlers,
         WebsocketsMasterWsServer,
     )
@@ -736,8 +736,8 @@ async def test_arbiter_try_dispatch_next_triggers_on_reactive_voice(repo: Sqlite
     """SpeakArbiter.try_dispatch_next dispatches a SpeakRequest when a
     reactive_voice game has an online NPC in a discussion phase."""
     from wolfbot.domain.models import Seat
-    from wolfbot.master.npc_registry import InMemoryNpcRegistry
-    from wolfbot.master.speak_arbiter import SpeakArbiter
+    from wolfbot.master.arbiter.speak_arbiter import SpeakArbiter
+    from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
     from wolfbot.services.discussion_service import (
         DiscussionService,
         SqliteSpeechEventStore,
@@ -808,8 +808,8 @@ async def test_arbiter_try_dispatch_next_triggers_on_reactive_voice(repo: Sqlite
 
 async def test_arbiter_try_dispatch_next_noop_for_rounds(repo: SqliteRepo) -> None:
     """try_dispatch_next must no-op for rounds-mode games."""
-    from wolfbot.master.npc_registry import InMemoryNpcRegistry
-    from wolfbot.master.speak_arbiter import SpeakArbiter
+    from wolfbot.master.arbiter.speak_arbiter import SpeakArbiter
+    from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
     from wolfbot.services.discussion_service import (
         DiscussionService,
         SqliteSpeechEventStore,
@@ -841,8 +841,8 @@ async def test_arbiter_try_dispatch_next_noop_for_rounds(repo: SqliteRepo) -> No
 async def test_recovery_sweep_closes_open_speak_requests(repo: SqliteRepo) -> None:
     """reactive_voice_recovery_sweep must close open npc_speak_requests and
     npc_playback_events with failure_reason=master_restart."""
-    from wolfbot.master.npc_registry import InMemoryNpcRegistry
-    from wolfbot.master.speak_arbiter import SpeakArbiter
+    from wolfbot.master.arbiter.speak_arbiter import SpeakArbiter
+    from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
     from wolfbot.services.discussion_service import (
         DiscussionService,
         SqliteSpeechEventStore,
@@ -1050,8 +1050,8 @@ async def test_game_service_emits_phase_summary_on_discussion_exit(repo: SqliteR
 async def test_ws_authenticate_reads_request_path() -> None:
     """WebsocketsMasterWsServer._authenticate must read ws.request.path
     (websockets 16.0) rather than the legacy ws.path."""
-    from wolfbot.master.npc_registry import InMemoryNpcRegistry
-    from wolfbot.master.ws_server import MasterHandlers, WebsocketsMasterWsServer
+    from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.ws.ws_server import MasterHandlers, WebsocketsMasterWsServer
 
     registry = InMemoryNpcRegistry()
     handlers = MasterHandlers(registry=registry, now_ms=lambda: 0)
@@ -1084,8 +1084,8 @@ async def test_ws_authenticate_reads_request_path() -> None:
 
 async def test_ws_authenticate_rejects_bad_psk() -> None:
     """Auth must reject when psk doesn't match."""
-    from wolfbot.master.npc_registry import InMemoryNpcRegistry
-    from wolfbot.master.ws_server import MasterHandlers, WebsocketsMasterWsServer
+    from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.ws.ws_server import MasterHandlers, WebsocketsMasterWsServer
 
     registry = InMemoryNpcRegistry()
     handlers = MasterHandlers(registry=registry, now_ms=lambda: 0)

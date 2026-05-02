@@ -13,8 +13,8 @@ from wolfbot.domain.ws_messages import (
     PrivateStateUpdate,
     WolfChatSend,
 )
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
-from wolfbot.master.wolf_chat_broker import WolfChatBroker
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
+from wolfbot.master.ws.wolf_chat_broker import WolfChatBroker
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 
 

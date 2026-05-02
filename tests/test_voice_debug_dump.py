@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from wolfbot.master.stt_service import SttResult
-from wolfbot.master.voice_debug_dump import (
+from wolfbot.master.voice.stt_service import SttResult
+from wolfbot.master.voice.voice_debug_dump import (
     SegmentDumpRecord,
     debug_dir,
     dump_segment,
@@ -299,7 +299,7 @@ async def test_write_failure_swallowed(
 ) -> None:
     """A flaky disk (or read-only mount) must never break the voice
     path — the dump is best-effort observability only."""
-    import wolfbot.master.voice_debug_dump as mod
+    import wolfbot.master.voice.voice_debug_dump as mod
 
     def boom(*_a: object, **_kw: object) -> None:
         raise OSError("disk full")

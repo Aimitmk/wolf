@@ -52,16 +52,16 @@ from wolfbot.domain.ws_messages import (
     TtsFinished,
 )
 from wolfbot.llm.prompt_builder import build_strategy_block
-from wolfbot.master.claim_history import ClaimHistory, collect_claim_history
-from wolfbot.master.claim_validator import (
+from wolfbot.master.arbiter.logic_service import build_logic_packet
+from wolfbot.master.claim.claim_history import ClaimHistory, collect_claim_history
+from wolfbot.master.claim.claim_validator import (
     CO_CAP_REASONS,
     FABRICATION_REASONS,
     ActualMediumEvent,
     ActualSeerEvent,
     validate_claim_against_truth,
 )
-from wolfbot.master.logic_service import build_logic_packet
-from wolfbot.master.npc_registry import NpcRegistry
+from wolfbot.master.ws.npc_registry import NpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discussion_service import (
     DiscussionService,
@@ -635,7 +635,7 @@ class SpeakArbiter:
         her legitimate Jonas claim as a fabricated target and bounced
         her 6 times in a row.
         """
-        from wolfbot.master.private_state import load_private_state_for_seat
+        from wolfbot.master.state.private_state import load_private_state_for_seat
         try:
             players = await self.repo.load_players(game_id)
             seats = await self.repo.load_seats(game_id)
@@ -680,7 +680,7 @@ class SpeakArbiter:
         ``(history, count)`` — history empty unless the speaker IS
         the real medium, count comes from the public log regardless.
         """
-        from wolfbot.master.private_state import load_private_state_for_seat
+        from wolfbot.master.state.private_state import load_private_state_for_seat
         try:
             players = await self.repo.load_players(game_id)
             seats = await self.repo.load_seats(game_id)

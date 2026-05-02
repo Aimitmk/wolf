@@ -25,14 +25,14 @@ from wolfbot.domain.discussion import (
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.models import Game, Seat
 from wolfbot.domain.ws_messages import SpeechEventPayload
-from wolfbot.master.ingest_service import (
+from wolfbot.master.arbiter.ingest_service import (
     MasterIngestService,
     resolve_seat_by_name,
 )
-from wolfbot.master.logic_service import build_logic_packet
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
-from wolfbot.master.speak_arbiter import SpeakArbiter
-from wolfbot.master.stt_service import GeminiAudioAnalyzer
+from wolfbot.master.arbiter.logic_service import build_logic_packet
+from wolfbot.master.arbiter.speak_arbiter import SpeakArbiter
+from wolfbot.master.voice.stt_service import GeminiAudioAnalyzer
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
 from wolfbot.persistence.sqlite_repo import SqliteRepo
 from wolfbot.services.discussion_service import (
     DiscussionService,
@@ -561,7 +561,7 @@ async def test_wolfcog_on_message_uses_text_analyzer_to_set_addressed_seat(
     from unittest.mock import MagicMock
 
     from wolfbot.domain.discussion import SpeechSource
-    from wolfbot.master.text_analyzer import FakeTextAnalyzer, TextAnalysis
+    from wolfbot.master.state.text_analyzer import FakeTextAnalyzer, TextAnalysis
     from wolfbot.services.discord_service import WolfCog
     from wolfbot.services.discussion_service import SqliteSpeechEventStore
 
@@ -615,7 +615,7 @@ async def test_wolfcog_on_message_skips_addressed_when_analyzer_fails(
     from unittest.mock import MagicMock
 
     from wolfbot.domain.discussion import SpeechSource
-    from wolfbot.master.text_analyzer import FakeTextAnalyzer
+    from wolfbot.master.state.text_analyzer import FakeTextAnalyzer
     from wolfbot.services.discord_service import WolfCog
     from wolfbot.services.discussion_service import SqliteSpeechEventStore
 

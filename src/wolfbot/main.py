@@ -54,7 +54,7 @@ async def _run() -> None:
     # NPC registry is always created so /wolf start can consult it for
     # reactive_voice seat backfill. The WS server (which actually accepts
     # NPC bot connections) is only started when MASTER_NPC_PSK is set.
-    from wolfbot.master.npc_registry import InMemoryNpcRegistry
+    from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
 
     npc_registry = InMemoryNpcRegistry()
     discord_adapter.set_npc_registry(npc_registry)
@@ -194,11 +194,11 @@ async def _run() -> None:
                 master_vc_ref[0] = None
             from discord.ext import voice_recv
 
-            from wolfbot.master.audio_sink import WolfbotAudioSink
-            from wolfbot.master.voice_recv_dave_patch import (
+            from wolfbot.master.voice.audio_sink import WolfbotAudioSink
+            from wolfbot.master.voice.voice_recv_dave_patch import (
                 apply_dave_decrypt_patch,
             )
-            from wolfbot.master.voice_recv_resilience import (
+            from wolfbot.master.voice.voice_recv_resilience import (
                 apply_packet_router_resilience,
             )
 
@@ -286,7 +286,7 @@ async def _run() -> None:
         skipped; the NPC will see the historical empty-state behavior on
         decision requests until the next snapshot opportunity (re-register).
         """
-        from wolfbot.master.private_state import (
+        from wolfbot.master.state.private_state import (
             build_snapshot_for_seat,
             load_private_state_for_seat,
         )
@@ -680,7 +680,7 @@ async def _run() -> None:
             settings.VOICE_STT_PROVIDER == "groq"
             and settings.GAMEPLAY_LLM_API_KEY is not None
         ):
-            from wolfbot.master.text_analyzer import OpenAICompatibleTextAnalyzer
+            from wolfbot.master.state.text_analyzer import OpenAICompatibleTextAnalyzer
 
             analyzer_base_url = (
                 settings.GAMEPLAY_LLM_BASE_URL or "https://api.x.ai/v1"
@@ -691,7 +691,7 @@ async def _run() -> None:
                 base_url=analyzer_base_url,
             )
         elif settings.VOICE_LLM_API_KEY is not None:
-            from wolfbot.master.text_analyzer import GeminiTextAnalyzer
+            from wolfbot.master.state.text_analyzer import GeminiTextAnalyzer
 
             text_analyzer = GeminiTextAnalyzer(
                 api_key=settings.VOICE_LLM_API_KEY.get_secret_value(),
@@ -731,9 +731,9 @@ async def _run() -> None:
     ws_server: Any = None
     voice_ingest: Any = None
     if settings.MASTER_NPC_PSK is not None:
-        from wolfbot.master.ingest_service import MasterIngestService
-        from wolfbot.master.speak_arbiter import SpeakArbiter
-        from wolfbot.master.ws_server import (
+        from wolfbot.master.arbiter.ingest_service import MasterIngestService
+        from wolfbot.master.arbiter.speak_arbiter import SpeakArbiter
+        from wolfbot.master.ws.ws_server import (
             MasterHandlers,
             WebsocketsMasterWsServer,
         )
@@ -748,7 +748,7 @@ async def _run() -> None:
 
         async def _runoff_announce(seat: Any) -> None:
             """Levi voice-introduces a tied runoff candidate before TTS."""
-            from wolfbot.master.narration import render_runoff_candidate_intro
+            from wolfbot.master.narration.narration import render_runoff_candidate_intro
 
             if not _master_tts_holder:
                 return
@@ -784,8 +784,8 @@ async def _run() -> None:
         # Wired into LLMAdapter so reactive_voice games skip the gameplay
         # decider and ask the NPC bot for its own seat's vote / night
         # action via WS.
-        from wolfbot.master.decision_dispatcher import NpcDecisionDispatcher
-        from wolfbot.master.wolf_chat_broker import WolfChatBroker
+        from wolfbot.master.ws.decision_dispatcher import NpcDecisionDispatcher
+        from wolfbot.master.ws.wolf_chat_broker import WolfChatBroker
 
         decision_dispatcher = NpcDecisionDispatcher(
             registry=npc_registry,
@@ -811,7 +811,7 @@ async def _run() -> None:
         # bots after each transition. Wired into GameService via the
         # late-binding setter (the pusher needs npc_registry which is
         # only available here, but GameService was constructed earlier).
-        from wolfbot.master.phase_d_state_pusher import PhaseDStatePusher
+        from wolfbot.master.state.phase_d_state_pusher import PhaseDStatePusher
 
         phase_d_pusher = PhaseDStatePusher(
             repo=repo,
@@ -836,11 +836,11 @@ async def _run() -> None:
         # Built once per process; the narrator callback is installed on
         # `discord_adapter` so `post_public` / `post_morning` route through
         # it whenever the active game is in reactive_voice mode.
-        from wolfbot.master.narration import (
+        from wolfbot.master.narration.narration import (
             NarrationContext,
             render_master_narration,
         )
-        from wolfbot.master.tts_playback import MasterTtsPlayback
+        from wolfbot.master.voice.tts_playback import MasterTtsPlayback
         from wolfbot.npc.tts import VoicevoxTtsService
 
         master_tts = MasterTtsPlayback(
@@ -1055,7 +1055,7 @@ async def _run() -> None:
             async def resolve_addressed_seat(
                 self, game_id: str, addressed_name: str
             ) -> int | None:
-                from wolfbot.master.ingest_service import resolve_seat_by_name
+                from wolfbot.master.arbiter.ingest_service import resolve_seat_by_name
 
                 seats = await repo.load_seats(game_id)
                 players = await repo.load_players(game_id)
@@ -1214,12 +1214,12 @@ async def _run() -> None:
             )
         )
         if _voice_stt_credentialed:
-            from wolfbot.master.stt_service import (
+            from wolfbot.master.voice.stt_service import (
                 GeminiAudioAnalyzer,
                 GroqWhisperAudioAnalyzer,
             )
-            from wolfbot.master.voice_ingest_client import DirectMasterIngestionClient
-            from wolfbot.master.voice_ingest_service import (
+            from wolfbot.master.voice.voice_ingest_client import DirectMasterIngestionClient
+            from wolfbot.master.voice.voice_ingest_service import (
                 VoiceIngestConfig,
                 VoiceIngestService,
             )

@@ -3,8 +3,8 @@ prompt-side rendering through ``build_logic_packet``.
 
 Coverage map:
 
-* :mod:`wolfbot.master.claim_history` — pure fold over SpeechEvent.
-* :mod:`wolfbot.master.logic_service` — claim block surfacing in
+* :mod:`wolfbot.master.claim.claim_history` — pure fold over SpeechEvent.
+* :mod:`wolfbot.master.arbiter.logic_service` — claim block surfacing in
   ``LogicPacket.public_state_summary``.
 """
 
@@ -17,14 +17,14 @@ from wolfbot.domain.discussion import (
     SpeechSource,
 )
 from wolfbot.domain.enums import Phase
-from wolfbot.master.claim_history import (
+from wolfbot.master.arbiter.logic_service import build_logic_packet
+from wolfbot.master.claim.claim_history import (
     ClaimedMediumEntry,
     ClaimedSeerEntry,
     collect_claim_history,
     expected_medium_claim_count_for_day,
     expected_seer_claim_count_for_day,
 )
-from wolfbot.master.logic_service import build_logic_packet
 
 
 def _speech_event(

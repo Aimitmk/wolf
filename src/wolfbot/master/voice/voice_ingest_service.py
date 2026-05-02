@@ -38,13 +38,13 @@ from wolfbot.domain.ws_messages import (
     VadSpeechEnded,
     VadSpeechStarted,
 )
-from wolfbot.master.stt_service import (
+from wolfbot.master.voice.stt_service import (
     RosterEntry,
     SttProviderError,
     SttResult,
     SttService,
 )
-from wolfbot.master.voice_ingest_client import (
+from wolfbot.master.voice.voice_ingest_client import (
     MasterIngestionClient,
     NpcRegistryView,
 )
@@ -305,7 +305,7 @@ class VoiceIngestService:
         *,
         audio_end_ms: int,
     ) -> None:
-        from wolfbot.master.voice_debug_dump import (
+        from wolfbot.master.voice.voice_debug_dump import (
             SegmentDumpRecord,
             debug_dir,
             dump_segment,

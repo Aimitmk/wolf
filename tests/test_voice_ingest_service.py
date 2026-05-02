@@ -13,17 +13,17 @@ Verifies the boundary semantics that matter most for the speech-event-bus:
 
 from __future__ import annotations
 
-from wolfbot.master.stt_service import (
+from wolfbot.master.voice.stt_service import (
     FakeSttService,
     SttProviderError,
     SttResult,
 )
-from wolfbot.master.voice_ingest_client import (
+from wolfbot.master.voice.voice_ingest_client import (
     FakeMasterIngestionClient,
     InMemoryNpcRegistryView,
     make_default_listeners,
 )
-from wolfbot.master.voice_ingest_service import (
+from wolfbot.master.voice.voice_ingest_service import (
     VoiceIngestConfig,
     VoiceIngestService,
 )

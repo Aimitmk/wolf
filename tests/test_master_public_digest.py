@@ -11,7 +11,7 @@ from wolfbot.domain.discussion import (
     make_phase_id,
 )
 from wolfbot.domain.enums import Phase
-from wolfbot.master.public_digest import build_public_digest
+from wolfbot.master.arbiter.public_digest import build_public_digest
 
 
 def _state(**overrides: object) -> PublicDiscussionState:

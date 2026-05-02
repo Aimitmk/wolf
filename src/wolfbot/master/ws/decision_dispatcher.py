@@ -39,7 +39,7 @@ from wolfbot.domain.ws_messages import (
     WolfChatRequest,
     WolfChatSend,
 )
-from wolfbot.master.npc_registry import NpcEntry, NpcRegistry
+from wolfbot.master.ws.npc_registry import NpcEntry, NpcRegistry
 
 log = logging.getLogger(__name__)
 

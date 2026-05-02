@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from wolfbot.master.text_analyzer import (
+from wolfbot.master.state.text_analyzer import (
     FakeTextAnalyzer,
     GeminiTextAnalyzer,
     TextAnalysis,
@@ -75,7 +75,7 @@ async def test_openai_compatible_text_analyzer_extracts_role_callout(
 
     import httpx
 
-    from wolfbot.master.text_analyzer import OpenAICompatibleTextAnalyzer
+    from wolfbot.master.state.text_analyzer import OpenAICompatibleTextAnalyzer
 
     captured: dict[str, Any] = {}
 

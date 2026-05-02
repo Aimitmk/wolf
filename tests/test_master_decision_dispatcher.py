@@ -24,11 +24,11 @@ from wolfbot.domain.ws_messages import (
     NightActionDecision,
     VoteDecision,
 )
-from wolfbot.master.decision_dispatcher import (
+from wolfbot.master.ws.decision_dispatcher import (
     DecisionDispatcherConfig,
     NpcDecisionDispatcher,
 )
-from wolfbot.master.npc_registry import InMemoryNpcRegistry
+from wolfbot.master.ws.npc_registry import InMemoryNpcRegistry
 
 
 def _capture_send(buf: list[str]) -> Callable[[str], Awaitable[None]]:

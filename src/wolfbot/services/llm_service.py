@@ -1135,7 +1135,7 @@ class LLMAdapter:
             from wolfbot.domain.discussion import (
                 make_phase_id as _make_phase_id,
             )
-            from wolfbot.master.public_digest import build_public_digest
+            from wolfbot.master.arbiter.public_digest import build_public_digest
             from wolfbot.services.discussion_service import (
                 apply_speech_event,
             )

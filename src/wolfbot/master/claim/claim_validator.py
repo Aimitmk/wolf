@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from wolfbot.domain.enums import Phase, Role
 from wolfbot.domain.ws_messages import ClaimedMediumResult, ClaimedSeerResult
-from wolfbot.master.claim_history import (
+from wolfbot.master.claim.claim_history import (
     ClaimedMediumEntry,
     ClaimedSeerEntry,
     ClaimerHistory,

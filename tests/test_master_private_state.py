@@ -20,7 +20,7 @@ import pytest_asyncio
 
 from wolfbot.domain.enums import Phase, Role, SubmissionType
 from wolfbot.domain.models import Game, LogEntry, NightAction, Player, Seat
-from wolfbot.master.private_state import (
+from wolfbot.master.state.private_state import (
     build_snapshot_for_seat,
     load_private_state_for_seat,
     make_alive_changed_update,

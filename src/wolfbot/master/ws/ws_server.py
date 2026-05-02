@@ -56,7 +56,7 @@ from wolfbot.domain.ws_messages import (
     VoteDecision,
     WolfChatSend,
 )
-from wolfbot.master.npc_registry import NpcRegistry
+from wolfbot.master.ws.npc_registry import NpcRegistry
 
 log = logging.getLogger(__name__)
 
