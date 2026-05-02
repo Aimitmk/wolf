@@ -11,10 +11,6 @@ What lands in the digest:
 
 * Active CO claims: seat → role, with counter-CO history.
 * Silent seats (alive seats who haven't spoken in the day's discussion).
-* Per-seat **addressed-count**: how often each seat has been the
-  ``addressed_seat_no`` of another's utterance — a lightweight stand-in
-  for a true "pressure" / "stance" score that doesn't require an extra
-  LLM analyzer pass.
 * Last addressed line: the most recent seat-to-seat callout text so the
   NPC can reply on-topic.
 * Recent speeches (last N): full text per utterance so the vote / night
@@ -78,35 +74,20 @@ def build_public_digest(
     lines.extend(co_lines or ["  (まだ誰も CO していない)"])
 
     if state.silent_seats:
-        silent_str = "、".join(
-            _name(s) for s in sorted(state.silent_seats)
-        )
+        silent_str = "、".join(_name(s) for s in sorted(state.silent_seats))
         lines.append(f"## 未発言の生存席\n  {silent_str}")
     else:
         lines.append("## 未発言の生存席\n  (なし)")
 
-    # Per-seat addressed count — counts how many times each seat has
-    # been the explicit `addressed_seat_no` of another's utterance.
-    # Higher = more pointed-at. Sorted descending so the prompt header
-    # surfaces the most-pressured seats first.
-    addressed_counts: dict[int, int] = {}
-    for ev in recent_events:
-        if ev.source == SpeechSource.PHASE_BASELINE:
-            continue
-        for seat in ev.addressed_seat_nos or (
-            (ev.addressed_seat_no,) if ev.addressed_seat_no is not None else ()
-        ):
-            addressed_counts[seat] = addressed_counts.get(seat, 0) + 1
-    if addressed_counts:
-        ranked = sorted(
-            addressed_counts.items(), key=lambda kv: (-kv[1], kv[0])
-        )
-        rank_lines = [
-            f"  {_name(seat_no)}: {count}回"
-            for seat_no, count in ranked
-        ]
-        lines.append("## 名指しされた回数 (多い順)")
-        lines.extend(rank_lines)
+    # NOTE: A `## 名指しされた回数 (多い順)` ranking used to live here
+    # — counted every time a seat was the addressed_seat_no of another
+    # utterance. Removed (2026-05-02) because vote/night decision LLMs
+    # were reading it as a "this seat is suspicious" signal, producing
+    # bandwagon votes against the most-discussed seat (often the human,
+    # who naturally draws more callouts as they argue). The recent
+    # speeches block below carries the same information in raw form;
+    # the LLM should infer pressure from the actual content, not from
+    # an aggregated counter that biases toward bandwagon piles-on.
 
     # Prefer the multi-addressee set; fall back to the legacy singular
     # field for state objects that haven't been migrated (older fixtures
@@ -125,9 +106,7 @@ def build_public_digest(
         snippet = state.last_addressed_text.strip().replace("\n", " ")
         if len(snippet) > 120:
             snippet = snippet[:120] + "…"
-        lines.append(
-            f"## 直近の名指し\n  {speaker_label} → {target_label}: 「{snippet}」"
-        )
+        lines.append(f"## 直近の名指し\n  {speaker_label} → {target_label}: 「{snippet}」")
 
     # Recent speeches with content — the bit the vote / night decision
     # LLM was missing. Capped to the trailing N non-baseline events so

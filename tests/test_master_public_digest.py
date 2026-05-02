@@ -56,7 +56,9 @@ def _ev(
 def test_digest_renders_co_section_when_empty() -> None:
     state = _state()
     out = build_public_digest(
-        state=state, recent_events=[], seat_names={1: "Alice"},
+        state=state,
+        recent_events=[],
+        seat_names={1: "Alice"},
     )
     assert "## CO 状況" in out
     assert "まだ誰も CO していない" in out
@@ -70,7 +72,8 @@ def test_digest_renders_co_claims_with_names() -> None:
         ),
     )
     out = build_public_digest(
-        state=state, recent_events=[],
+        state=state,
+        recent_events=[],
         seat_names={1: "Alice", 2: "Bob", 4: "Dave"},
     )
     # New naming policy: digest renders by display_name only (seat
@@ -85,7 +88,8 @@ def test_digest_renders_co_claims_with_names() -> None:
 def test_digest_lists_silent_seats() -> None:
     state = _state(silent_seats=frozenset({3, 4}))
     out = build_public_digest(
-        state=state, recent_events=[],
+        state=state,
+        recent_events=[],
         seat_names={3: "Carol", 4: "Dave"},
     )
     assert "## 未発言の生存席" in out
@@ -95,7 +99,15 @@ def test_digest_lists_silent_seats() -> None:
     assert "席3" not in out and "席4" not in out
 
 
-def test_digest_aggregates_addressed_counts_descending() -> None:
+def test_digest_omits_addressed_counts_block() -> None:
+    """Regression: the `## 名指しされた回数` aggregate ranking used to bias
+    vote/night decision LLMs into bandwagon-style targeting of the most
+    -addressed seat (typically the human player, who naturally draws
+    more callouts as they argue). Removed so the LLM reads addressing
+    patterns from the raw recent-speeches block instead. See game
+    `ed7742ff08f8` day-1 for the original failure mode (8/8 NPCs voted
+    the human villager who'd been called out 5 times).
+    """
     state = _state()
     events = [
         _ev(speaker_seat=1, text="say 1", addressed=2),
@@ -104,14 +116,13 @@ def test_digest_aggregates_addressed_counts_descending() -> None:
         _ev(speaker_seat=1, text="more", addressed=4),
     ]
     out = build_public_digest(
-        state=state, recent_events=events,
+        state=state,
+        recent_events=events,
         seat_names={2: "Bob", 4: "Dave"},
     )
-    assert "## 名指しされた回数 (多い順)" in out
-    bob_idx = out.find("Bob: 3回")
-    dave_idx = out.find("Dave: 1回")
-    assert bob_idx != -1 and dave_idx != -1
-    assert bob_idx < dave_idx  # higher count first
+    assert "## 名指しされた回数" not in out
+    assert "Bob: 3回" not in out
+    assert "Dave: 1回" not in out
 
 
 def test_digest_renders_last_addressed_block() -> None:
@@ -121,7 +132,8 @@ def test_digest_renders_last_addressed_block() -> None:
         last_addressed_text="あなたの白判定が信用できないんです",
     )
     out = build_public_digest(
-        state=state, recent_events=[],
+        state=state,
+        recent_events=[],
         seat_names={1: "Alice", 2: "Bob"},
     )
     assert "## 直近の名指し" in out
@@ -137,7 +149,8 @@ def test_digest_truncates_long_addressed_snippet() -> None:
         last_addressed_text=long_text,
     )
     out = build_public_digest(
-        state=state, recent_events=[],
+        state=state,
+        recent_events=[],
         seat_names={1: "Alice", 2: "Bob"},
     )
     # Truncated to 120 chars + ellipsis.
@@ -145,16 +158,21 @@ def test_digest_truncates_long_addressed_snippet() -> None:
     assert long_text not in out
 
 
-def test_digest_skips_phase_baseline_in_addressed_counts() -> None:
+def test_digest_skips_phase_baseline_in_recent_speeches() -> None:
+    """phase_baseline rows are internal sentinels with empty text — they
+    must not appear in the recent-speeches block."""
     state = _state()
     events = [
         _ev(speaker_seat=1, text="", source=SpeechSource.PHASE_BASELINE),
         _ev(speaker_seat=1, text="say", addressed=2),
     ]
     out = build_public_digest(
-        state=state, recent_events=events, seat_names={2: "Bob"},
+        state=state,
+        recent_events=events,
+        seat_names={1: "Alice", 2: "Bob"},
     )
-    assert "Bob: 1回" in out
+    # The non-baseline speech surfaces in the recent-speeches block.
+    assert "Alice" in out and "say" in out
 
 
 def test_digest_renders_recent_speech_block_so_vote_llm_sees_seer_results() -> None:
@@ -166,16 +184,15 @@ def test_digest_renders_recent_speech_block_so_vote_llm_sees_seer_results() -> N
     align with what was said.
     """
     state = _state(
-        co_claims=(
-            CoClaim(seat=9, role_claim="seer", declared_at_event_id="ev-co1"),
-        ),
+        co_claims=(CoClaim(seat=9, role_claim="seer", declared_at_event_id="ev-co1"),),
     )
     events = [
         _ev(speaker_seat=9, text="この身、占い師。SQ黒。"),
         _ev(speaker_seat=3, text="僕の霊媒結果はシゲミチ狼。SQ処刑しよう。"),
     ]
     out = build_public_digest(
-        state=state, recent_events=events,
+        state=state,
+        recent_events=events,
         seat_names={3: "Rakio", 9: "Yuriko"},
     )
     assert "## 直近の発言 (古い順)" in out
@@ -193,13 +210,11 @@ def test_digest_renders_past_votes_when_provided() -> None:
     discussion-time speeches via LogicPacket.past_votes.
     """
     state = _state()
-    past_votes = (
-        (1, 0, ((1, 7), (2, 7), (3, 7), (4, 1), (5, None))),
-    )
+    past_votes = ((1, 0, ((1, 7), (2, 7), (3, 7), (4, 1), (5, None))),)
     out = build_public_digest(
-        state=state, recent_events=[],
-        seat_names={1: "Alice", 2: "Bob", 3: "Carol", 4: "Dave",
-                    5: "Eve", 7: "Frank"},
+        state=state,
+        recent_events=[],
+        seat_names={1: "Alice", 2: "Bob", 3: "Carol", 4: "Dave", 5: "Eve", 7: "Frank"},
         past_votes=past_votes,
     )
     assert "## 公開された投票履歴" in out
