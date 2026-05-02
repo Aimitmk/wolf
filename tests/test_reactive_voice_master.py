@@ -3359,12 +3359,19 @@ async def test_runoff_dispatch_picks_tied_llm_candidates_in_order(
         phase=Phase.DAY_RUNOFF_SPEECH,
     )
     assert ok
-    progress_seat1 = await repo.load_llm_speech_progress(g.id, 1, 1)
-    assert progress_seat1[4] is True, "runoff_speech_done must flip on accept"
-    assert g.id in wakes, "engine must wake so the phase can advance"
+    # Bug #3 fix: `runoff_speech_done` is intentionally NOT flipped on
+    # accept_speak_result anymore — the audio hasn't started playing in
+    # VC at that point, so flipping early would let the runoff vote
+    # open while the candidate's speech is still being read out loud.
+    # The flag now flips on PlaybackFinished (below).
+    progress_seat1_pre = await repo.load_llm_speech_progress(g.id, 1, 1)
+    assert progress_seat1_pre[4] is False, (
+        "runoff_speech_done must NOT flip on accept — wait for playback"
+    )
 
     # Simulate playback completion so the serial-speech gate releases —
-    # the live wiring kicks try_dispatch_next on playback_finished.
+    # the live wiring kicks try_dispatch_next on playback_finished and
+    # this is also where `runoff_speech_done` is flipped now.
     await arb.handle_playback_finished(
         PlaybackFinished(
             ts=2200,
@@ -3375,6 +3382,9 @@ async def test_runoff_dispatch_picks_tied_llm_candidates_in_order(
             finished_at_ms=2200,
         )
     )
+    progress_seat1 = await repo.load_llm_speech_progress(g.id, 1, 1)
+    assert progress_seat1[4] is True, "runoff_speech_done must flip on playback_finished"
+    assert g.id in wakes, "engine must wake so the phase can advance"
 
     # Second dispatch: seat 2 (next tied seat-no).
     bufs["raqio"].clear()
@@ -3525,6 +3535,349 @@ async def test_runoff_dispatch_skips_when_seat_already_pending(
     # The other tied seat (席2 セツ) must not be picked while seat 1
     # is still in flight.
     assert not any('"speak_request"' in m for m in bufs["setsu"])
+
+
+async def test_runoff_dispatch_concurrent_kicks_announce_once(
+    repo: SqliteRepo,
+) -> None:
+    """Two concurrent `try_dispatch_next` invocations during phase entry
+    into DAY_RUNOFF_SPEECH must NOT each play the Master candidate intro
+    even when they overlap in the await on `_runoff_announce`.
+
+    Regression for the user-reported bug: "決選投票の最初の候補者の案内が2連続で
+    読み上げられてからNPCが喋る". The pre-existing `_pending` re-entrancy
+    guard only caught re-entries AFTER `dispatch_request` completed; the
+    full announce-await window (Levi TTS, several seconds) was unguarded.
+    The new `_runoff_in_flight` set is added BEFORE the announce await.
+    """
+    import asyncio
+
+    from wolfbot.domain.models import Vote
+
+    g = Game(
+        id="rv-runoff-concurrent",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    for seat in (
+        Seat(
+            seat_no=1,
+            display_name="🦋ラキオ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="raqio",
+        ),
+        Seat(
+            seat_no=2,
+            display_name="🌙セツ",
+            discord_user_id=None,
+            is_llm=True,
+            persona_key="setsu",
+        ),
+    ):
+        await repo.insert_seat(g.id, seat)
+    for sn, role in ((1, Role.WEREWOLF), (2, Role.SEER)):
+        await repo.set_player_role(g.id, sn, role)
+    # Tie 1-2.
+    for voter, target in ((1, 2), (2, 1)):
+        await repo.insert_vote(
+            Vote(
+                game_id=g.id, day=1, round=0,
+                voter_seat=voter, target_seat=target, submitted_at=1,
+            )
+        )
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_RUNOFF_SPEECH)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_RUNOFF_SPEECH,
+            alive_seat_nos=[1, 2],
+            created_at_ms=1,
+        )
+    )
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"raqio": [], "setsu": []}
+    for npc_id, persona, seat_no in (
+        ("npc_raqio", "raqio", 1),
+        ("npc_setsu", "setsu", 2),
+    ):
+        registry.register(
+            npc_id=npc_id,
+            discord_bot_user_id=f"bot_{persona}",
+            supported_voices=(),
+            version="1",
+            send=_captured_send(bufs[persona]),
+            now_ms=1000,
+            persona_key=persona,
+        )
+        registry.assign(npc_id, seat=seat_no, game_id=g.id, phase_id=phase_id)
+
+    intros: list[int] = []
+    intro_started = asyncio.Event()
+    intro_release = asyncio.Event()
+
+    async def _intro(seat: Seat) -> None:
+        intros.append(seat.seat_no)
+        intro_started.set()
+        # Mimic Levi TTS taking time — block until released so the
+        # second concurrent kick has the chance to enter
+        # `_dispatch_runoff_next` before this announce completes.
+        await intro_release.wait()
+
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=registry,
+        discussion=discussion,
+        now_ms=lambda: 2000,
+        runoff_announce=_intro,
+    )
+
+    # Fire both kicks concurrently. The first one wins the
+    # `_runoff_in_flight` slot and proceeds into _intro; the second one
+    # observes the slot is taken and bails before announcing.
+    task1 = asyncio.create_task(arb.try_dispatch_next(g.id))
+    await intro_started.wait()  # Path A is now blocked inside _intro
+    task2 = asyncio.create_task(arb.try_dispatch_next(g.id))
+    # Give Path B a chance to enter and bail.
+    await asyncio.sleep(0.05)
+    intro_release.set()
+    await task1
+    await task2
+
+    assert intros == [1], (
+        "candidate intro must fire exactly once even on a concurrent "
+        f"double phase-entry kick (got intros={intros})"
+    )
+    raqio_speak_requests = [m for m in bufs["raqio"] if '"speak_request"' in m]
+    assert len(raqio_speak_requests) == 1, (
+        "exactly one SpeakRequest must reach the chosen NPC "
+        f"(got {len(raqio_speak_requests)})"
+    )
+
+
+async def test_runoff_dispatch_announces_human_candidate(
+    repo: SqliteRepo,
+) -> None:
+    """Human runoff candidates get the same Levi turn-announcement as
+    LLM candidates. Regression for the user-reported bug where sakura
+    (a tied human candidate) was never announced and never given a
+    chance to speak before the runoff vote opened.
+    """
+    from wolfbot.domain.models import Vote
+
+    g = Game(
+        id="rv-runoff-human",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    for seat in (
+        Seat(
+            seat_no=1, display_name="sakura", discord_user_id="u1",
+            is_llm=False, persona_key=None,
+        ),
+        Seat(
+            seat_no=5, display_name="🎩ジョナス", discord_user_id=None,
+            is_llm=True, persona_key="jonas",
+        ),
+    ):
+        await repo.insert_seat(g.id, seat)
+    for sn, role in ((1, Role.MEDIUM), (5, Role.KNIGHT)):
+        await repo.set_player_role(g.id, sn, role)
+    for voter, target in ((1, 5), (5, 1)):
+        await repo.insert_vote(
+            Vote(
+                game_id=g.id, day=1, round=0,
+                voter_seat=voter, target_seat=target, submitted_at=1,
+            )
+        )
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_RUNOFF_SPEECH)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_RUNOFF_SPEECH,
+            alive_seat_nos=[1, 5],
+            created_at_ms=1,
+        )
+    )
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"jonas": []}
+    registry.register(
+        npc_id="npc_jonas",
+        discord_bot_user_id="bot_jonas",
+        supported_voices=(),
+        version="1",
+        send=_captured_send(bufs["jonas"]),
+        now_ms=1000,
+        persona_key="jonas",
+    )
+    registry.assign("npc_jonas", seat=5, game_id=g.id, phase_id=phase_id)
+
+    intros: list[int] = []
+
+    async def _intro(seat: Seat) -> None:
+        intros.append(seat.seat_no)
+
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=registry,
+        discussion=discussion,
+        now_ms=lambda: 2000,
+        runoff_announce=_intro,
+    )
+
+    # First dispatch: human (席1 sakura) is announced first by seat-no order.
+    await arb.try_dispatch_next(g.id)
+    assert intros == [1], (
+        "human runoff candidate must receive a Levi intro "
+        f"(got intros={intros})"
+    )
+    # No SpeakRequest is sent for a human candidate.
+    assert not any('"speak_request"' in m for m in bufs["jonas"]), (
+        "no NPC SpeakRequest must be dispatched for a human candidate"
+    )
+    # Human's `runoff_speech_done` flag stays False until they speak
+    # (or the grace watchdog fires).
+    progress = await repo.load_llm_speech_progress(g.id, 1, 1)
+    assert progress[4] is False
+
+
+async def test_runoff_human_speech_event_auto_marks_done(
+    repo: SqliteRepo,
+) -> None:
+    """When a human runoff candidate speaks (voice or text), the
+    SpeechEvent record is detected on the next `try_dispatch_next` and
+    `runoff_speech_done` is auto-flipped so the engine can advance.
+    """
+    from wolfbot.domain.models import Vote
+    from wolfbot.services.discussion_service import make_human_text_event
+
+    g = Game(
+        id="rv-runoff-human-spoke",
+        guild_id="gu",
+        host_user_id="h",
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        day_number=1,
+        deadline_epoch=10**12,
+        main_text_channel_id="c1",
+        main_vc_channel_id="c2",
+        created_at=0,
+        discussion_mode="reactive_voice",
+    )
+    await repo.create_game(g)
+    for seat in (
+        Seat(
+            seat_no=1, display_name="sakura", discord_user_id="u1",
+            is_llm=False, persona_key=None,
+        ),
+        Seat(
+            seat_no=5, display_name="🎩ジョナス", discord_user_id=None,
+            is_llm=True, persona_key="jonas",
+        ),
+    ):
+        await repo.insert_seat(g.id, seat)
+    for sn, role in ((1, Role.MEDIUM), (5, Role.KNIGHT)):
+        await repo.set_player_role(g.id, sn, role)
+    for voter, target in ((1, 5), (5, 1)):
+        await repo.insert_vote(
+            Vote(
+                game_id=g.id, day=1, round=0,
+                voter_seat=voter, target_seat=target, submitted_at=1,
+            )
+        )
+    phase_id = make_phase_id(g.id, 1, Phase.DAY_RUNOFF_SPEECH)
+    store = SqliteSpeechEventStore(repo._conn)  # type: ignore[attr-defined]
+    discussion = DiscussionService(store=store)
+    await store.insert(
+        make_phase_baseline(
+            game_id=g.id,
+            phase_id=phase_id,
+            day=1,
+            phase=Phase.DAY_RUNOFF_SPEECH,
+            alive_seat_nos=[1, 5],
+            created_at_ms=1,
+        )
+    )
+
+    # Pre-record the human's speech event (mimics what
+    # `discord_service.on_message` writes after sakura types her
+    # final speech in the VC chat).
+    human_event = make_human_text_event(
+        game_id=g.id,
+        phase_id=phase_id,
+        day=1,
+        phase=Phase.DAY_RUNOFF_SPEECH,
+        speaker_seat=1,
+        text="どうか霊媒師である私を残してください。",
+    )
+    await discussion.record(human_event)
+
+    registry = InMemoryNpcRegistry()
+    bufs: dict[str, list[str]] = {"jonas": []}
+    registry.register(
+        npc_id="npc_jonas",
+        discord_bot_user_id="bot_jonas",
+        supported_voices=(),
+        version="1",
+        send=_captured_send(bufs["jonas"]),
+        now_ms=1000,
+        persona_key="jonas",
+    )
+    registry.assign("npc_jonas", seat=5, game_id=g.id, phase_id=phase_id)
+
+    intros: list[int] = []
+
+    async def _intro(seat: Seat) -> None:
+        intros.append(seat.seat_no)
+
+    arb = SpeakArbiter(
+        repo=repo,
+        registry=registry,
+        discussion=discussion,
+        now_ms=lambda: 2000,
+        runoff_announce=_intro,
+    )
+
+    # First dispatch: scans the speech_events table, sees seat 1's
+    # SpeechEvent, auto-marks `runoff_speech_done`, then continues
+    # with the next eligible candidate (jonas, LLM).
+    await arb.try_dispatch_next(g.id)
+
+    progress_human = await repo.load_llm_speech_progress(g.id, 1, 1)
+    assert progress_human[4] is True, (
+        "tied human candidate's `runoff_speech_done` must auto-flip "
+        "when their SpeechEvent is already recorded"
+    )
+    # Human is already done — sakura's intro is NOT replayed; jonas
+    # (the next eligible) gets the announcement.
+    assert intros == [5], (
+        "after auto-marking the spoken human, the next eligible LLM "
+        f"candidate must be picked (got intros={intros})"
+    )
 
 
 async def test_runoff_dispatch_marks_done_on_offline_npc(

@@ -375,11 +375,16 @@ class GameService:
             alive_set = {p.seat_no for p in players if p.alive}
             tied = compute_vote_result(round0, alive_set).tied
             seats_by_no = {s.seat_no: s for s in seats}
-            tied_llm_seats = [
-                sn for sn in tied if seats_by_no.get(sn) is not None and seats_by_no[sn].is_llm
-            ]
+            # All tied candidates (LLM + human) must complete their speech
+            # before the runoff vote opens. Humans set `runoff_speech_done`
+            # via the speech-recording paths (voice ingest → SpeakArbiter
+            # auto-mark, text on_message → same path, or the human grace
+            # watchdog on timeout); LLMs flip it on PlaybackFinished /
+            # TtsFailed. The flag is uniform across speaker types so this
+            # check doesn't need to branch.
+            tied_seats = [sn for sn in tied if seats_by_no.get(sn) is not None]
             speeches_done = True
-            for sn in tied_llm_seats:
+            for sn in tied_seats:
                 progress = await self.repo.load_llm_speech_progress(game.id, game.day_number, sn)
                 if not progress[4]:  # runoff_speech_done
                     speeches_done = False
