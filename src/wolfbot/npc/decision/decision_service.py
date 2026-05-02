@@ -32,6 +32,7 @@ from wolfbot.domain.ws_messages import (
 )
 from wolfbot.llm.persona_base import Persona
 from wolfbot.llm.prompt_builder import (
+    _build_game_rules_block,
     build_judgment_profile_block,
     build_strategy_block,
 )
@@ -251,6 +252,7 @@ def build_vote_prompt(
             _DECISION_VOTE_USER_TEMPLATE,
             round_label=_VOTE_ACT_TEXT_BY_ROUND.get(request.round_, f"round={request.round_}"),
             day_number=state.day_number,
+            game_rules_block=_build_game_rules_block(),
             persona_block=_build_persona_block(persona),
             role_block=_build_role_block(state.role),
             state_block=_build_state_block(state),
@@ -322,6 +324,7 @@ def build_wolf_chat_prompt(
         render_template(
             _DECISION_WOLF_CHAT_USER_TEMPLATE,
             day_number=state.day_number,
+            game_rules_block=_build_game_rules_block(),
             persona_block=_build_persona_block(persona),
             role_block=_build_role_block(state.role),
             state_block=_build_state_block(state),
@@ -369,6 +372,7 @@ def build_night_prompt(
             _DECISION_NIGHT_USER_TEMPLATE,
             action_label=_NIGHT_ACT_TEXT.get(request.action_kind, request.action_kind),
             day_number=state.day_number,
+            game_rules_block=_build_game_rules_block(),
             persona_block=_build_persona_block(persona),
             role_block=_build_role_block(state.role),
             state_block=_build_state_block(state),

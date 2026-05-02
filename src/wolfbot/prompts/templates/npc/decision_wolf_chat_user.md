@@ -1,5 +1,8 @@
 ## 現在: 人狼チャット (day {{day_number}})
 
+## 共通ルール
+{{game_rules_block}}
+
 {{persona_block}}
 
 {{role_block}}
