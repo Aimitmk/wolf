@@ -327,6 +327,131 @@ async def test_announce_waiting_vote_pending_retains_names(repo: SqliteRepo) -> 
     assert adapter.wolves_sent == []
 
 
+class _MorningPostingAdapter(DiscordBotAdapter):
+    """DiscordBotAdapter narrowed to exercise post_morning + survivor
+    roster posting without a real discord.Client.
+
+    Mirrors :class:`_ChannelCapturingAdapter`'s pattern but exposes a
+    single capture list (in chronological send order) so the test can
+    assert (a) the morning announcement lands first, then (b) the
+    survivor roster line is appended right after.
+    """
+
+    def __init__(self, repo: SqliteRepo) -> None:
+        self.bot = MagicMock()
+        self.repo = repo
+        self.settings = MagicMock()
+        self.perms = MagicMock()
+        self._gs_slot = {"gs": MagicMock()}
+        self._narrator = None  # rounds-mode path: legacy text post
+        self._npc_registry = None
+        self.sent: list[str] = []
+
+        test_self = self
+
+        class _Channel:
+            async def send(self, text: str) -> None:
+                test_self.sent.append(text)
+
+        self._main_text = lambda game: _Channel()  # type: ignore[assignment]
+
+
+async def test_post_morning_appends_survivors_list_in_rounds_mode(
+    repo: SqliteRepo,
+) -> None:
+    """Rounds mode (no narrator) posts the raw morning text followed
+    immediately by the post-attack survivor roster. Pre-fix the
+    survivor list was missing entirely; users had to scroll the
+    seat-permission updates to see who was still in.
+    """
+    game = Game(
+        id="g-morning",
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=2,
+        main_text_channel_id="1",
+        main_vc_channel_id="vc",
+        heaven_channel_id="h",
+        wolves_channel_id="w",
+        created_at=0,
+        discussion_mode="rounds",
+    )
+    await repo.create_game(game)
+    # Seats 1 + 2 alive, seat 3 dead (executed yesterday).
+    seats = [
+        Seat(seat_no=1, display_name="Alice", discord_user_id="1001",
+             is_llm=False, persona_key=None),
+        Seat(seat_no=2, display_name="Bob", discord_user_id="1002",
+             is_llm=False, persona_key=None),
+        Seat(seat_no=3, display_name="Cara", discord_user_id="1003",
+             is_llm=False, persona_key=None),
+    ]
+    for s in seats:
+        await repo.insert_seat(game.id, s)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    await repo.set_player_role(game.id, 2, Role.WEREWOLF)
+    await repo.set_player_role(game.id, 3, Role.SEER)
+    # Mark seat 3 dead via raw UPDATE (test-only path; live engine uses
+    # apply_transition).
+    async with repo._tx() as db:
+        await db.execute(
+            "UPDATE seats SET alive=0 WHERE game_id=? AND seat_no=3",
+            (game.id,),
+        )
+
+    adapter = _MorningPostingAdapter(repo)
+    await adapter.post_morning(game, "朝になりました。犠牲者: Cara")
+
+    assert len(adapter.sent) == 2, adapter.sent
+    morning_msg, survivors_msg = adapter.sent
+    assert morning_msg == "☀️ 朝になりました。犠牲者: Cara"
+    assert survivors_msg.startswith("🌱 生存者 (2名): ")
+    # Both alive seats included in the roster, dead seat excluded.
+    assert "席1 Alice" in survivors_msg
+    assert "席2 Bob" in survivors_msg
+    assert "Cara" not in survivors_msg
+
+
+async def test_post_morning_skips_survivors_list_when_no_survivors(
+    repo: SqliteRepo,
+) -> None:
+    """Edge case: morning resolution with zero survivors is impossible
+    in normal play (game ends first), but the helper must defensively
+    skip the survivor line rather than emit "🌱 生存者 (0名): ".
+    """
+    game = Game(
+        id="g-empty",
+        guild_id="g",
+        host_user_id="h",
+        phase=Phase.DAY_DISCUSSION,
+        day_number=2,
+        main_text_channel_id="1",
+        main_vc_channel_id="vc",
+        heaven_channel_id="h",
+        wolves_channel_id="w",
+        created_at=0,
+        discussion_mode="rounds",
+    )
+    await repo.create_game(game)
+    seat = Seat(
+        seat_no=1, display_name="Alice", discord_user_id="1001",
+        is_llm=False, persona_key=None,
+    )
+    await repo.insert_seat(game.id, seat)
+    await repo.set_player_role(game.id, 1, Role.VILLAGER)
+    async with repo._tx() as db:
+        await db.execute(
+            "UPDATE seats SET alive=0 WHERE game_id=?", (game.id,),
+        )
+
+    adapter = _MorningPostingAdapter(repo)
+    await adapter.post_morning(game, "朝になりました。犠牲者: Alice")
+
+    # Just the morning announcement; no roster line for an empty pool.
+    assert adapter.sent == ["☀️ 朝になりました。犠牲者: Alice"]
+
+
 class _ProbeUser:
     """Minimal duck-typed discord.User for _preflight_dms probing.
 

@@ -163,6 +163,13 @@ def _narrate_morning(entry: LogEntry, ctx: NarrationContext) -> NarrationOutput:
     The template rewrites it neutrally with day_number + casualty info.
     Two branches gated by has/no_casualty so the same template covers
     both "犠牲者なし" and "<seat> の停止を確認" without a Python ternary.
+
+    Also surfaces the kill / no-kill announcement to the VC's text chat
+    so post-game review (and players who muted Master's voice) see who
+    died without having to listen back. The companion survivor roster
+    is posted separately by ``DiscordBotAdapter.post_morning`` so it
+    stays a chat-only sidecar — voice keeps the existing concise tone
+    and isn't extended with a 5-name read-out.
     """
     has_casualty = entry.actor_seat is not None
     target = (
@@ -176,7 +183,8 @@ def _narrate_morning(entry: LogEntry, ctx: NarrationContext) -> NarrationOutput:
             no_casualty=not has_casualty,
             target=target,
             alive_count=ctx.alive_count,
-        )
+        ),
+        chat_text=f"☀️ {entry.text}",
     )
 
 

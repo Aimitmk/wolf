@@ -303,15 +303,61 @@ class DiscordBotAdapter:
             log.exception("post_public failed %s", game.id)
 
     async def post_morning(self, game: Game, text: str) -> None:
-        if await self._maybe_narrate(game, "MORNING", text):
+        consumed = await self._maybe_narrate(game, "MORNING", text)
+        if not consumed:
+            channel = self._main_text(game)
+            if channel is not None:
+                try:
+                    await channel.send(f"☀️ {text}")
+                except discord.DiscordException:
+                    log.exception("post_morning failed %s", game.id)
+        # Both rounds and reactive_voice modes append the survivor
+        # roster after the morning announcement so players see the
+        # post-attack lineup at a glance. Voice-only Master callers
+        # were missing the kill info entirely (narrator emitted no
+        # chat_text); the kill line is now surfaced in chat by
+        # _narrate_morning, and this sidecar lists who's still in.
+        await self._post_survivors_list(game)
+
+    async def _post_survivors_list(self, game: Game) -> None:
+        """Post a "🌱 生存者 (N名): seat list" line to the game's main
+        channel (VC text in reactive_voice, main text in rounds).
+
+        Best-effort: a load failure or send error is logged and dropped
+        rather than propagating into post_morning's caller — the
+        morning announcement itself already landed.
+        """
+        try:
+            players = await self.repo.load_players(game.id)
+            seats = await self.repo.load_seats(game.id)
+        except Exception:
+            log.exception(
+                "post_survivors_list: load failed game=%s", game.id
+            )
             return
+        seats_by_no = {s.seat_no: s for s in seats}
+        alive_seats = sorted(p.seat_no for p in players if p.alive)
+        if not alive_seats:
+            # Edge case: morning resolution killed everyone (impossible
+            # in normal play; defensive). Survivors line would be
+            # misleading — drop it.
+            return
+        parts: list[str] = []
+        for sn in alive_seats:
+            seat = seats_by_no.get(sn)
+            parts.append(
+                f"席{sn} {seat.display_name}" if seat is not None else f"席{sn}"
+            )
+        msg = f"🌱 生存者 ({len(alive_seats)}名): " + "、".join(parts)
         channel = self._main_text(game)
         if channel is None:
             return
         try:
-            await channel.send(f"☀️ {text}")
+            await channel.send(msg)
         except discord.DiscordException:
-            log.exception("post_morning failed %s", game.id)
+            log.exception(
+                "post_survivors_list send failed %s", game.id
+            )
 
     async def post_wolves_chat(self, game: Game, text: str, kind: str) -> None:
         channel = self._wolves_channel(game)

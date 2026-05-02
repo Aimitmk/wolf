@@ -162,6 +162,40 @@ def test_morning_without_death_voices_no_casualties() -> None:
     assert "9 名" in out.voice_text
 
 
+def test_morning_emits_chat_text_with_kill_announcement() -> None:
+    """Reactive_voice mode pre-fix only voiced the morning, leaving the
+    chat empty for the kill / no-kill information (rounds mode posted
+    the raw text). The narrator now emits ``chat_text`` so VC text
+    chat carries the same announcement, prefixed with ☀️ to match the
+    rounds-mode formatting. The companion survivors-roster sidecar is
+    posted by ``DiscordBotAdapter.post_morning`` and tested
+    separately.
+    """
+    entry = _entry(
+        "MORNING",
+        text="朝になりました。犠牲者: 🎩ジョナス",
+        actor_seat=1,
+        day=2,
+        phase=Phase.DAY_DISCUSSION,
+    )
+    out = render_master_narration(entry, _ctx(day=2, alive=8))
+    assert out.chat_text is not None
+    assert out.chat_text.startswith("☀️ ")
+    assert "犠牲者" in out.chat_text
+
+
+def test_morning_no_casualty_emits_peaceful_chat_text() -> None:
+    entry = _entry(
+        "MORNING",
+        text="平和な朝です。昨晩の犠牲者はいません。",
+        actor_seat=None,
+        day=2,
+    )
+    out = render_master_narration(entry, _ctx(day=2, alive=9))
+    assert out.chat_text is not None
+    assert "平和な朝" in out.chat_text
+
+
 # ------------------------------------------------------ vote-result split
 
 
