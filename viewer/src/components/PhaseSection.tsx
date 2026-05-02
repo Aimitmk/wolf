@@ -17,6 +17,8 @@ import {
   formatTokens,
   nightActionJa,
   phaseJa,
+  roleFaction,
+  roleJa,
   seatLabel,
   sourceJa,
 } from "@/lib/format";
@@ -424,6 +426,20 @@ function EventRow({
             <Typography variant="body2" sx={{ fontWeight: 500 }}>
               {speaker ? seatLabel(speaker) : "(不明)"}
             </Typography>
+            {speaker && (
+              // Real-role chip on every speech row so post-game review
+              // sees at a glance whether the speaker is wolf-side or
+              // village-side. Wolf/madman are tinted red to make the
+              // fake-CO contrast (e.g. wolf claiming SEER) visually
+              // obvious without scanning the seat panel for each line.
+              <Chip
+                label={roleJa(speaker.role)}
+                size="small"
+                color={roleFaction(speaker.role) === "wolf" ? "error" : "default"}
+                variant={roleFaction(speaker.role) === "wolf" ? "filled" : "outlined"}
+                sx={{ height: 18, fontSize: 10 }}
+              />
+            )}
             <Chip
               label={sourceJa(event.data.source)}
               size="small"
