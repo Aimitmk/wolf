@@ -23,6 +23,7 @@ from wolfbot.domain.models import Game, Player, Seat
 from wolfbot.llm.persona_base import JudgmentProfile, Persona, SpeechProfile
 from wolfbot.llm.prompt_builder import (
     _build_game_rules_block,
+    _build_game_rules_block_legacy_inline,
     _build_judgment_profile_block,
     _build_speech_profile_block,
     _build_strategy_block,
@@ -37,6 +38,16 @@ from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY as PERSONAS_BY_KEY
 
 
 # --------------------------------------------------------- game rules block
+def test_game_rules_block_template_matches_legacy_inline() -> None:
+    """Round-trip parity: the markdown template must render identically
+    to the legacy inline-string form. This catches the dangerous case
+    where someone edits one side and forgets the other — every other
+    `test_game_rules_block_*` test below verifies *content*, but not
+    that the two sources stay in lock-step.
+    """
+    assert _build_game_rules_block() == _build_game_rules_block_legacy_inline()
+
+
 def test_game_rules_block_contains_role_distribution() -> None:
     block = _build_game_rules_block()
     for role_ja, count in (

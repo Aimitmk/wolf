@@ -63,6 +63,7 @@ from wolfbot.llm.prompt_builder import (
     task_vote,
     task_wolf_chat,
 )
+from wolfbot.llm.template import render_template
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 from wolfbot.services.llm_trace import (
     CallTimer,
@@ -217,30 +218,17 @@ RESPONSE_SCHEMA: dict[str, object] = {
 # "json" and works best with a concrete example. We append this contract to the
 # system prompt for every DeepSeek decision; the contract complements (does not
 # replace) the markdown template loaded by prompt_builder. xAI uses json_schema
-# strict mode and does not need this. Module-level so tests can assert on
-# substrings without instantiating AsyncOpenAI.
-_DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
-
----
-出力形式 (json):
-必ず次のキーを持つ JSON オブジェクトのみを返してください。前後にテキストや markdown コードフェンスを付けないでください。
-- "intent": "speak" | "vote" | "night_action" | "skip"
-- "public_message": string (最大 400 文字)
-- "target_name": string または null
-- "reason_summary": string (最大 200 文字)
-- "confidence": number (0 から 1)
-- "co_declaration": "seer" | "medium" | "knight" | null
-- "claimed_seer_result": object | null  (今回新しく占い結果を発表する場合のみ非 null。形式 {"target_seat": integer(1-9), "is_wolf": boolean}。本物でも騙りでも同じ形式)
-- "claimed_medium_result": object | null  (霊媒も同様。形式 {"target_seat": integer(1-9), "is_wolf": boolean | null}。is_wolf=null は「昨日処刑なし」)
-
-例:
-{"intent": "speak", "public_message": "私は占い師です。昨夜セツを占ったら人狼じゃなかった。", "target_name": null, "reason_summary": "CO + 結果発表", "confidence": 0.7, "co_declaration": "seer", "claimed_seer_result": {"target_seat": 6, "is_wolf": false}, "claimed_medium_result": null}
-"""
+# strict mode and does not need this.
+#
+# Body lives in `prompts/templates/master/deepseek_contract_gameplay.md` so the
+# schema example sits alongside other prompt templates and is editable without
+# a Python diff. Loaded once via the lru-cache in `wolfbot.llm.template`.
+_DEEPSEEK_GAMEPLAY_CONTRACT_TEMPLATE = "master/deepseek_contract_gameplay"
 
 
 def _deepseek_json_contract(system_prompt: str) -> str:
     """Append DeepSeek's JSON-mode contract to a system prompt."""
-    return system_prompt + _DEEPSEEK_JSON_CONTRACT_SUFFIX
+    return system_prompt + render_template(_DEEPSEEK_GAMEPLAY_CONTRACT_TEMPLATE)
 
 
 def _claim_to_fields(

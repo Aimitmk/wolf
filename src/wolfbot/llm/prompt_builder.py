@@ -21,6 +21,7 @@ from wolfbot.domain.enums import (
 )
 from wolfbot.domain.models import Game, Player, Seat
 from wolfbot.llm.persona_base import Persona
+from wolfbot.llm.template import render_template
 
 SYSTEM_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "prompts" / "llm_system_prompt.md"
 
@@ -29,15 +30,47 @@ def _load_template() -> str:
     return SYSTEM_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
+_GAME_RULES_TEMPLATE = "shared/game_rules_9p"
+
+
 def _build_game_rules_block() -> str:
     """Return the fixed 9-player ruleset shared by every LLM seat.
 
-    Includes role distribution (derived from ROLE_DISTRIBUTION + ROLE_JA so we
-    don't duplicate the canonical numbers), win conditions matching
-    `rules.check_victory`, and the invariants the LLM must never violate
-    (NIGHT_0 random white is non-wolf, seer/medium see only real wolves as
-    black, wolves split → attack fails, knight can't guard the same target
-    twice, `target_name` must match a candidate token).
+    Body lives in `prompts/templates/shared/game_rules_9p.md` so the
+    canonical ~110-bullet ruleset is editable in plain markdown without
+    a Python diff. Two placeholders are filled here: ``village_size``
+    (= ``VILLAGE_SIZE`` constant) and ``distribution`` (rendered from
+    ``ROLE_DISTRIBUTION`` + ``ROLE_JA`` so the canonical seat counts
+    stay derived, not duplicated). Win conditions and the invariants
+    the LLM must never violate (NIGHT_0 random white is non-wolf,
+    seer/medium see only real wolves as black, wolves split → attack
+    fails, knight can't guard the same target twice, `target_name`
+    must match a candidate token, etc.) are encoded as fixed text
+    inside the template.
+
+    The legacy concatenated-string form below is kept as the canonical
+    Japanese reference for the template; updating one without the
+    other will fail the round-trip test in
+    ``test_template_engine_integration``.
+    """
+    distribution = " / ".join(
+        f"{ROLE_JA[role]}{count}" for role, count in ROLE_DISTRIBUTION.items()
+    )
+    return render_template(
+        _GAME_RULES_TEMPLATE,
+        village_size=VILLAGE_SIZE,
+        distribution=distribution,
+    )
+
+
+def _build_game_rules_block_legacy_inline() -> str:
+    """Original inline form retained for the round-trip parity test.
+
+    Do NOT call from production code paths — the live code uses
+    :func:`_build_game_rules_block` which loads the markdown template.
+    This function exists so a unit test can compare the inline string
+    against the rendered template and fail loudly the moment they
+    drift apart, catching accidental edits to only one side.
     """
     distribution = " / ".join(
         f"{ROLE_JA[role]}{count}" for role, count in ROLE_DISTRIBUTION.items()

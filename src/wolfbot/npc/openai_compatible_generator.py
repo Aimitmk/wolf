@@ -46,6 +46,7 @@ from wolfbot.llm.prompt_builder import (
     build_judgment_profile_block,
     build_speech_profile_block,
 )
+from wolfbot.llm.template import render_template
 from wolfbot.npc.personas import NPC_PERSONAS_BY_KEY
 from wolfbot.npc.speech_service import NpcGeneratedSpeech
 
@@ -501,27 +502,12 @@ def _format_candidate(c: LogicCandidate) -> str:
 
 # DeepSeek does not support strict json_schema; it only supports
 # json_object.  To make the model emit the right field names without
-# walking the full schema in the system prompt, we append this per-call
-# contract that mirrors the keys in ``_RESPONSE_SCHEMA``.  Module-level
-# so tests can assert on substrings without instantiating AsyncOpenAI.
-_DEEPSEEK_JSON_CONTRACT_SUFFIX = """\
-
----
-出力形式 (json):
-必ず次のキーを持つ JSON オブジェクトのみを返してください。前後にテキストや markdown コードフェンスを付けないでください。
-- "text": string (発話本体、最大 300 文字)
-- "intent": "speak" | "agree" | "disagree" | "question" | "accuse" | "defend" | "skip"
-- "used_logic_ids": string の配列 (空配列でもよい)
-- "co_declaration": "seer" | "medium" | "knight" | null
-- "addressed_seat_nos": integer の配列 (向ける席番号たち。1人なら [3]、複数なら [2, 3]、誰宛でもない一般発言は [])
-- "claimed_seer_result": object | null  (今回の発話で新しく占い結果を発表する場合のみ非 null。形式は {"target_seat": integer(1-9), "is_wolf": boolean}。本物でも偽でも同じ形式で出す。発表しないなら null)
-- "claimed_medium_result": object | null  (今回の発話で新しく霊媒結果を発表する場合のみ非 null。形式は {"target_seat": integer(1-9), "is_wolf": boolean | null}。is_wolf=null は「昨日処刑なし」)
-
-例:
-{"text": "私もそこは引っかかってた。", "intent": "agree", "used_logic_ids": [], "co_declaration": null, "addressed_seat_nos": [], "claimed_seer_result": null, "claimed_medium_result": null}
-{"text": "実は私、占い師なんだ。昨夜セツを占ったら人狼じゃなかったよ。", "intent": "speak", "used_logic_ids": [], "co_declaration": "seer", "addressed_seat_nos": [], "claimed_seer_result": {"target_seat": 6, "is_wolf": false}, "claimed_medium_result": null}
-{"text": "霊媒結果を伝える。昨日処刑されたジョナスは人狼だった。", "intent": "speak", "used_logic_ids": [], "co_declaration": "medium", "addressed_seat_nos": [], "claimed_seer_result": null, "claimed_medium_result": {"target_seat": 2, "is_wolf": true}}
-"""
+# walking the full schema in the system prompt, we append a per-call
+# contract that mirrors the keys in ``_RESPONSE_SCHEMA``.  Body lives
+# in `prompts/templates/npc/deepseek_contract_speech.md` so it can be
+# tweaked without a Python diff. Module-level constant so tests can
+# assert on substrings without instantiating AsyncOpenAI.
+_DEEPSEEK_NPC_SPEECH_CONTRACT_TEMPLATE = "npc/deepseek_contract_speech"
 
 
 @dataclass
@@ -543,7 +529,8 @@ class OpenAICompatibleConfig:
     # ``json_schema`` (default) sends ``response_format={"type":"json_schema",
     # "json_schema": _RESPONSE_SCHEMA}`` for strict structured output (xAI,
     # OpenAI). ``json_object`` falls back to ``{"type":"json_object"}`` and
-    # appends ``_DEEPSEEK_JSON_CONTRACT_SUFFIX`` to the system prompt.
+    # appends the rendered ``npc/deepseek_contract_speech`` template to
+    # the system prompt.
     mode: Literal["json_schema", "json_object"] = "json_schema"
     # DeepSeek-only knobs.  Forwarded via ``extra_body`` only when
     # ``mode == "json_object"``.
@@ -615,7 +602,7 @@ class OpenAICompatibleNpcGenerator:
             role_strategy=request.role_strategy,
         )
         if self.config.mode == "json_object":
-            system += _DEEPSEEK_JSON_CONTRACT_SUFFIX
+            system += render_template(_DEEPSEEK_NPC_SPEECH_CONTRACT_TEMPLATE)
         user = _build_user(logic, request, state)
 
         client = AsyncOpenAI(
